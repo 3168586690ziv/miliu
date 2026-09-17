@@ -8,7 +8,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// 初始地址与每次重定向都执行 URLPolicy 文本校验和 DNS 后 IP 校验。
 @interface StaticHTMLDiscoveryPageProbe : NSObject <ZZDiscoveryPageProbing, ZZDiscoveryHTMLProviding>
 
-@property (nonatomic, assign) NSUInteger maxHTMLBytes;       // 默认 2 MB
+@property (nonatomic, assign) NSUInteger maxHTMLBytes;       // 默认 8 MB（2026-09-18 由 2 MB 对齐项目其余读取路径）
 @property (nonatomic, assign) NSTimeInterval requestTimeout; // 默认 12 秒
 
 - (instancetype)initWithPolicy:(nullable URLPolicy *)policy;

@@ -431,16 +431,26 @@ static int RSRunApp(NSString *urlString) {
                RSVariants(videoRows[i]).UTF8String, RSRedactedURL(videoRows[i].mediaURL).UTF8String);
     NSUInteger filmRows = 0;
     for (DetectedMedia *m in videoRows) if (m.declaredVariants.count >= 2) filmRows++;
-    RSCheck(filmRows == 1, @"同一部影片只有一个视频选项（带画质声明的视频行 %lu，视频行合计 %lu）",
+    // 断言修正（2026-09-18）：原写法 `filmRows == 1` 隐含了「页面必须至少有一部带画质
+    // 声明的影片」，这在单画质页、直链媒体、纯图片页上都会误报 FAIL —— 直链媒体只有
+    // 一个变体（declaredVariants 为空），实测 filmRows=0。本断言的真正意图是
+    // 「同一部影片不能出现两个视频选项」，属上界约束，故改为 <= 1。
+    RSCheck(filmRows <= 1, @"同一部影片至多一个视频选项（带画质声明的视频行 %lu，视频行合计 %lu）",
             (unsigned long)filmRows, (unsigned long)videoRows.count);
 
     RSCheck(finished, @"真实网址探测在 120s 内完成（%.1fs）", probeSeconds);
     RSCheck(media.count > 0, @"真实网址探测到媒体资源（%lu）", (unsigned long)media.count);
     if (rows.count == 0) { RSSummary(); return 0; }
 
-    // 选中第一行：走生产 tableViewSelectionDidChange → configureDetailForMedia
-    [delegate.table selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
-    [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    // 选中第一行：走生产 tableViewSelectionDidChange → configureDetailForMedia。
+    // 必须反复选到真正生效为止（2026-09-18 修正）：扫描收尾会 reloadData，而 reload
+    // 会把刚设的选中清成 selectedRow=-1，导致详情流程根本没触发，探针却在上面的
+    // 等待里白等 60s 并误报「详情拿不到元数据」。实测 selectedRow=-1 后定位到此。
+    double tSelect = RSTicks();
+    for (int attempt = 0; attempt < 40 && delegate.table.selectedRow != 0; attempt++) {
+        [delegate.table selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+        [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.15]];
+    }
 
     NSUInteger pickerItems = delegate.variantPicker.numberOfItems;
     BOOL pickerVisible = !delegate.variantPicker.hidden;
@@ -455,8 +465,8 @@ static int RSRunApp(NSString *urlString) {
            (delegate.dimensionValue.stringValue ?: @"").UTF8String,
            delegate.dimensionValue.frame.origin.x, delegate.dimensionValue.frame.origin.y);
 
-    // 详情读取耗时（首行）：直到四个字段全部终态
-    double tSelect = RSTicks();
+    // 详情读取耗时（首行）：直到四个字段全部终态。tSelect 已在上方选行前取，
+    // 因此该耗时包含「选行生效 + 详情订阅 + 元数据取回」的完整用户等待。
     RSWait(^BOOL {
         RDMetadataSnapshot *s = delegate.metadataSnapshot;
         if (!s) return NO;
@@ -469,6 +479,24 @@ static int RSRunApp(NSString *urlString) {
            (delegate.sizeValue.stringValue ?: @"").UTF8String,
            (delegate.dimensionValue.stringValue ?: @"").UTF8String,
            (delegate.thumbView.image ? @"image" : @"none").UTF8String);
+
+    // 诊断（2026-09-18 新增）：上面这次等待若超时（实测曾稳定 60s），必须能区分两种
+    // 完全不同的原因 —— ① 产品详情面板真的不更新；② 探针自身的等待条件永不满足。
+    // 这里打印快照是否存在 + 四个字段各自的真实状态码。
+    // 状态码见 RDMetadataState：0=Known 1=Unknown 2=Unsupported 3=Timeout 4=Failed
+    // 5=Loading；snapshot=NONE 表示连快照都没有。
+    {
+        RDMetadataSnapshot *snapAfter = delegate.metadataSnapshot;
+        printf("RS-DETAIL-STATE snapshot=%s duration=%d size=%d dim=%d preview=%d selectedRow=%ld detailMedia=%s token=%s\n",
+               (snapAfter ? "yes" : "NONE"),
+               snapAfter ? (int)snapAfter.duration.state : -1,
+               snapAfter ? (int)snapAfter.size.state : -1,
+               snapAfter ? (int)snapAfter.dimensions.state : -1,
+               snapAfter ? (int)snapAfter.preview.state : -1,
+               (long)delegate.table.selectedRow,
+               (delegate.detailMedia ? "yes" : "NONE"),
+               (delegate.metadataToken ? "yes" : "NONE"));
+    }
 
     // 画质切换：每个档位都必须让链接与下载对象同步
     if (pickerVisible && pickerItems >= 2) {
@@ -522,12 +550,21 @@ static int RSRunApp(NSString *urlString) {
     // 缓存命中：切到第二行再切回第一行，必须同步恢复且不新增网络请求
     if (rows.count >= 2) {
         DetectedMedia *first = rows[0];
-        [delegate.table selectRowIndexes:[NSIndexSet indexSetWithIndex:1] byExtendingSelection:NO];
+        // 选行同样必须反复选到生效为止（2026-09-18 修正，与首行选中同一处缺陷）：
+        // 单次 selectRowIndexes: 会被列表 reload 清成未选中，导致「切到第二行」实际
+        // 没切换、后面的同步缓存判定必然失败 —— 那是探针没切成功，不是缓存坏了。
+        for (int attempt = 0; attempt < 40 && delegate.table.selectedRow != 1; attempt++) {
+            [delegate.table selectRowIndexes:[NSIndexSet indexSetWithIndex:1] byExtendingSelection:NO];
+            [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.15]];
+        }
         RSWait(^BOOL { return delegate.metadataSnapshot != nil; }, 30);
         [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.5]];
         NSUInteger before = transport.requests.count;
         double tBack = RSTicks();
-        [delegate.table selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+        for (int attempt = 0; attempt < 40 && delegate.table.selectedRow != 0; attempt++) {
+            [delegate.table selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+            [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.15]];
+        }
         BOOL synchronous = delegate.thumbView.image != nil
             && ![delegate.durationValue.stringValue isEqualToString:@"获取中…"];
         [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:1.0]];

@@ -96,7 +96,13 @@
                 if(!owner){ return; }
                 if(ctx.cancelled){owner.activeDynamic--;[owner pump];return;}
                 ctx.hasDynamicSlot=YES;
-                ctx.dynamic=[[WebProbe alloc]initWithPolicy:owner.policy];ctx.dynamic.hardTimeout=20;
+                // 动态腿硬超时 20s → 45s（2026-09-18）：20s 对「首屏只是 JS 壳、内容全靠
+                // 脚本渲染」的站点不够用。实测 www.360kan.com 的 HTML 仅 1749 字节、
+                // 媒体全由外部脚本加载：20s 时 0 资源并报「探测超时」，45s 时抓到 46 个
+                // 资源（列表 33.1s 出现）。失败页面的等待上限因此由 20s 变为 45s，
+                // 与项目其它路径（WebProbe 默认 30s、单页预算 15s/硬上限 20s 只针对静态
+                // 列表页）相比仍属同一量级。
+                ctx.dynamic=[[WebProbe alloc]initWithPolicy:owner.policy];ctx.dynamic.hardTimeout=45;
                 if(owner.loaderFactory)ctx.dynamic.loader=owner.loaderFactory();
                 [ctx.dynamic probeURL:url.absoluteString completion:^(RDProbeResult *result,AppError *dynamicError,NSUInteger generation){
                     dispatch_async(dispatch_get_main_queue(),^{

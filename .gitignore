@@ -43,3 +43,6 @@ secrets.json
 # AI 协作工具的本地状态与计划（不是项目源码；如需版本化可 git add -f）
 .workbuddy/
 .zcode/
+
+# 真实站点语料库（含真实域名与实测数据，不进公开仓库）
+/tests/corpus/

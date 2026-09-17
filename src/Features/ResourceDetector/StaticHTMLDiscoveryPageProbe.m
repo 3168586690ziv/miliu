@@ -16,6 +16,56 @@ static NSString *SHPEncodingNameFromContentType(NSString *contentType) {
     return m ? [contentType substringWithRange:[m rangeAtIndex:1]] : nil;
 }
 
+// ── 直链媒体 / 流清单分流（2026-09-18 新增）──
+// 背景：用户可能把「媒体文件」或「流清单」的地址直接粘进输入框。此前这类请求也
+// 一律当 HTML 解析，实测两个后果：① 超过 2MB 的视频文件被「页面内容超过 2 MB
+// 安全上限」挡掉，一个资源都探不到；② 白白把整个媒体文件下载完再当 HTML 丢弃。
+// 判定顺序：先看 HTTP MIME；只有 MIME 不明确（空 / octet-stream）时才回退看扩展名。
+// 只要 MIME 明确是 text/html，无论扩展名像不像媒体，都走原 HTML 解析路径 ——
+// 「伪装成 .mp4 的 HTML 页」不会被误判成媒体。
+static DetectedMedia *SHPDetectedMediaForDirectResponse(NSHTTPURLResponse *http, NSURL *url) {
+    if (!http || !url) return nil;
+    NSString *mime = [http.MIMEType lowercaseString] ?: @"";
+    NSString *ext = url.pathExtension.lowercaseString ?: @"";
+    BOOL mimeGeneric = (mime.length == 0
+                        || [mime isEqualToString:@"application/octet-stream"]
+                        || [mime isEqualToString:@"binary/octet-stream"]);
+    BOOL manifest = [mime containsString:@"mpegurl"]
+                 || [mime isEqualToString:@"application/dash+xml"]
+                 || (mimeGeneric && ([ext isEqualToString:@"m3u8"] || [ext isEqualToString:@"mpd"]));
+    static NSSet<NSString *> *videoExts;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        videoExts = [NSSet setWithArray:@[@"mp4",@"m4v",@"mov",@"webm",@"mkv",@"avi",
+                                          @"ts",@"m2ts",@"flv",@"ogv"]];
+    });
+    BOOL video = [mime hasPrefix:@"video/"] || (mimeGeneric && [videoExts containsObject:ext]);
+    if (!manifest && !video) return nil;
+
+    DetectedMedia *m = [DetectedMedia new];
+    m.mediaURL = url.absoluteString;
+    if (mime.length) m.mimeType = mime;
+    m.resourceKind = manifest ? RDResourceKindManifest : RDResourceKindVideo;
+    m.isManifest = manifest;
+    m.discoverySource = @"direct-url";
+    m.sourcePageURL = url.absoluteString;   // 直链本身就是来源页
+    NSString *name = url.lastPathComponent.stringByRemovingPercentEncoding ?: url.lastPathComponent;
+    m.title = name.length ? name : url.absoluteString;
+    if (manifest) {
+        BOOL dash = [ext isEqualToString:@"mpd"] || [mime isEqualToString:@"application/dash+xml"];
+        m.format = dash ? @"dash" : @"hls";
+        m.thumbnailStatus = RDThumbnailNone;
+    } else {
+        m.format = ext.length ? ext : @"mp4";
+        m.thumbnailStatus = RDThumbnailPending;
+    }
+    // 响应是 200 且 MIME 明确为媒体，可用性有据可依；该字段只参与排序，不控制显隐。
+    m.availabilityState = @"downloadable";
+    m.discoveredAt = [NSDate date].timeIntervalSince1970;
+    if (http.expectedContentLength > 0) m.sizeBytes = http.expectedContentLength;
+    return m;
+}
+
 static NSString *SHPDecodeHTML(NSData *data, NSURLResponse *response, NSString *metaSnippet) {
     NSMutableArray<NSString *> *declared = [NSMutableArray array];
     NSString *fromHeader = SHPEncodingNameFromContentType(
@@ -84,7 +134,12 @@ static NSString *SHPDecodeHTML(NSData *data, NSURLResponse *response, NSString *
         _policy=policy ?: [URLPolicy new];
         _gate=[ResourceURLGate new];
         _gate.policy=_policy;
-        _maxHTMLBytes=2*1024*1024;
+        // 上限对齐（2026-09-18）：原先这里写死 2 MB，而同一项目的另外两条网页读取路径
+        // 都是 8 MB（WebProbe.m 的 _maxHTMLBytes、ProductionDiscoveryHTMLProvider 的
+        // kHTMLMaxBytes）。三处做同一件事却两套上限属实现不一致，且实测有真实站点因此
+        // 被整页拒绝（coverr.co：HTML 约 9.7 MB，报「页面内容超过 2 MB 安全上限」、
+        // 一个资源都探不到）。这里对齐为 8 MB；超过 8 MB 的页面仍按原策略拒绝。
+        _maxHTMLBytes=8*1024*1024;
         _requestTimeout=12.0;
         _contexts=[NSMutableDictionary dictionary];
         _stateQueue=dispatch_queue_create("zz.static-html-probe.state",DISPATCH_QUEUE_SERIAL);
@@ -248,6 +303,15 @@ didReceiveResponse:(NSURLResponse *)response
                      error:[NSError errorWithDomain:ZZStaticHTMLPageProbeErrorDomain
                                               code:http.statusCode
                                           userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"HTTP %ld",(long)http.statusCode]}]];
+        return;
+    }
+    // 直链媒体/流清单：不下载正文，直接由 URL 生成一条媒体条目（见上方分流函数注释）。
+    // 用重定向之后的有效地址：直链媒体常跳转到 CDN，那个才是真正可下载的地址。
+    DetectedMedia *directMedia = SHPDetectedMediaForDirectResponse(http, http.URL ?: ctx.originalURL);
+    if (directMedia) {
+        completionHandler(NSURLSessionResponseCancel);
+        [dataTask cancel];
+        [self finishContext:ctx media:@[directMedia] error:nil];
         return;
     }
     if(response.expectedContentLength>(long long)ctx.byteLimit){
