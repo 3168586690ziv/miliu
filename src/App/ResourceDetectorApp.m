@@ -1778,12 +1778,16 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     const CGFloat marginX = 30.0;
     const CGFloat cardPadX = 16.0;
     const CGFloat topMargin = 10.0, bottomMargin = 8.0;
-    const CGFloat titleH = 22.0, titleGap = 6.0, backH = 24.0, backGap = 10.0;
-    const CGFloat groupLabelH = 13.0, groupLabelGap = 4.0, groupGap = 6.0;
+    const CGFloat titleH = 22.0, titleGap = 5.0, backH = 24.0, backGap = 8.0;
+    const CGFloat groupLabelH = 12.0, groupLabelGap = 3.0, groupGap = 6.0;
     const CGFloat versionH = 14.0, versionW = 130.0;
-    const CGFloat cardPadY = 4.0;
+    const CGFloat cardPadYBase = 3.0, cardPadYMax = 24.0;
     const CGFloat rowTitleH = 16.0, rowHintH = 13.0, rowHintGap = 3.0;
-    const CGFloat minRowH = 34.0, maxRowH = 58.0;
+    const CGFloat minRowH = 34.0, maxRowH = 64.0;
+    // 大窗口下的「防散开」硬上限：组间距最多各加 extraGapMax，剩下的富余一律
+    // 交给卡片内的上下留白（cardPadY），窗口再大也不会把卡片拉得老远。
+    // 2026-09-17 主人反馈：1680×1050 下组间距被撑到 120pt，难看 —— 就是这里没有上限导致的。
+    const CGFloat extraGapMax = 9.0;
 
     NSUInteger cardCount = self.settingsCards.count;
     NSUInteger rowCount = self.settingsRowTitles.count;
@@ -1795,18 +1799,26 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
         if (c < 16) rowsInCard[c]++;
     }
 
-    // 固定开销
+    // 固定开销（不含卡片内上下留白，那部分随后按富余量决定）
     CGFloat overhead = topMargin + titleH + titleGap + backH + backGap + versionH + bottomMargin
                      + cardCount * (groupLabelH + groupLabelGap)
                      + (cardCount > 1 ? (cardCount - 1) * groupGap : 0.0)
-                     + cardCount * 2.0 * cardPadY;
+                     + cardCount * 2.0 * cardPadYBase;
     CGFloat avail = H - overhead;
     CGFloat rowH = MIN(maxRowH, MAX(minRowH, floor(avail / (CGFloat)rowCount)));
     // 极端小窗口下若最小行高仍装不下，继续压缩：宁可行内挤一点，也绝不越界（RD-11 是硬断言）
     if (rowH * (CGFloat)rowCount > avail) rowH = MAX(24.0, floor(avail / (CGFloat)rowCount));
 
+    // 富余空间分配：① 组间距每处最多 extraGapMax ② 其余转成卡片内上下留白（有上限）
+    // ③ 仍有剩余就留白在底部，绝不再拉伸间距。
     CGFloat extra = MAX(0.0, H - (overhead + rowH * (CGFloat)rowCount));
-    CGFloat extraGap = cardCount ? extra / (cardCount * 2.0) : 0.0;
+    CGFloat extraGap = 0.0, cardPadY = cardPadYBase;
+    if (cardCount > 0) {
+        extraGap = MIN(extraGapMax, extra / (cardCount * 2.0));
+        CGFloat afterGaps = extra - extraGap * cardCount * 2.0;
+        CGFloat padExtra = MIN(cardPadYMax - cardPadYBase, MAX(0.0, afterGaps) / (cardCount * 2.0));
+        cardPadY = cardPadYBase + padExtra;
+    }
 
     CGFloat cardX = marginX, cardW = MAX(80.0, W - 2.0 * marginX);
     CGFloat titleW = MAX(60.0, MIN(420.0, cardW));
@@ -2033,7 +2045,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     self.settingsBackButton = back;
 
     // ── 卡片背景 + 分组标签：先加入，保证留在 z 序下层 ──
-    NSArray<NSString *> *groupTitles = @[@"显示选项", @"布局", @"下载", @"数据管理"];
+    NSArray<NSString *> *groupTitles = @[@"显示选项", @"布局", @"下载", @"数据管理", @"日志"];
     NSMutableArray<NSView *> *cards = [NSMutableArray arrayWithCapacity:groupTitles.count];
     NSMutableArray<NSView *> *groupLabels = [NSMutableArray arrayWithCapacity:groupTitles.count];
     for (NSString *groupTitle in groupTitles) {
@@ -2146,8 +2158,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     [choose sizeToFit];
     addRow(@"下载位置", @"选择资源下载后保存的文件夹", @[choose]);
 
-    // 卡片 3：数据管理 —— 一键清除下载记录 + 日志（第 12 轮把原来飘在顶部中间的
-    // 「打开日志 / 导出诊断」收进本卡片，成为与其它行同构的一行）
+    // 卡片 3：数据管理
     currentCard = 3;
     self.clearDownloadRecordsButton = [NSButton buttonWithTitle:@"清除" target:self action:@selector(clearDownloadRecords:)];
     self.clearDownloadRecordsButton.bordered = NO;
@@ -2159,8 +2170,12 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
                                                      NSForegroundColorAttributeName: [NSColor systemRedColor]}];
     [self.clearDownloadRecordsButton sizeToFit];
     addRow(@"一键清除下载记录", nil, @[self.clearDownloadRecordsButton]);
-    addSeparator();
 
+    // 卡片 4：日志 —— 独立成组（主人 2026-09-17 明确要求），把原来飘在页面顶部中间的
+    // 「打开日志 / 导出诊断」收成与其它行同构的一行。
+    // 高度账：5 个分组 + 6 行在最小内容区 438pt 下算出来的行高是 36pt，
+    // 行内容（标题 16 + 间隙 3 + 说明 13 = 32）装得下；见 layoutSettingsControls 注释。
+    currentCard = 4;
     NSButton *openLogsButton = [NSButton buttonWithTitle:@"打开日志" target:self action:@selector(openLogsFolder:)];
     openLogsButton.controlSize = NSControlSizeSmall;
     openLogsButton.font = [NSFont systemFontOfSize:11.5];
