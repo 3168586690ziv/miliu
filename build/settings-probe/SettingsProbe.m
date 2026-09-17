@@ -65,6 +65,42 @@ static void ProbeAudit(NSView *page, NSSize size, NSString *tag) {
     printf("  小结: 越界 %d 个 / 重叠 %d 组%s\n", bad, ov, (bad == 0 && ov == 0) ? "  → 通过" : "  → 不通过");
     gBad += bad;
     gOverlap += ov;
+
+    // 第 12 轮起表单内容位于 NSScrollView 的翻转文档视图内：只审页面子视图会漏掉全部
+    // 表单控件（它们不再是 page 的直接子视图）。这里对文档视图再跑一遍同样的审计。
+    NSView *doc = nil;
+    for (NSView *v in subs) if ([v isKindOfClass:[NSScrollView class]]) { doc = [(NSScrollView *)v documentView]; break; }
+    if (!doc) { printf("  [文档视图] 未找到（设置页未使用滚动容器）\n"); return; }
+    NSArray<NSView *> *items = doc.subviews;
+    printf("  [文档视图] flipped=%d 尺寸=%.0fx%.0f 子控件 %lu 个\n",
+           (int)[doc isFlipped], NSWidth(doc.frame), NSHeight(doc.frame), (unsigned long)items.count);
+    int dbad = 0;
+    for (NSView *v in items) {
+        NSRect f = v.frame;
+        if (NSContainsRect(doc.bounds, f)) continue;
+        dbad++;
+        printf("  OUT  文档内容越界 y=%7.2f h=%6.2f x=%7.2f w=%7.2f maxY=%7.2f  %s\n",
+               f.origin.y, f.size.height, f.origin.x, f.size.width, NSMaxY(f), ProbeName(v).UTF8String);
+    }
+    int dov = 0, dexempt = 0;
+    for (NSUInteger i = 0; i < items.count; i++) {
+        for (NSUInteger j = i + 1; j < items.count; j++) {
+            NSRect a = items[i].frame, b = items[j].frame;
+            NSRect inter = NSIntersectionRect(a, b);
+            if (NSIsEmptyRect(inter)) continue;
+            if (IsContainerBackground(items[i]) || IsContainerBackground(items[j])) { dexempt++; continue; }
+            dov++;
+            printf("  !! OVERLAP  文档内容  %s  ×  %s  → 重合 y=%.1f..%.1f x=%.1f..%.1f 面积=%.0f\n",
+                   ProbeName(items[i]).UTF8String, ProbeName(items[j]).UTF8String,
+                   NSMinY(inter), NSMaxY(inter), NSMinX(inter), NSMaxX(inter),
+                   NSWidth(inter) * NSHeight(inter));
+        }
+    }
+    printf("  [文档视图] 说明: %d 组为「卡片背景 × 其内容」的包含关系，属设计，不计为重叠\n", dexempt);
+    printf("  [文档视图] 小结: 越界 %d 个 / 重叠 %d 组%s\n", dbad, dov,
+           (dbad == 0 && dov == 0) ? "  → 通过" : "  → 不通过");
+    gBad += dbad;
+    gOverlap += dov;
 }
 
 static ResourceDetectorAppDelegate *ProbeApp(void) {

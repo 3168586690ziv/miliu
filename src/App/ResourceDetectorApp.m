@@ -31,6 +31,16 @@
 @interface RDDownloadRowView : NSTableRowView
 @end
 
+// 设置页滚动容器的文档视图。必须是 flipped：非 flipped 的文档视图在 NSScrollView
+// 里会让初始可见区域停在**底部**（AppKit 的滚动原点在左下），设置页一打开就会看到
+// 最后一项。flipped 之后 y 向下增长，内容自然从顶部开始。
+@interface RDFlippedView : NSView
+@end
+
+@implementation RDFlippedView
+- (BOOL)isFlipped { return YES; }
+@end
+
 @implementation RDDownloadRowView
 - (void)setSelected:(BOOL)selected {
     [super setSelected:selected];
@@ -178,10 +188,14 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 @property NSView *vDivider;
 @property NSView *topDivider;
 @property NSArray<NSView *> *detailContent;
-// 设置页「分组卡片」布局状态（第 12 轮改版）。
-// 重要：行标题 / 说明 / 控件仍然全部是 settingsPage 的**直接子视图** ——
+// 设置页「固定页头 + 表单区滚动」布局（第 12 轮）。
+// 页头（标题/返回）与右下角版本号固定在 settingsPage 上；
+// 表单内容进 NSScrollView 的**翻转文档视图**，间距为固定刻度、不随窗口变化。
+// 重要：行标题 / 说明 / 右侧控件仍然是**文档视图的直接子视图** ——
 // 黑盒测试（UIExperienceTests 的 RatioLabelIn）和 AX 遍历都依赖扁平结构；
 // 卡片与分隔线只是「背景装饰视图」，先加入、让它们留在 z 序下层。
+@property (nonatomic, strong) NSScrollView *settingsScrollView;
+@property (nonatomic, strong) NSView *settingsDocumentView;
 @property (nonatomic, strong) NSArray<NSView *> *settingsGroupLabels;
 @property (nonatomic, strong) NSArray<NSView *> *settingsCards;
 @property (nonatomic, strong) NSArray<NSTextField *> *settingsRowTitles;
@@ -1761,137 +1775,119 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     if (self.dimensionValue) self.dimensionValue.hidden = YES;
 }
 
-// 设置页布局：按 700pt 设计稿等比例缩放纵向位置，并把每个控件夹回页面边界内。
-// 防重叠只处理“真正水平相交”的控件对，绝不把并排的标题/开关纵向堆叠
-//（旧实现按 maxY 全局级联，会把并排控件一路压到负 y，导致文字越界）。
-// 设置页统一布局：自上而下的流式排布，行高按可用高度自适应。
-// 高度预算（最小内容区 438pt）：页头 94 + 4 组(标签 13 + 间距 4) 68 + 组间距 18
-//   + 卡片内上下留白 32 + 6 行行高 = 438 → 行高 ≈ 37pt，实测 0 越界 0 重叠。
-// 关键不变量：所有卡片、行标题、说明、控件、分隔线、版本号都是 settingsPage 的直接子视图，
-// 且全部落在页面 bounds 内（RD-11 / UIX-4 会逐个断言）。
+// 设置页布局：固定页头 + 表单区滚动（第 12 轮定案）。
+// 页头（标题/返回）与右下角版本号固定在 settingsPage 上；表单内容进滚动容器的翻转
+// 文档视图，全部间距取固定刻度，**绝不随窗口拉伸**（GitHub Primer base-8：4/8/16/24/32/40）。
+// 窗口装不下就滚动，窗口变大则把富余空间留在滚动区底部（预期效果，不去填满）。
+// 关键不变量：卡片、行标题、说明、控件、分隔线都是**文档视图的直接子视图**，且全部落在
+// 文档视图 bounds 内（RD-11 / UIX-4 逐个断言）；页面固定控件全部落在 settingsPage bounds 内。
 - (void)layoutSettingsControls {
     NSView *page = self.settingsPage;
-    if (!page || self.settingsCards.count == 0 || self.settingsRowTitles.count == 0) return;
+    if (!page || !self.settingsScrollView || !self.settingsDocumentView) return;
+    if (self.settingsCards.count == 0 || self.settingsRowTitles.count == 0) return;
     CGFloat W = NSWidth(page.bounds), H = NSHeight(page.bounds);
     if (W <= 0 || H <= 0) return;
 
-    const CGFloat marginX = 30.0;
-    const CGFloat cardPadX = 16.0;
-    const CGFloat topMargin = 10.0, bottomMargin = 8.0;
+    // ── 页面级固定刻度 ──
+    const CGFloat pagePadX = 30.0, pagePadTop = 10.0, pagePadBottom = 8.0;
     const CGFloat titleH = 22.0, titleGap = 5.0, backH = 24.0, backGap = 8.0;
-    const CGFloat groupLabelH = 12.0, groupLabelGap = 3.0, groupGap = 6.0;
-    const CGFloat versionH = 14.0, versionW = 130.0;
+    const CGFloat versionH = 14.0, versionW = 130.0, versionGap = 8.0;
+    const CGFloat maxContentW = 980.0;
+
+    // ── 内容级固定刻度（文档视图内部，flipped：y 向下）──
+    const CGFloat bodyPadTop = 8.0, bodyPadBottom = 12.0;
+    const CGFloat groupLabelH = 12.0, groupLabelGap = 3.0, groupGap = 10.0;
+    const CGFloat cardPadX = 16.0, cardPadY = 8.0;
+    const CGFloat rowH = 48.0;
     const CGFloat rowTitleH = 16.0, rowHintH = 13.0, rowHintGap = 3.0;
-    // ── 间距规律：固定刻度，绝不随窗口拉伸（GitHub Primer：base-8 刻度 4/8/16/24/32/40，
-    //    间距是常量，容器变大不会把间距撑开）。行高与卡片留白都取「舒适档」，只有窗口
-    //    小到装不下时才整体压缩；窗口再大也不会把它们撑大。──
-    // 舒适档：一行 32pt 内容（标题 16 + 间隙 3 + 说明 13）+ 上下各 6pt = 44pt
-    // 紧凑档（仅最小窗口）：36pt，内容刚好装下
-    const CGFloat minRowH = 34.0, maxRowH = 44.0;
-    const CGFloat cardPadYBase = 3.0, cardPadYMax = 8.0;
-    // 组间距的额外增量上限：也让组间距保持在「固定刻度」的量级，不做无上限拉伸
-    const CGFloat extraGapMax = 8.0;
-    // 内容列最大宽度：窗口再宽也把表单收在一条舒适的列里，避免「标题在最左、控件在最右」
-    // 那种上千点的横向空洞（Primer 的容器也有 max-width 约束）。
-    const CGFloat maxContentW = 1000.0;
+
+    // ── 内容列：宽度受 maxContentW 约束并水平居中，避免超宽窗口下
+    //    「标题在最左、控件在最右」的横向空洞。──
+    CGFloat colW = MAX(80.0, MIN(W - 2.0 * pagePadX, maxContentW));
+    CGFloat colX = floor((W - colW) / 2.0);
 
     NSUInteger cardCount = self.settingsCards.count;
     NSUInteger rowCount = self.settingsRowTitles.count;
 
-    // 每个卡片的行数
+    // ── 页头（页面坐标，y 向上）──
+    CGFloat y = H - pagePadTop;
+    NSTextField *title = self.settingsTitleLabel;
+    title.frame = NSMakeRect(colX, y - titleH, MAX(60.0, MIN(420.0, colW)), titleH);
+    y -= titleH + titleGap;
+    NSButton *back = self.settingsBackButton;
+    back.frame = NSMakeRect(colX, y - backH, 96.0, backH);
+    y -= backH + backGap;
+
+    // ── 滚动容器：夹在页头与版本号之间 ──
+    CGFloat versionTop = pagePadBottom + versionH;
+    CGFloat scrollBottom = versionTop + versionGap;
+    CGFloat scrollH = MAX(0.0, y - scrollBottom);
+    self.settingsScrollView.frame = NSMakeRect(colX, scrollBottom, colW, scrollH);
+
+    // ── 文档视图内容：顶部对齐，间距恒定 ──
+    NSView *doc = self.settingsDocumentView;
+    CGFloat labelW = MAX(60.0, colW - 2.0 * cardPadX - 200.0);   // 给右侧控件留位
+
     NSUInteger rowsInCard[16] = {0};
     for (NSNumber *idx in self.settingsRowCard) {
         NSUInteger c = idx.unsignedIntegerValue;
         if (c < 16) rowsInCard[c]++;
     }
 
-    // 固定开销（不含卡片内上下留白，那部分随后按富余量决定）
-    CGFloat overhead = topMargin + titleH + titleGap + backH + backGap + versionH + bottomMargin
-                     + cardCount * (groupLabelH + groupLabelGap)
-                     + (cardCount > 1 ? (cardCount - 1) * groupGap : 0.0)
-                     + cardCount * 2.0 * cardPadYBase;
-    CGFloat avail = H - overhead;
-    CGFloat rowH = MIN(maxRowH, MAX(minRowH, floor(avail / (CGFloat)rowCount)));
-    // 极端小窗口下若最小行高仍装不下，继续压缩：宁可行内挤一点，也绝不越界（RD-11 是硬断言）
-    if (rowH * (CGFloat)rowCount > avail) rowH = MAX(24.0, floor(avail / (CGFloat)rowCount));
-
-    // 富余空间分配：只允许把组间距与卡片留白推到「舒适档」上限，之后一律停止 ——
-    // 剩余空间就是页面留白（窗口很大时下方留白是正常的，绝不靠撑大控件去填）。
-    CGFloat extra = MAX(0.0, H - (overhead + rowH * (CGFloat)rowCount));
-    CGFloat extraGap = 0.0, cardPadY = cardPadYBase;
-    if (cardCount > 0) {
-        extraGap = MIN(extraGapMax, extra / (cardCount * 2.0));
-        CGFloat afterGaps = extra - extraGap * cardCount * 2.0;
-        CGFloat padExtra = MIN(cardPadYMax - cardPadYBase, MAX(0.0, afterGaps) / (cardCount * 2.0));
-        cardPadY = cardPadYBase + padExtra;
-    }
-
-    // 内容列：宽度受 maxContentW 约束并水平居中；窗口窄时退化为「页面内宽」。
-    CGFloat cardW = MAX(80.0, MIN(W - 2.0 * marginX, maxContentW));
-    CGFloat cardX = floor((W - cardW) / 2.0);
-    CGFloat titleW = MAX(60.0, MIN(420.0, cardW));
-    CGFloat labelW = MAX(60.0, cardW - 2.0 * cardPadX - 200.0);   // 给右侧控件留位
     NSMutableArray<NSNumber *> *slotTop = [NSMutableArray arrayWithCapacity:rowCount];
-
-    // ── 页头 ──
-    CGFloat y = H - topMargin;
-    NSTextField *title = self.settingsTitleLabel;
-    title.frame = NSMakeRect(cardX, y - titleH, titleW, titleH);
-    y -= titleH + titleGap;
-    NSButton *back = self.settingsBackButton;
-    back.frame = NSMakeRect(cardX, y - backH, 96.0, backH);
-    y -= backH + backGap;
-
-    // ── 逐卡片排布 ──
     NSUInteger rowCursor = 0;
+    CGFloat dy = bodyPadTop;
     for (NSUInteger c = 0; c < cardCount; c++) {
-        y -= extraGap;
         NSView *groupLabel = self.settingsGroupLabels[c];
-        groupLabel.frame = NSMakeRect(cardX, y - groupLabelH, MIN(240.0, cardW), groupLabelH);
-        y -= groupLabelH + groupLabelGap;
+        groupLabel.frame = NSMakeRect(0, dy, MIN(240.0, colW), groupLabelH);
+        dy += groupLabelH + groupLabelGap;
 
         CGFloat cardH = rowsInCard[c] * rowH + 2.0 * cardPadY;
-        self.settingsCards[c].frame = NSMakeRect(cardX, y - cardH, cardW, cardH);
+        self.settingsCards[c].frame = NSMakeRect(0, dy, colW, cardH);
 
-        CGFloat slot = y - cardPadY;
+        CGFloat slot = dy + cardPadY;
         for (NSUInteger r = 0; r < rowsInCard[c] && rowCursor < rowCount; r++, rowCursor++) {
             [slotTop addObject:@(slot)];
             BOOL hasHint = (self.settingsRowHints[rowCursor] != [NSNull null]);
             CGFloat contentH = rowTitleH + (hasHint ? (rowHintGap + rowHintH) : 0.0);
-            CGFloat contentTop = slot - (rowH - contentH) / 2.0;
+            CGFloat contentTop = slot + (rowH - contentH) / 2.0;
 
             NSTextField *rowTitle = self.settingsRowTitles[rowCursor];
-            rowTitle.frame = NSMakeRect(cardX + cardPadX, contentTop - rowTitleH, labelW, rowTitleH);
+            rowTitle.frame = NSMakeRect(cardPadX, contentTop, labelW, rowTitleH);
             if (hasHint) {
                 NSTextField *hint = (NSTextField *)self.settingsRowHints[rowCursor];
-                hint.frame = NSMakeRect(cardX + cardPadX, contentTop - rowTitleH - rowHintGap - rowHintH,
-                                        labelW, rowHintH);
+                hint.frame = NSMakeRect(cardPadX, contentTop + rowTitleH + rowHintGap, labelW, rowHintH);
             }
 
             // 右侧控件：从最右往左依次排，垂直居中对齐该行槽位
-            CGFloat rightEdge = cardX + cardW - cardPadX;
+            CGFloat rightEdge = colW - cardPadX;
             NSArray<NSView *> *controls = self.settingsRowControls[rowCursor];
             for (NSView *control in controls.reverseObjectEnumerator) {
                 CGFloat cw = MAX(1.0, NSWidth(control.frame));
                 CGFloat ch = MAX(1.0, NSHeight(control.frame));
-                control.frame = NSMakeRect(rightEdge - cw, slot - (rowH + ch) / 2.0, cw, ch);
+                control.frame = NSMakeRect(rightEdge - cw, slot + (rowH - ch) / 2.0, cw, ch);
                 rightEdge -= cw + 8.0;
             }
-            slot -= rowH;
+            slot += rowH;
         }
-        y -= cardH + extraGap;
+        dy += cardH;
+        if (c + 1 < cardCount) dy += groupGap;
     }
 
-    // ── 卡片内分隔线（画在指定行槽位的底部）──
+    // ── 卡片内分隔线（画在指定行槽位的底边，左右各缩进 cardPadX）──
     for (NSUInteger s = 0; s < self.settingsSeparators.count; s++) {
         NSUInteger afterRow = self.settingsSeparatorRow[s].unsignedIntegerValue;
         if (afterRow >= slotTop.count) continue;
         CGFloat slot = slotTop[afterRow].doubleValue;
-        self.settingsSeparators[s].frame = NSMakeRect(cardX + cardPadX, slot - rowH, cardW - 2.0 * cardPadX, 1.0);
+        self.settingsSeparators[s].frame = NSMakeRect(cardPadX, slot + rowH, colW - 2.0 * cardPadX, 1.0);
     }
 
-    // ── 右下角版本号（固定在底部，不随内容流动）──
-    self.settingsVersionLabel.frame = NSMakeRect(W - marginX - versionW, bottomMargin, versionW, versionH);
+    // 文档高度 = 内容高度；滚动区更高时把富余空间留在底部（顶部对齐，内容不拉伸）
+    CGFloat contentH = dy + bodyPadBottom;
+    doc.frame = NSMakeRect(0, 0, colW, MAX(contentH, scrollH));
+
+    // ── 右下角版本号（固定，不随内容滚动）──
+    self.settingsVersionLabel.frame = NSMakeRect(W - pagePadX - versionW, pagePadBottom, versionW, versionH);
 }
 
 - (NSButton *)tinyButtonWithTitle:(NSString *)title fontSize:(CGFloat)fontSize color:(NSColor *)color action:(SEL)action {
@@ -2029,11 +2025,10 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     [self layoutWorkspace];
 }
 
-// 设置页布局：标题 + 返回 + 内容过滤与布局选项
-// 设置页布局（第 12 轮改版）：标题 + 返回 + 四组「分组卡片」。
-// 高度预算是硬约束：最小内容区 760×438 必须装下全部控件（tests/Tests/RepairTests.m 的
-// RD-11 断言会遍历 settingsPage 的每个直接子视图做 NSContainsRect）。实测第 5 个分组放不下
-// （会超出约 21pt），因此「日志」作为「数据管理」卡片的第二行，而不是独立成组。
+// 设置页布局：标题 + 返回（固定页头）+ 滚动表单区 + 右下角版本号。
+// 最小内容区 760×438 不再需要「装下全部控件」——装不下就滚动，
+// 因此行高恒为 48pt、间距恒为固定刻度，不再随窗口缩放（RD-11 改为分别断言
+// 页面固定控件在页内、表单内容在文档视图内、文档视图高度至少容纳 6 行）。
 - (void)buildSettingsPage {
     NSView *page = self.settingsPage;
 
@@ -2052,6 +2047,21 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     [page addSubview:back];
     self.settingsBackButton = back;
 
+    // ── 滚动容器：夹在页头与右下角版本号之间；表单内容全部进它的翻转文档视图 ──
+    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(30, 30, 920, 360)];
+    scroll.drawsBackground = NO;
+    scroll.borderType = NSNoBorder;
+    scroll.hasVerticalScroller = YES;
+    scroll.hasHorizontalScroller = NO;
+    scroll.autohidesScrollers = YES;
+    scroll.horizontalScrollElasticity = NSScrollElasticityNone;
+    [page addSubview:scroll];
+    self.settingsScrollView = scroll;
+
+    RDFlippedView *doc = [[RDFlippedView alloc] initWithFrame:NSMakeRect(0, 0, 920, 360)];
+    scroll.documentView = doc;
+    self.settingsDocumentView = doc;
+
     // ── 卡片背景 + 分组标签：先加入，保证留在 z 序下层 ──
     NSArray<NSString *> *groupTitles = @[@"显示选项", @"布局", @"下载", @"数据管理", @"日志"];
     NSMutableArray<NSView *> *cards = [NSMutableArray arrayWithCapacity:groupTitles.count];
@@ -2067,21 +2077,21 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
         // 标识为「容器背景」：几何探针据此把「背景 × 其内容」的包含关系排除在重叠统计之外，
         // 但越界检查、以及「内容彼此之间」的重叠检查照旧执行（不放宽真实约束）。
         card.identifier = @"RDSettingsCardBackground";
-        [page addSubview:card];
+        [doc addSubview:card];
         [cards addObject:card];
 
-        NSTextField *label = [[NSTextField alloc] initWithFrame:NSMakeRect(30, 0, 240, 13)];
+        NSTextField *label = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 240, 13)];
         label.bezeled = NO; label.drawsBackground = NO; label.editable = NO; label.selectable = NO;
         label.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
         label.textColor = [NSColor secondaryLabelColor];
         label.stringValue = groupTitle;
-        [page addSubview:label];
+        [doc addSubview:label];
         [groupLabels addObject:label];
     }
     self.settingsCards = cards;
     self.settingsGroupLabels = groupLabels;
 
-    // ── 行：标题 + 可选说明 + 右侧控件，全部是 settingsPage 的直接子视图 ──
+    // ── 行：标题 + 可选说明 + 右侧控件，全部是**文档视图**的直接子视图 ──
     NSMutableArray<NSTextField *> *rowTitles = [NSMutableArray array];
     NSMutableArray *rowHints = [NSMutableArray array];      // NSTextField 或 NSNull（无说明）
     NSMutableArray<NSArray<NSView *> *> *rowControls = [NSMutableArray array];
@@ -2092,27 +2102,27 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     __block NSUInteger currentCard = 0;
     void (^addRow)(NSString *, NSString *, NSArray<NSView *> *) =
         ^(NSString *rowTitle, NSString *rowHint, NSArray<NSView *> *controls) {
-        NSTextField *l = [[NSTextField alloc] initWithFrame:NSMakeRect(46, 0, 320, 16)];
+        NSTextField *l = [[NSTextField alloc] initWithFrame:NSMakeRect(16, 0, 320, 16)];
         l.bezeled = NO; l.drawsBackground = NO; l.editable = NO; l.selectable = NO;
         l.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
         l.textColor = [NSColor labelColor];
         l.stringValue = rowTitle;
-        [page addSubview:l];
+        [doc addSubview:l];
         [rowTitles addObject:l];
 
         if (rowHint.length) {
-            NSTextField *h = [[NSTextField alloc] initWithFrame:NSMakeRect(46, 0, 460, 13)];
+            NSTextField *h = [[NSTextField alloc] initWithFrame:NSMakeRect(16, 0, 460, 13)];
             h.bezeled = NO; h.drawsBackground = NO; h.editable = NO; h.selectable = NO;
             h.font = [NSFont systemFontOfSize:11];
             h.textColor = [NSColor secondaryLabelColor];
             h.stringValue = rowHint;
-            [page addSubview:h];
+            [doc addSubview:h];
             [rowHints addObject:h];
         } else {
             [rowHints addObject:[NSNull null]];
         }
 
-        for (NSView *c in controls) [page addSubview:c];
+        for (NSView *c in controls) [doc addSubview:c];
         [rowControls addObject:controls];
         [rowCard addObject:@(currentCard)];
     };
@@ -2120,7 +2130,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
         NSBox *sep = [[NSBox alloc] initWithFrame:NSZeroRect];
         sep.boxType = NSBoxSeparator;
         sep.identifier = @"RDSettingsRowSeparator";
-        [page addSubview:sep];
+        [doc addSubview:sep];
         [separators addObject:sep];
         [separatorRow addObject:@(rowTitles.count - 1)];
     };
@@ -2181,8 +2191,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 
     // 卡片 4：日志 —— 独立成组（主人 2026-09-17 明确要求），把原来飘在页面顶部中间的
     // 「打开日志 / 导出诊断」收成与其它行同构的一行。
-    // 高度账：5 个分组 + 6 行在最小内容区 438pt 下算出来的行高是 36pt，
-    // 行内容（标题 16 + 间隙 3 + 说明 13 = 32）装得下；见 layoutSettingsControls 注释。
+    // 第 12 轮起表单区可滚动，最小窗口下「日志」会被滚出可视区，但仍在文档视图内可达。
     currentCard = 4;
     NSButton *openLogsButton = [NSButton buttonWithTitle:@"打开日志" target:self action:@selector(openLogsFolder:)];
     openLogsButton.controlSize = NSControlSizeSmall;

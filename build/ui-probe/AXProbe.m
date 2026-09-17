@@ -12,6 +12,7 @@
 //    AXProbe <app> pressid <identifier>
 //    AXProbe <app> popup-pick <label>
 //    AXProbe <app> resize <w> <h>
+//    AXProbe <app> scroll [0..1]      # 设滚动区域垂直滚动条位置（验证表单区可滚动）
 //    AXProbe <app> focus-text
 //
 #import <Foundation/Foundation.h>
@@ -121,10 +122,22 @@ static void DumpTree(AXUIElementRef e, int depth, int maxDepth) {
     if (depth > maxDepth) return;
     CGRect f = CGRectZero;
     BOOL hasFrame = ElementFrame(e, &f);
-    printf("%s%s%s\n",
+    // 滚动区域额外标注「有几个滚动条」：ui_audit 据此判断被裁剪出去的内容是否可达
+    // （没有任何滚动条的裁剪 = 内容不可达，仍按越界处理）。
+    NSMutableString *scrollInfo = [NSMutableString string];
+    if ([Attr(e, kAXRoleAttribute) isEqualToString:@"AXScrollArea"]) {
+        int v = 0, h = 0;
+        CFTypeRef sb = NULL;
+        if (AXUIElementCopyAttributeValue(e, kAXVerticalScrollBarAttribute, &sb) == kAXErrorSuccess && sb) { v = 1; CFRelease(sb); }
+        sb = NULL;
+        if (AXUIElementCopyAttributeValue(e, kAXHorizontalScrollBarAttribute, &sb) == kAXErrorSuccess && sb) { h = 1; CFRelease(sb); }
+        [scrollInfo appendFormat:@"  scrollers=v%d h%d", v, h];
+    }
+    printf("%s%s%s%s\n",
            [[@"" stringByPaddingToLength:depth * 2 withString:@" " startingAtIndex:0] UTF8String],
            Describe(e).UTF8String,
-           hasFrame ? [NSString stringWithFormat:@"  @ x=%.0f y=%.0f w=%.0f h=%.0f", f.origin.x, f.origin.y, f.size.width, f.size.height].UTF8String : "");
+           hasFrame ? [NSString stringWithFormat:@"  @ x=%.0f y=%.0f w=%.0f h=%.0f", f.origin.x, f.origin.y, f.size.width, f.size.height].UTF8String : "",
+           scrollInfo.UTF8String);
     CFTypeRef children = NULL;
     if (AXUIElementCopyAttributeValue(e, kAXChildrenAttribute, &children) == kAXErrorSuccess && children) {
         CFArrayRef arr = (CFArrayRef)children;
@@ -213,6 +226,38 @@ int main(int argc, const char *argv[]) {
             printf("AX-RESIZE 请求=%.0fx%.0f err=%d 实际=%.0fx%.0f\n", sz.width, sz.height, (int)err,
                    ok ? f.size.width : -1, ok ? f.size.height : -1);
             CFRelease(win);
+            return err == kAXErrorSuccess ? 0 : 1;
+        }
+
+        if ([cmd isEqualToString:@"scroll"]) {
+            // 用法: AXProbe <app> scroll [0..1]
+            // 读回滚动容器的 AXVerticalScrollBar 并把 AXValue 设为指定比例。
+            // 用途：验证「表单区滚动」——最小窗口下垂直滚动条存在且能滚到最底。
+            double target = argc > 3 ? atof(argv[3]) : 1.0;
+            NSMutableArray *tree = [NSMutableArray array];
+            Collect(AppRoot(pid, NO), tree, 0, 20);
+            AXUIElementRef area = NULL, bar = NULL;
+            for (id obj in tree) {
+                AXUIElementRef e = (__bridge AXUIElementRef)obj;
+                if ([Attr(e, kAXRoleAttribute) isEqualToString:@"AXScrollArea"]) {
+                    CFTypeRef v = NULL;
+                    if (AXUIElementCopyAttributeValue(e, kAXVerticalScrollBarAttribute, &v) == kAXErrorSuccess && v) {
+                        area = e; bar = (AXUIElementRef)v;
+                        break;
+                    }
+                }
+            }
+            if (!bar) { printf("AX-FAIL 未找到带垂直滚动条的滚动区域\n"); return 1; }
+            NSString *before = Attr(bar, kAXValueAttribute) ?: @"(读不到)";
+            // 滚动条的 AXValue 是裸数值：直接用 CFNumber 写回（AXValue 没有“纯 double”类型）。
+            CFNumberRef num = CFNumberCreate(NULL, kCFNumberDoubleType, &target);
+            AXError err = AXUIElementSetAttributeValue(bar, kAXValueAttribute, num);
+            CFRelease(num);
+            [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.5]];
+            printf("AX-SCROLL 目标=%.2f err=%d 前=%s 后=%s\n", target, (int)err,
+                   before.UTF8String, (Attr(bar, kAXValueAttribute) ?: @"(读不到)").UTF8String);
+            (void)area;
+            CFRelease(bar);
             return err == kAXErrorSuccess ? 0 : 1;
         }
 

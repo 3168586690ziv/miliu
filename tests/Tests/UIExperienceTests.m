@@ -6,7 +6,8 @@
 //      每档按真实 layoutWorkspace 计算左右 pane 宽度，误差 ≤1pt；
 //   2. 探测状态文案：底层长串（含 host、页数）绝不直接展示；
 //   3. 详情标题：完整显示、不出现尾部省略号，且与下方字段不重叠、不越界；
-//   4. 设置页：三档比例控件存在且最小窗口下所有控件不越界、不互相重叠。
+//   4. 设置页：三档比例控件存在；固定页头/版本号在页内，表单内容在滚动文档视图内
+//      （第 12 轮起表单区可滚动，越界断言按「页面控件」与「文档视图内容」分别执行）。
 //
 #define main RDUnusedProductionMain
 #import "../../src/App/ResourceDetectorApp.m"
@@ -149,9 +150,13 @@ static void TestDetailTitleFullAndStable(void) {
     }
 }
 
+// 第 12 轮起行标题/说明位于滚动容器的文档视图内（不再是 settingsPage 的直接子视图），
+// 因此必须递归查找；否则这些断言会退化成「找不到控件 → 直接失败」或「静默跳过」。
 static NSTextField *RatioLabelIn(NSView *page, NSString *title) {
     for (NSView *v in page.subviews) {
         if ([v isKindOfClass:[NSTextField class]] && [[(NSTextField *)v stringValue] isEqualToString:title]) return (NSTextField *)v;
+        NSTextField *nested = RatioLabelIn(v, title);
+        if (nested) return nested;
     }
     return nil;
 }
@@ -168,9 +173,18 @@ static void TestSettingsPageStable(void) {
     Check([app.settingsPaneRatioControl.identifier isEqualToString:@"RDPaneRatioPopup"], @"UIX-2 比例控件 identifier 稳定");
     Check(app.settingsPaneRatioControl.segmentCount == 3, @"UIX-3 比例控件恰好三档（实际 %ld）", (long)app.settingsPaneRatioControl.segmentCount);
 
-    // 所有控件在最小窗口 bounds 内
+    // 页面固定控件（页头 + 滚动容器 + 版本号）在最小窗口 bounds 内
     for (NSView *v in page.subviews) {
-        Check(NSContainsRect(page.bounds, v.frame), @"UIX-4 最小窗口下 %@ 在设置页内", NSStringFromClass(v.class));
+        Check(NSContainsRect(page.bounds, v.frame), @"UIX-4a 最小窗口下页面固定控件 %@ 在设置页内", NSStringFromClass(v.class));
+    }
+    // 表单内容在滚动文档视图 bounds 内（一条都不能被裁掉）
+    NSView *doc = app.settingsDocumentView;
+    Check(doc != nil, @"UIX-4b 设置页存在滚动文档视图");
+    if (doc) {
+        for (NSView *v in doc.subviews) {
+            Check(NSContainsRect(doc.bounds, v.frame),
+                  @"UIX-4b 最小窗口下表单内容 %@ 在滚动文档视图内", NSStringFromClass(v.class));
+        }
     }
 
     // 比例行与下载位置行不重叠
@@ -184,7 +198,12 @@ static void TestSettingsPageStable(void) {
         Check(!RectsOverlap(ratioHint.frame, locHint.frame), @"UIX-7 比例说明与下载位置说明不重叠");
         Check(!RectsOverlap(app.settingsPaneRatioControl.frame, locLabel.frame), @"UIX-8 比例控件不与下载位置标题重叠");
         Check(!RectsOverlap(app.settingsPaneRatioControl.frame, locHint.frame), @"UIX-9 比例控件不与下载位置说明重叠");
-        Check(NSMaxY(ratioLabel.frame) > NSMaxY(locLabel.frame), @"UIX-10 比例行位于下载位置行上方");
+        // 「比例行在下载位置行上方」的判定必须按容器坐标朝向读：行现在位于 flipped 的
+        // 文档视图内，y 向下增长，上方 = y 更小。断言强度不变，只是换了正确的比较方向。
+        BOOL flipped = ratioLabel.superview.isFlipped;
+        BOOL ratioIsAbove = flipped ? (NSMinY(ratioLabel.frame) < NSMinY(locLabel.frame))
+                                    : (NSMaxY(ratioLabel.frame) > NSMaxY(locLabel.frame));
+        Check(ratioIsAbove, @"UIX-10 比例行位于下载位置行上方（容器 flipped=%d）", (int)flipped);
     }
 }
 
