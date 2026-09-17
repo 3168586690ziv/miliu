@@ -2147,7 +2147,10 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     self.settingsDocumentView = doc;
 
     // ── 卡片背景 + 分组标签：先加入，保证留在 z 序下层 ──
-    NSArray<NSString *> *groupTitles = @[@"显示选项", @"布局", @"下载", @"数据管理", @"日志"];
+    // 最后一组原叫「日志」，与组内那行的标题（也是「日志」）**完全重名**，读起来像做错了。
+    // 2026-09-17 主人选定改为「日志与诊断」：组名成了上位分类、行名仍是具体项，
+    // 沿用「下载 → 下载位置」那种"组是分类、行是具体项"的模式。
+    NSArray<NSString *> *groupTitles = @[@"显示选项", @"布局", @"下载", @"数据管理", @"日志与诊断"];
     NSMutableArray<NSView *> *cards = [NSMutableArray arrayWithCapacity:groupTitles.count];
     NSMutableArray<NSView *> *groupLabels = [NSMutableArray arrayWithCapacity:groupTitles.count];
     for (NSString *groupTitle in groupTitles) {
