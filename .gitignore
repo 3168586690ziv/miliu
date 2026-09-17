@@ -1,0 +1,45 @@
+# 构建产物和临时文件
+/build/
+/tmp/
+/outputs/
+/work/
+dist/
+out/
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.class
+*.pyc
+__pycache__/
+
+# 日志和运行时文件
+*.log
+*.pid
+*.tmp
+*.swp
+.DS_Store
+
+# 本地环境和编辑器配置
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+
+# 密钥、证书和个人配置
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+
+# 个人机器路径配置
+.local/
+
+# AI 协作工具的本地状态与计划（不是项目源码；如需版本化可 git add -f）
+.workbuddy/
+.zcode/
