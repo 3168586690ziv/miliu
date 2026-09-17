@@ -1796,8 +1796,8 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 
     // ── 内容级固定刻度（文档视图内部，flipped：y 向下）──
     const CGFloat bodyPadTop = 8.0, bodyPadBottom = 12.0;
-    const CGFloat groupLabelH = 12.0, groupLabelGap = 3.0, groupGap = 10.0;
-    const CGFloat cardPadX = 16.0, cardPadY = 18.0;
+    const CGFloat groupLabelH = 15.0, groupLabelGap = 16.0, groupGap = 24.0;
+    const CGFloat cardPadX = 16.0, cardPadY = 0.0;
     const CGFloat rowH = 71.0;
     const CGFloat rowTitleH = 16.0, rowHintH = 13.0, rowHintGap = 3.0;
 
@@ -2082,8 +2082,8 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 
         NSTextField *label = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 240, 13)];
         label.bezeled = NO; label.drawsBackground = NO; label.editable = NO; label.selectable = NO;
-        label.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
-        label.textColor = [NSColor secondaryLabelColor];
+        label.font = [NSFont systemFontOfSize:12.5 weight:NSFontWeightMedium];
+        label.textColor = [[NSColor labelColor] colorWithAlphaComponent:0.58];
         label.stringValue = groupTitle;
         [doc addSubview:label];
         [groupLabels addObject:label];
@@ -2114,7 +2114,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
             NSTextField *h = [[NSTextField alloc] initWithFrame:NSMakeRect(16, 0, 460, 13)];
             h.bezeled = NO; h.drawsBackground = NO; h.editable = NO; h.selectable = NO;
             h.font = [NSFont systemFontOfSize:11];
-            h.textColor = [NSColor secondaryLabelColor];
+            h.textColor = [[NSColor labelColor] colorWithAlphaComponent:0.60];
             h.stringValue = rowHint;
             [doc addSubview:h];
             [rowHints addObject:h];
