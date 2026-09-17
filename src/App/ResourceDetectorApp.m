@@ -1810,25 +1810,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     NSUInteger cardCount = self.settingsCards.count;
     NSUInteger rowCount = self.settingsRowTitles.count;
 
-    // ── 页头（页面坐标，y 向上）──
-    CGFloat y = H - pagePadTop;
-    NSTextField *title = self.settingsTitleLabel;
-    title.frame = NSMakeRect(colX, y - titleH, MAX(60.0, MIN(420.0, colW)), titleH);
-    y -= titleH + titleGap;
-    NSButton *back = self.settingsBackButton;
-    back.frame = NSMakeRect(colX, y - backH, 96.0, backH);
-    y -= backH + backGap;
-
-    // ── 滚动容器：夹在页头与版本号之间 ──
-    CGFloat versionTop = pagePadBottom + versionH;
-    CGFloat scrollBottom = versionTop + versionGap;
-    CGFloat scrollH = MAX(0.0, y - scrollBottom);
-    self.settingsScrollView.frame = NSMakeRect(colX, scrollBottom, colW, scrollH);
-
-    // ── 文档视图内容：顶部对齐，间距恒定 ──
-    NSView *doc = self.settingsDocumentView;
-    CGFloat labelW = MAX(60.0, colW - 2.0 * cardPadX - 200.0);   // 给右侧控件留位
-
+    // 每个卡片的行数（算内容高度与随后排版都要用，因此放在最前面）
     NSUInteger rowsInCard[16] = {0};
     for (NSNumber *idx in self.settingsRowCard) {
         NSUInteger c = idx.unsignedIntegerValue;
@@ -1836,19 +1818,52 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     }
 
     // ── 内容真实高度只取决于分组数 / 行数与固定刻度（与窗口无关）。先算出来，
-    //    才能在滚动区更高时把富余高度上下均分；scrollH <= contentH 时 startY = 0。──
+    //    才能把「页头 + 表单」当作一个整块在版本号带以上垂直居中。──
     CGFloat contentH = bodyPadTop + bodyPadBottom;
     for (NSUInteger c = 0; c < cardCount; c++) {
         contentH += groupLabelH + groupLabelGap;
         contentH += rowsInCard[c] * rowH + 2.0 * cardPadY;
         if (c + 1 < cardCount) contentH += groupGap;
     }
+
+    // ── 整块垂直居中（2026-09-17 主人要求：页头也要跟着下沉）──
+    // 把「页头 + 表单内容」当成一个整体，在「版本号带以上」的空间里居中，
+    // 空出的高度分到 **标题上方** 与 **最后一张卡片下方** 各一半 —— 而不是全塞在
+    // 页头与表单之间。窗口不够高时 floor 值为负，退化为贴顶（topOffset = pagePadTop），
+    // 此时与「不居中」的行为完全一致。
+    CGFloat versionTop = pagePadBottom + versionH;
+    CGFloat scrollBottom = versionTop + versionGap;
+    CGFloat headerH = titleH + titleGap + backH + backGap;
+    // 参与居中的「可见整块」= 标题顶 → 最后一张卡片底 = 页头 + 文档上内边距 + 表单净高。
+    // 刻意**不**把文档下内边距 bodyPadBottom 算进去，否则下方留白会比上方多出一截。
+    CGFloat blockH = headerH + contentH - bodyPadBottom;
+    CGFloat topOffset = MAX(pagePadTop, floor((H - scrollBottom - blockH) / 2.0));
+
+    // ── 页头（页面坐标，y 向上）──
+    CGFloat y = H - topOffset;
+    NSTextField *title = self.settingsTitleLabel;
+    title.frame = NSMakeRect(colX, y - titleH, MAX(60.0, MIN(420.0, colW)), titleH);
+    y -= titleH + titleGap;
+    NSButton *back = self.settingsBackButton;
+    back.frame = NSMakeRect(colX, y - backH, 96.0, backH);
+    y -= backH + backGap;
+
+    // ── 滚动容器：页头之下、版本号带之上 ──
+    CGFloat scrollH = MAX(0.0, y - scrollBottom);
+    self.settingsScrollView.frame = NSMakeRect(colX, scrollBottom, colW, scrollH);
+
+    // ── 文档视图内容：顶部对齐，间距恒定 ──
+    NSView *doc = self.settingsDocumentView;
+    CGFloat labelW = MAX(60.0, colW - 2.0 * cardPadX - 200.0);   // 给右侧控件留位
+
+    // 文档视图高度 = MAX(内容真实高度, 滚动区高度)；内容在文档内**顶部对齐** ——
+    // 垂直居中已由上面的 topOffset 统一承担（页头与表单一起下沉），
+    // 这里不再二次居中，否则偏移会翻倍。
     CGFloat docH = MAX(contentH, scrollH);
-    CGFloat startY = MAX(0.0, (docH - contentH) / 2.0);
 
     NSMutableArray<NSNumber *> *slotTop = [NSMutableArray arrayWithCapacity:rowCount];
     NSUInteger rowCursor = 0;
-    CGFloat dy = startY + bodyPadTop;
+    CGFloat dy = bodyPadTop;
     for (NSUInteger c = 0; c < cardCount; c++) {
         NSView *groupLabel = self.settingsGroupLabels[c];
         groupLabel.frame = NSMakeRect(0, dy, MIN(240.0, colW), groupLabelH);
@@ -1861,8 +1876,10 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
         for (NSUInteger r = 0; r < rowsInCard[c] && rowCursor < rowCount; r++, rowCursor++) {
             [slotTop addObject:@(slot)];
             BOOL hasHint = (self.settingsRowHints[rowCursor] != [NSNull null]);
-            CGFloat contentH = rowTitleH + (hasHint ? (rowHintGap + rowHintH) : 0.0);
-            CGFloat contentTop = slot + (rowH - contentH) / 2.0;
+            // 单行内容高度。注意：它与外层 contentH（整个文档的总高）不是一回事，
+            // 早先同名造成遮蔽，2026-09-17 改名为 rowContentH 以免误读。
+            CGFloat rowContentH = rowTitleH + (hasHint ? (rowHintGap + rowHintH) : 0.0);
+            CGFloat contentTop = slot + (rowH - rowContentH) / 2.0;
 
             NSTextField *rowTitle = self.settingsRowTitles[rowCursor];
             rowTitle.frame = NSMakeRect(cardPadX, contentTop, labelW, rowTitleH);
@@ -1894,7 +1911,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
         self.settingsSeparators[s].frame = NSMakeRect(cardPadX, slot + rowH, colW - 2.0 * cardPadX, 1.0);
     }
 
-    // 文档高度 = MAX(内容高度, 滚动区高度)；富余高度已在 startY 中上下均分
+    // 文档高度 = MAX(内容高度, 滚动区高度)；垂直居中由 topOffset（页头整体下沉）承担
     doc.frame = NSMakeRect(0, 0, colW, docH);
 
     // ── 右下角版本号（固定，不随内容滚动）──
