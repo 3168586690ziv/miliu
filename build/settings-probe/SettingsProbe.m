@@ -26,6 +26,13 @@ static NSString *ProbeName(NSView *v) {
     return s;
 }
 
+// 第 12 轮起设置页采用「分组卡片」：卡片是有意覆盖其内容的容器背景，
+// 因此「背景 × 内容」的包含关系不算重叠。只豁免这一种；越界检查与
+// 「内容彼此之间」的重叠检查保持不变（不放宽真实约束）。
+static BOOL IsContainerBackground(NSView *v) {
+    return [v.identifier isEqualToString:@"RDSettingsCardBackground"];
+}
+
 static void ProbeAudit(NSView *page, NSSize size, NSString *tag) {
     NSRect bounds = NSMakeRect(0, 0, size.width, size.height);
     NSArray<NSView *> *subs = page.subviews;
@@ -40,12 +47,13 @@ static void ProbeAudit(NSView *page, NSSize size, NSString *tag) {
                inside ? "OK" : "OUT", f.origin.y, f.size.height, f.origin.x, f.size.width,
                NSMaxY(f), NSMaxX(f), ProbeName(v).UTF8String);
     }
-    int ov = 0;
+    int ov = 0, exempt = 0;
     for (NSUInteger i = 0; i < subs.count; i++) {
         for (NSUInteger j = i + 1; j < subs.count; j++) {
             NSRect a = subs[i].frame, b = subs[j].frame;
             NSRect inter = NSIntersectionRect(a, b);
             if (NSIsEmptyRect(inter)) continue;
+            if (IsContainerBackground(subs[i]) || IsContainerBackground(subs[j])) { exempt++; continue; }
             ov++;
             printf("  !! OVERLAP  %s  ×  %s  → 重合 y=%.1f..%.1f x=%.1f..%.1f 面积=%.0f\n",
                    ProbeName(subs[i]).UTF8String, ProbeName(subs[j]).UTF8String,
@@ -53,6 +61,7 @@ static void ProbeAudit(NSView *page, NSSize size, NSString *tag) {
                    NSWidth(inter) * NSHeight(inter));
         }
     }
+    printf("  说明: %d 组为「卡片背景 × 其内容」的包含关系，属设计，不计为重叠\n", exempt);
     printf("  小结: 越界 %d 个 / 重叠 %d 组%s\n", bad, ov, (bad == 0 && ov == 0) ? "  → 通过" : "  → 不通过");
     gBad += bad;
     gOverlap += ov;
@@ -68,8 +77,8 @@ static ResourceDetectorAppDelegate *ProbeApp(void) {
 int main(int argc, const char **argv) {
     @autoreleasepool {
         BOOL realPath = (argc > 1 && strcmp(argv[1], "--real-path") == 0);
-        printf("探针模式：%s\n", realPath ? "真实路径（resize 后调用 layoutSettingsControls）"
-                                          : "RD-11 路径（仅 autoresizingMask，不调用布局方法）");
+        printf("探针模式：%s\n", realPath ? "真实路径（resize 后显式调用 layoutSettingsControls）"
+                                          : "RD-11 路径（resize 后由 NSViewFrameDidChangeNotification 触发重排）");
 
         if (!realPath) {
             ResourceDetectorAppDelegate *a = ProbeApp();

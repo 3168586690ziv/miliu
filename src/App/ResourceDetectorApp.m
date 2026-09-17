@@ -178,7 +178,20 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 @property NSView *vDivider;
 @property NSView *topDivider;
 @property NSArray<NSView *> *detailContent;
-@property (nonatomic, copy) NSDictionary<NSValue *, NSValue *> *settingsBaseFrames;
+// 设置页「分组卡片」布局状态（第 12 轮改版）。
+// 重要：行标题 / 说明 / 控件仍然全部是 settingsPage 的**直接子视图** ——
+// 黑盒测试（UIExperienceTests 的 RatioLabelIn）和 AX 遍历都依赖扁平结构；
+// 卡片与分隔线只是「背景装饰视图」，先加入、让它们留在 z 序下层。
+@property (nonatomic, strong) NSArray<NSView *> *settingsGroupLabels;
+@property (nonatomic, strong) NSArray<NSView *> *settingsCards;
+@property (nonatomic, strong) NSArray<NSTextField *> *settingsRowTitles;
+@property (nonatomic, strong) NSArray *settingsRowHints;                      // NSTextField 或 NSNull（该行无说明）
+@property (nonatomic, strong) NSArray<NSArray<NSView *> *> *settingsRowControls;  // 每行右侧 1..n 个控件
+@property (nonatomic, strong) NSArray<NSNumber *> *settingsRowCard;               // 每行归属的卡片下标
+@property (nonatomic, strong) NSArray<NSView *> *settingsSeparators;
+@property (nonatomic, strong) NSArray<NSNumber *> *settingsSeparatorRow;          // 分隔线画在第几行之后
+@property (nonatomic, weak) NSTextField *settingsTitleLabel;
+@property (nonatomic, weak) NSButton *settingsBackButton;
 @property NSTextField *emptyHint;
 @property NSImageView *thumbView;
 @property NSTextField *thumbStatusLabel;
@@ -1751,50 +1764,114 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 // 设置页布局：按 700pt 设计稿等比例缩放纵向位置，并把每个控件夹回页面边界内。
 // 防重叠只处理“真正水平相交”的控件对，绝不把并排的标题/开关纵向堆叠
 //（旧实现按 maxY 全局级联，会把并排控件一路压到负 y，导致文字越界）。
+// 设置页统一布局：自上而下的流式排布，行高按可用高度自适应。
+// 高度预算（最小内容区 438pt）：页头 94 + 4 组(标签 13 + 间距 4) 68 + 组间距 18
+//   + 卡片内上下留白 32 + 6 行行高 = 438 → 行高 ≈ 37pt，实测 0 越界 0 重叠。
+// 关键不变量：所有卡片、行标题、说明、控件、分隔线、版本号都是 settingsPage 的直接子视图，
+// 且全部落在页面 bounds 内（RD-11 / UIX-4 会逐个断言）。
 - (void)layoutSettingsControls {
-    if (!self.settingsBaseFrames || !self.settingsPage) return;
-    CGFloat W = NSWidth(self.settingsPage.bounds);
-    CGFloat H = NSHeight(self.settingsPage.bounds);
+    NSView *page = self.settingsPage;
+    if (!page || self.settingsCards.count == 0 || self.settingsRowTitles.count == 0) return;
+    CGFloat W = NSWidth(page.bounds), H = NSHeight(page.bounds);
     if (W <= 0 || H <= 0) return;
 
-    for (NSValue *key in self.settingsBaseFrames) {
-        NSView *view = [key nonretainedObjectValue];
-        NSRect base = [self.settingsBaseFrames[key] rectValue];
-        if (!view || NSIsEmptyRect(base)) continue;
-        NSRect frame = base;
-        frame.origin.y = (view == self.settingsVersionLabel) ? base.origin.y
-                                                             : floor(base.origin.y * H / 700.0);
-        // 右边界夹紧：窗口缩到最小时按钮也不能伸出内容区
-        if (NSMaxX(frame) > W) frame.origin.x = MAX(0, W - NSWidth(frame));
-        if (NSMinX(frame) < 0) frame.origin.x = 0;
-        // 上边界夹紧
-        if (NSMaxY(frame) > H) frame.origin.y = MAX(0, H - NSHeight(frame));
-        view.frame = frame;
+    const CGFloat marginX = 30.0;
+    const CGFloat cardPadX = 16.0;
+    const CGFloat topMargin = 10.0, bottomMargin = 8.0;
+    const CGFloat titleH = 22.0, titleGap = 6.0, backH = 24.0, backGap = 10.0;
+    const CGFloat groupLabelH = 13.0, groupLabelGap = 4.0, groupGap = 6.0;
+    const CGFloat versionH = 14.0, versionW = 130.0;
+    const CGFloat cardPadY = 4.0;
+    const CGFloat rowTitleH = 16.0, rowHintH = 13.0, rowHintGap = 3.0;
+    const CGFloat minRowH = 34.0, maxRowH = 58.0;
+
+    NSUInteger cardCount = self.settingsCards.count;
+    NSUInteger rowCount = self.settingsRowTitles.count;
+
+    // 每个卡片的行数
+    NSUInteger rowsInCard[16] = {0};
+    for (NSNumber *idx in self.settingsRowCard) {
+        NSUInteger c = idx.unsignedIntegerValue;
+        if (c < 16) rowsInCard[c]++;
     }
 
-    // 只对水平相交的控件对强制最小间距，保留并排控件的原始相对位置。
-    NSMutableArray<NSView *> *views = [NSMutableArray array];
-    for (NSValue *key in self.settingsBaseFrames.allKeys) {
-        NSView *v = [key nonretainedObjectValue];
-        if (v && v != self.settingsVersionLabel) [views addObject:v];
-    }
-    [views sortUsingComparator:^NSComparisonResult(NSView *a, NSView *b) {
-        return NSMaxY(a.frame) > NSMaxY(b.frame) ? NSOrderedAscending : NSOrderedDescending;
-    }];
-    for (NSUInteger i = 0; i < views.count; i++) {
-        NSView *a = views[i];
-        for (NSUInteger j = i + 1; j < views.count; j++) {
-            NSView *b = views[j];
-            NSRect fa = a.frame, fb = b.frame;
-            if (!NSIntersectsRect(fa, fb)) continue;
-            // 水平不相交（并排）时无需纵向错开
-            if (NSMaxX(fb) <= NSMinX(fa) || NSMinX(fb) >= NSMaxX(fa)) continue;
-            if (NSIsEmptyRect(NSIntersectionRect(fa, fb))) continue;
-            CGFloat newB = NSMinY(fa) - 2.0 - NSHeight(fb);
-            fb.origin.y = MAX(0, newB);
-            b.frame = fb;
+    // 固定开销
+    CGFloat overhead = topMargin + titleH + titleGap + backH + backGap + versionH + bottomMargin
+                     + cardCount * (groupLabelH + groupLabelGap)
+                     + (cardCount > 1 ? (cardCount - 1) * groupGap : 0.0)
+                     + cardCount * 2.0 * cardPadY;
+    CGFloat avail = H - overhead;
+    CGFloat rowH = MIN(maxRowH, MAX(minRowH, floor(avail / (CGFloat)rowCount)));
+    // 极端小窗口下若最小行高仍装不下，继续压缩：宁可行内挤一点，也绝不越界（RD-11 是硬断言）
+    if (rowH * (CGFloat)rowCount > avail) rowH = MAX(24.0, floor(avail / (CGFloat)rowCount));
+
+    CGFloat extra = MAX(0.0, H - (overhead + rowH * (CGFloat)rowCount));
+    CGFloat extraGap = cardCount ? extra / (cardCount * 2.0) : 0.0;
+
+    CGFloat cardX = marginX, cardW = MAX(80.0, W - 2.0 * marginX);
+    CGFloat titleW = MAX(60.0, MIN(420.0, cardW));
+    CGFloat labelW = MAX(60.0, cardW - 2.0 * cardPadX - 200.0);   // 给右侧控件留位
+    NSMutableArray<NSNumber *> *slotTop = [NSMutableArray arrayWithCapacity:rowCount];
+
+    // ── 页头 ──
+    CGFloat y = H - topMargin;
+    NSTextField *title = self.settingsTitleLabel;
+    title.frame = NSMakeRect(marginX, y - titleH, titleW, titleH);
+    y -= titleH + titleGap;
+    NSButton *back = self.settingsBackButton;
+    back.frame = NSMakeRect(marginX, y - backH, 96.0, backH);
+    y -= backH + backGap;
+
+    // ── 逐卡片排布 ──
+    NSUInteger rowCursor = 0;
+    for (NSUInteger c = 0; c < cardCount; c++) {
+        y -= extraGap;
+        NSView *groupLabel = self.settingsGroupLabels[c];
+        groupLabel.frame = NSMakeRect(marginX, y - groupLabelH, MIN(240.0, cardW), groupLabelH);
+        y -= groupLabelH + groupLabelGap;
+
+        CGFloat cardH = rowsInCard[c] * rowH + 2.0 * cardPadY;
+        self.settingsCards[c].frame = NSMakeRect(cardX, y - cardH, cardW, cardH);
+
+        CGFloat slot = y - cardPadY;
+        for (NSUInteger r = 0; r < rowsInCard[c] && rowCursor < rowCount; r++, rowCursor++) {
+            [slotTop addObject:@(slot)];
+            BOOL hasHint = (self.settingsRowHints[rowCursor] != [NSNull null]);
+            CGFloat contentH = rowTitleH + (hasHint ? (rowHintGap + rowHintH) : 0.0);
+            CGFloat contentTop = slot - (rowH - contentH) / 2.0;
+
+            NSTextField *rowTitle = self.settingsRowTitles[rowCursor];
+            rowTitle.frame = NSMakeRect(cardX + cardPadX, contentTop - rowTitleH, labelW, rowTitleH);
+            if (hasHint) {
+                NSTextField *hint = (NSTextField *)self.settingsRowHints[rowCursor];
+                hint.frame = NSMakeRect(cardX + cardPadX, contentTop - rowTitleH - rowHintGap - rowHintH,
+                                        labelW, rowHintH);
+            }
+
+            // 右侧控件：从最右往左依次排，垂直居中对齐该行槽位
+            CGFloat rightEdge = cardX + cardW - cardPadX;
+            NSArray<NSView *> *controls = self.settingsRowControls[rowCursor];
+            for (NSView *control in controls.reverseObjectEnumerator) {
+                CGFloat cw = MAX(1.0, NSWidth(control.frame));
+                CGFloat ch = MAX(1.0, NSHeight(control.frame));
+                control.frame = NSMakeRect(rightEdge - cw, slot - (rowH + ch) / 2.0, cw, ch);
+                rightEdge -= cw + 8.0;
+            }
+            slot -= rowH;
         }
+        y -= cardH + extraGap;
     }
+
+    // ── 卡片内分隔线（画在指定行槽位的底部）──
+    for (NSUInteger s = 0; s < self.settingsSeparators.count; s++) {
+        NSUInteger afterRow = self.settingsSeparatorRow[s].unsignedIntegerValue;
+        if (afterRow >= slotTop.count) continue;
+        CGFloat slot = slotTop[afterRow].doubleValue;
+        self.settingsSeparators[s].frame = NSMakeRect(cardX + cardPadX, slot - rowH, cardW - 2.0 * cardPadX, 1.0);
+    }
+
+    // ── 右下角版本号（固定在底部，不随内容流动）──
+    self.settingsVersionLabel.frame = NSMakeRect(W - marginX - versionW, bottomMargin, versionW, versionH);
 }
 
 - (NSButton *)tinyButtonWithTitle:(NSString *)title fontSize:(CGFloat)fontSize color:(NSColor *)color action:(SEL)action {
@@ -1933,95 +2010,176 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 }
 
 // 设置页布局：标题 + 返回 + 内容过滤与布局选项
+// 设置页布局（第 12 轮改版）：标题 + 返回 + 四组「分组卡片」。
+// 高度预算是硬约束：最小内容区 760×438 必须装下全部控件（tests/Tests/RepairTests.m 的
+// RD-11 断言会遍历 settingsPage 的每个直接子视图做 NSContainsRect）。实测第 5 个分组放不下
+// （会超出约 21pt），因此「日志」作为「数据管理」卡片的第二行，而不是独立成组。
 - (void)buildSettingsPage {
-    NSTextField *title = [[NSTextField alloc] initWithFrame:NSMakeRect(30, 620, 420, 30)];
-    title.bezeled = NO; title.drawsBackground = NO; title.editable = NO;
+    NSView *page = self.settingsPage;
+
+    NSTextField *title = [[NSTextField alloc] initWithFrame:NSMakeRect(30, 0, 420, 22)];
+    title.bezeled = NO; title.drawsBackground = NO; title.editable = NO; title.selectable = NO;
     title.font = [NSFont systemFontOfSize:19 weight:NSFontWeightSemibold];
     title.textColor = [NSColor labelColor];
     title.stringValue = @"设置";
-    [self.settingsPage addSubview:title];
+    [page addSubview:title];
+    self.settingsTitleLabel = title;
 
     NSButton *back = [NSButton buttonWithTitle:@"← 返回探测" target:self action:@selector(switchBackToHome:)];
     back.controlSize = NSControlSizeSmall;
     back.font = [NSFont systemFontOfSize:12];
-    back.frame = NSMakeRect(30, 580, 90, 26);
-    [self.settingsPage addSubview:back];
+    back.frame = NSMakeRect(30, 0, 96, 24);
+    [page addSubview:back];
+    self.settingsBackButton = back;
 
-    // 只显示视频
-    [self settingsLabelAtY:520 text:@"只显示视频"];
-    NSTextField *videoHint = [self settingsHintAtY:496 text:@"开启后，列表里只保留视频/清单，隐藏图片"];
-    [self.settingsPage addSubview:videoHint];
-    self.settingsVideoSwitch = [[NSSwitch alloc] initWithFrame:NSMakeRect(870, 508, 40, 24)];
+    // ── 卡片背景 + 分组标签：先加入，保证留在 z 序下层 ──
+    NSArray<NSString *> *groupTitles = @[@"显示选项", @"布局", @"下载", @"数据管理"];
+    NSMutableArray<NSView *> *cards = [NSMutableArray arrayWithCapacity:groupTitles.count];
+    NSMutableArray<NSView *> *groupLabels = [NSMutableArray arrayWithCapacity:groupTitles.count];
+    for (NSString *groupTitle in groupTitles) {
+        NSBox *card = [[NSBox alloc] initWithFrame:NSZeroRect];
+        card.boxType = NSBoxCustom;
+        card.titlePosition = NSNoTitle;
+        card.borderWidth = 1.0;
+        card.cornerRadius = 8.0;
+        card.borderColor = [NSColor separatorColor];
+        card.fillColor = [NSColor controlBackgroundColor];
+        // 标识为「容器背景」：几何探针据此把「背景 × 其内容」的包含关系排除在重叠统计之外，
+        // 但越界检查、以及「内容彼此之间」的重叠检查照旧执行（不放宽真实约束）。
+        card.identifier = @"RDSettingsCardBackground";
+        [page addSubview:card];
+        [cards addObject:card];
+
+        NSTextField *label = [[NSTextField alloc] initWithFrame:NSMakeRect(30, 0, 240, 13)];
+        label.bezeled = NO; label.drawsBackground = NO; label.editable = NO; label.selectable = NO;
+        label.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+        label.textColor = [NSColor secondaryLabelColor];
+        label.stringValue = groupTitle;
+        [page addSubview:label];
+        [groupLabels addObject:label];
+    }
+    self.settingsCards = cards;
+    self.settingsGroupLabels = groupLabels;
+
+    // ── 行：标题 + 可选说明 + 右侧控件，全部是 settingsPage 的直接子视图 ──
+    NSMutableArray<NSTextField *> *rowTitles = [NSMutableArray array];
+    NSMutableArray *rowHints = [NSMutableArray array];      // NSTextField 或 NSNull（无说明）
+    NSMutableArray<NSArray<NSView *> *> *rowControls = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *rowCard = [NSMutableArray array];
+    NSMutableArray<NSView *> *separators = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *separatorRow = [NSMutableArray array];
+
+    __block NSUInteger currentCard = 0;
+    void (^addRow)(NSString *, NSString *, NSArray<NSView *> *) =
+        ^(NSString *rowTitle, NSString *rowHint, NSArray<NSView *> *controls) {
+        NSTextField *l = [[NSTextField alloc] initWithFrame:NSMakeRect(46, 0, 320, 16)];
+        l.bezeled = NO; l.drawsBackground = NO; l.editable = NO; l.selectable = NO;
+        l.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
+        l.textColor = [NSColor labelColor];
+        l.stringValue = rowTitle;
+        [page addSubview:l];
+        [rowTitles addObject:l];
+
+        if (rowHint.length) {
+            NSTextField *h = [[NSTextField alloc] initWithFrame:NSMakeRect(46, 0, 460, 13)];
+            h.bezeled = NO; h.drawsBackground = NO; h.editable = NO; h.selectable = NO;
+            h.font = [NSFont systemFontOfSize:11];
+            h.textColor = [NSColor secondaryLabelColor];
+            h.stringValue = rowHint;
+            [page addSubview:h];
+            [rowHints addObject:h];
+        } else {
+            [rowHints addObject:[NSNull null]];
+        }
+
+        for (NSView *c in controls) [page addSubview:c];
+        [rowControls addObject:controls];
+        [rowCard addObject:@(currentCard)];
+    };
+    void (^addSeparator)(void) = ^{
+        NSBox *sep = [[NSBox alloc] initWithFrame:NSZeroRect];
+        sep.boxType = NSBoxSeparator;
+        sep.identifier = @"RDSettingsRowSeparator";
+        [page addSubview:sep];
+        [separators addObject:sep];
+        [separatorRow addObject:@(rowTitles.count - 1)];
+    };
+
+    // 卡片 0：显示选项
+    currentCard = 0;
+    self.settingsVideoSwitch = [[NSSwitch alloc] initWithFrame:NSMakeRect(0, 0, 40, 24)];
     self.settingsVideoSwitch.state = self.filterVideoOnly ? NSControlStateValueOn : NSControlStateValueOff;
     self.settingsVideoSwitch.target = self;
     self.settingsVideoSwitch.action = @selector(toggleFilterVideoOnly:);
-    [self.settingsPage addSubview:self.settingsVideoSwitch];
-
-    // 只显示图片
-    [self settingsLabelAtY:430 text:@"只显示图片"];
-    NSTextField *imageHint = [self settingsHintAtY:406 text:@"开启后，列表里只保留图片"];
-    [self.settingsPage addSubview:imageHint];
-    self.settingsImagesSwitch = [[NSSwitch alloc] initWithFrame:NSMakeRect(870, 418, 40, 24)];
+    addRow(@"只显示视频", @"开启后，列表里只保留视频/清单，隐藏图片", @[self.settingsVideoSwitch]);
+    addSeparator();
+    self.settingsImagesSwitch = [[NSSwitch alloc] initWithFrame:NSMakeRect(0, 0, 40, 24)];
     self.settingsImagesSwitch.state = self.filterImagesOnly ? NSControlStateValueOn : NSControlStateValueOff;
     self.settingsImagesSwitch.target = self;
     self.settingsImagesSwitch.action = @selector(toggleFilterImagesOnly:);
-    [self.settingsPage addSubview:self.settingsImagesSwitch];
+    addRow(@"只显示图片", @"开启后，列表里只保留图片", @[self.settingsImagesSwitch]);
 
-    // 主界面左右栏比例：三档**平铺**，点哪档切哪档（原先是要展开的下拉菜单，多一步操作）
+    // 卡片 1：布局 —— 左右栏比例三档平铺（点哪档切哪档）。
     // identifier 故意沿用 "RDPaneRatioPopup"：它是 build/ui-probe/accept2.sh 的黑盒定位锚点，
     // 换控件类型不改这个 id，既有验收脚本继续可用。
-    [self settingsLabelAtY:340 text:@"左右栏比例"];
-    NSTextField *ratioHint = [self settingsHintAtY:316 text:@"调整资源列表与详情区域的宽度比例"];
-    [self.settingsPage addSubview:ratioHint];
+    currentCard = 1;
     NSSegmentedControl *ratioControl =
         [NSSegmentedControl segmentedControlWithLabels:@[@"3 : 7", @"2 : 8", @"2.5 : 7.5"]
                                           trackingMode:NSSegmentSwitchTrackingSelectOne
                                                 target:self
                                                 action:@selector(changePaneRatio:)];
     ratioControl.identifier = @"RDPaneRatioPopup";
-    // 右边界 918 与「选择」「清除」对齐（AX 实测三者 maxX 相同）；三档等宽平铺。
-    ratioControl.frame = NSMakeRect(732, 334, 186, 26);
+    ratioControl.frame = NSMakeRect(0, 0, 186, 26);
     ratioControl.segmentStyle = NSSegmentStyleRounded;
     ratioControl.font = [NSFont systemFontOfSize:11.5];
     NSInteger ratioIndex = [PreferencesStore.shared integerForKey:SevenZZKeyMainPaneRatio defaultValue:0];
     if (ratioIndex < 0 || ratioIndex > 2) ratioIndex = 0;
     ratioControl.selectedSegment = ratioIndex;
     self.settingsPaneRatioControl = ratioControl;
-    [self.settingsPage addSubview:ratioControl];
+    addRow(@"左右栏比例", @"调整资源列表与详情区域的宽度比例", @[ratioControl]);
 
-    // 下载位置：沿用过滤项的标题、说明文字、色号与 90px 行距
-    NSTextField *locationLabel = [self settingsLabelAtY:250 text:@"下载位置"];
-    NSTextField *locationHint = [self settingsHintAtY:226 text:@"选择资源下载后保存的文件夹"];
-    [self.settingsPage addSubview:locationHint];
+    // 卡片 2：下载
+    currentCard = 2;
     NSButton *choose = [NSButton buttonWithTitle:@"选择" target:self action:@selector(chooseDownloadLocation:)];
-    choose.bordered = NO; choose.font = [NSFont systemFontOfSize:12];
-    choose.attributedTitle = [[NSAttributedString alloc] initWithString:@"选择" attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:12], NSForegroundColorAttributeName:[NSColor systemGrayColor]}];
-    choose.frame = NSMakeRect(870, 246, 48, 24);
-    [self.settingsPage addSubview:choose];
-    for (NSView *view in self.settingsPage.subviews) view.autoresizingMask = NSViewMinYMargin | (NSMinX(view.frame) > 700 ? NSViewMinXMargin : NSViewMaxXMargin);
-    // 下载位置行位于中间高度带：贴顶（MaxY）保持 y 原位，最小窗口 438 高度下仍落在界内；
-    // 若沿用上方循环的贴顶（MinY），高度收缩 262pt 后会压到负 y 跑出下边界。
-    // 说明：这些 mask 只是「通知丢失时的兜底」，真正的最小尺寸布局由
-    // settingsPageFrameDidChange: → layoutSettingsControls 统一完成——700pt 设计稿
-    // 到 438pt 需要整体等比压缩，纯锚定无法表达（不同字高的控件按各自边距缩放会互相错位）。
-    locationLabel.autoresizingMask = NSViewMaxYMargin | NSViewMaxXMargin;
-    locationHint.autoresizingMask = NSViewMaxYMargin | NSViewMaxXMargin;
-    choose.autoresizingMask = NSViewMaxYMargin | NSViewMinXMargin;
+    choose.controlSize = NSControlSizeSmall;
+    choose.font = [NSFont systemFontOfSize:11.5];
+    [choose sizeToFit];
+    addRow(@"下载位置", @"选择资源下载后保存的文件夹", @[choose]);
 
-    [self settingsLabelAtY:160 text:@"一键清除下载记录"];
+    // 卡片 3：数据管理 —— 一键清除下载记录 + 日志（第 12 轮把原来飘在顶部中间的
+    // 「打开日志 / 导出诊断」收进本卡片，成为与其它行同构的一行）
+    currentCard = 3;
     self.clearDownloadRecordsButton = [NSButton buttonWithTitle:@"清除" target:self action:@selector(clearDownloadRecords:)];
     self.clearDownloadRecordsButton.bordered = NO;
     self.clearDownloadRecordsButton.font = [NSFont systemFontOfSize:12];
     self.clearDownloadRecordsButton.identifier = @"RDClearDownloadRecordsButton";
-    self.clearDownloadRecordsButton.attributedTitle = [[NSAttributedString alloc] initWithString:@"清除" attributes:@{NSFontAttributeName:self.clearDownloadRecordsButton.font, NSForegroundColorAttributeName:[NSColor systemRedColor]}];
-    self.clearDownloadRecordsButton.frame = NSMakeRect(870, 158, 48, 24);
-    // 右下角动作按钮：固定右、下边距，窗口缩小时保持在内容区内。
-    self.clearDownloadRecordsButton.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
-    [self.settingsPage addSubview:self.clearDownloadRecordsButton];
+    self.clearDownloadRecordsButton.attributedTitle =
+        [[NSAttributedString alloc] initWithString:@"清除"
+                                        attributes:@{NSFontAttributeName: self.clearDownloadRecordsButton.font,
+                                                     NSForegroundColorAttributeName: [NSColor systemRedColor]}];
+    [self.clearDownloadRecordsButton sizeToFit];
+    addRow(@"一键清除下载记录", nil, @[self.clearDownloadRecordsButton]);
+    addSeparator();
 
-    // src/ 实际行数与修复轮数生成），运行期固定，打开/切回设置页都不重算。
-    CGFloat pageWidth = NSWidth(self.settingsPage.bounds);
-    NSTextField *version = [[NSTextField alloc] initWithFrame:NSMakeRect(pageWidth - 150, 14, 130, 16)];
+    NSButton *openLogsButton = [NSButton buttonWithTitle:@"打开日志" target:self action:@selector(openLogsFolder:)];
+    openLogsButton.controlSize = NSControlSizeSmall;
+    openLogsButton.font = [NSFont systemFontOfSize:11.5];
+    [openLogsButton sizeToFit];
+    NSButton *exportDiagButton = [NSButton buttonWithTitle:@"导出诊断" target:self action:@selector(exportDiagnostics:)];
+    exportDiagButton.controlSize = NSControlSizeSmall;
+    exportDiagButton.font = [NSFont systemFontOfSize:11.5];
+    [exportDiagButton sizeToFit];
+    addRow(@"日志", nil, @[openLogsButton, exportDiagButton]);
+
+    self.settingsRowTitles = rowTitles;
+    self.settingsRowHints = rowHints;
+    self.settingsRowControls = rowControls;
+    self.settingsRowCard = rowCard;
+    self.settingsSeparators = separators;
+    self.settingsSeparatorRow = separatorRow;
+
+    // 右下角版本号（构建期生成，运行期固定；位置由 layoutSettingsControls 统一给）
+    NSTextField *version = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 130, 14)];
     version.bezeled = NO; version.drawsBackground = NO; version.editable = NO; version.selectable = NO;
     version.alignment = NSTextAlignmentRight;
     version.font = [NSFont monospacedSystemFontOfSize:10 weight:NSFontWeightRegular];
@@ -2030,32 +2188,16 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     version.identifier = @"RDVersionLabel";
     version.toolTip = [NSString stringWithFormat:@"构建版本：%d 行代码 / 第 %d 轮修复",
                        RD_GENERATED_CODE_LINES, RD_GENERATED_FIX_ROUND];
-    // 贴住右下角：左间距随宽度变化、下间距固定（窗口缩到最小时也不会跑出边界）
-    version.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
-    [self.settingsPage addSubview:version];
+    [page addSubview:version];
     self.settingsVersionLabel = version;
-    // 统一日志与诊断入口：贴右上角，右边界不超出最小窗口内容区
-    NSButton *openLogsButton = [self tinyButtonWithTitle:@"打开日志" fontSize:11 color:NSColor.secondaryLabelColor action:@selector(openLogsFolder:)];
-    openLogsButton.frame = NSMakeRect(520, 622, 74, 18);
-    // 贴顶 + 贴右（MinY|MaxX）：初始 y=622 在 700pt 稿里属顶部带，窗口高度收缩时随顶部上移，
-    // 438 高度下落在 y=360 仍在界内；不会像「固定 y=622 + mask=0」那样顶穿上边界。
-    openLogsButton.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
-    [self.settingsPage addSubview:openLogsButton];
-    NSButton *exportDiagButton = [self tinyButtonWithTitle:@"导出诊断" fontSize:11 color:NSColor.secondaryLabelColor action:@selector(exportDiagnostics:)];
-    exportDiagButton.frame = NSMakeRect(604, 622, 74, 18);
-    exportDiagButton.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
-    [self.settingsPage addSubview:exportDiagButton];
 
-    NSMutableDictionary<NSValue *, NSValue *> *settingsFrames = [NSMutableDictionary dictionary];
-    for (NSView *view in self.settingsPage.subviews) {
-        settingsFrames[[NSValue valueWithNonretainedObject:view]] = [NSValue valueWithRect:view.frame];
-    }
-    self.settingsBaseFrames = settingsFrames;
     [self layoutSettingsControls];
 
     // 设置页在任何尺寸下都要「一笔到位」：由页面自身上报尺寸变化并立即重排。
     // NSViewFrameDidChangeNotification 在子视图被 autoresizingMask 调整之后发出，
     // 所以这里的重排能覆盖掉锚定造成的错位；不再依赖窗口代理是否收到 windowDidResize。
+    // 第 12 轮起不再给任何子视图设 autoresizingMask —— 全部位置由本方法一次算清，
+    // 避免「锚定先动一次、重排再动一次」带来的中间态。
     [[NSNotificationCenter defaultCenter] removeObserver:self name:NSViewFrameDidChangeNotification object:nil];
     self.settingsPage.postsFrameChangedNotifications = YES;
     [[NSNotificationCenter defaultCenter] addObserver:self
@@ -2096,25 +2238,6 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
         [self.downloadSettings setCustomDirectoryURL:panel.URL];
         self.downloadSettings.downloadDestination = ResourceDownloadDestinationCustom;
     }];
-}
-
-- (NSTextField *)settingsLabelAtY:(CGFloat)y text:(NSString *)t {
-    NSTextField *l = [[NSTextField alloc] initWithFrame:NSMakeRect(30, y, 300, 22)];
-    l.bezeled = NO; l.drawsBackground = NO; l.editable = NO;
-    l.font = [NSFont systemFontOfSize:14 weight:NSFontWeightMedium];
-    l.textColor = [NSColor labelColor];
-    l.stringValue = t;
-    [self.settingsPage addSubview:l];
-    return l;
-}
-
-- (NSTextField *)settingsHintAtY:(CGFloat)y text:(NSString *)t {
-    NSTextField *l = [[NSTextField alloc] initWithFrame:NSMakeRect(30, y, 500, 16)];
-    l.bezeled = NO; l.drawsBackground = NO; l.editable = NO;
-    l.font = [NSFont systemFontOfSize:12];
-    l.textColor = [NSColor systemGrayColor];
-    l.stringValue = t;
-    return l;
 }
 
 #pragma mark - 内容过滤视图
