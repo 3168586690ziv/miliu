@@ -1,9 +1,10 @@
 #!/bin/bash
 # build/ui-probe/accept1.sh — 黑盒验收①：设置页三档比例切换 → 返回主界面，左右宽度即时变化
 set -u
-APP="/build-user/Documents/资源探测-GitHub源码/build/资源探测.app"
-AX="/build-user/Documents/资源探测-GitHub源码/build/ui-probe/AXProbe"
-AUD="python3 /build-user/Documents/资源探测-GitHub源码/build/ui-probe/ui_audit.py"
+REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+APP="$REPO/build/资源探测.app"
+AX="$REPO/build/ui-probe/AXProbe"
+AUD="python3 $REPO/build/ui-probe/ui_audit.py"
 BID="com.sevenzz.resource-detector"
 
 "$AX" "$APP" pressid "RDBackButton" >/dev/null 2>&1

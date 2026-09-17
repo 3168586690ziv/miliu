@@ -3,7 +3,7 @@
 # 用法：bash build/ui-probe/accept_all.sh            # 全部
 #       bash build/ui-probe/accept_all.sh 4         # 只跑某一项
 set -u
-ROOT="/build-user/Documents/资源探测-GitHub源码"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 APP="$ROOT/build/资源探测.app"
 AX="$ROOT/build/ui-probe/AXProbe"
 TYPE="$ROOT/build/ui-probe/UIType"

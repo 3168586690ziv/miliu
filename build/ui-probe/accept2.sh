@@ -1,9 +1,10 @@
 #!/bin/bash
 # build/ui-probe/accept2.sh — 黑盒验收②：关闭并重启 App，比例设置保留
 set -u
-APP="/build-user/Documents/资源探测-GitHub源码/build/资源探测.app"
-AX="/build-user/Documents/资源探测-GitHub源码/build/ui-probe/AXProbe"
-AUD="python3 /build-user/Documents/资源探测-GitHub源码/build/ui-probe/ui_audit.py"
+REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+APP="$REPO/build/资源探测.app"
+AX="$REPO/build/ui-probe/AXProbe"
+AUD="python3 $REPO/build/ui-probe/ui_audit.py"
 BID="com.sevenzz.resource-detector"
 
 echo "== 步骤1：改成「左 2.5 : 右 7.5」"

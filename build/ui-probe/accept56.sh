@@ -1,7 +1,7 @@
 #!/bin/bash
 # build/ui-probe/accept56.sh — ⑤ 长标题详情文本比对 + ⑥ 下载提交状态（黑盒，真实 App）
 set -u
-ROOT="/build-user/Documents/资源探测-GitHub源码"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 APP="$ROOT/build/资源探测.app"
 AX="$ROOT/build/ui-probe/AXProbe"
 DRIVE="$ROOT/build/ui-probe/UIDrive"

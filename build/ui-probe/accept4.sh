@@ -1,9 +1,10 @@
 #!/bin/bash
 # build/ui-probe/accept4.sh — 黑盒验收④：输入真实网址，抓取探测状态文案序列
 set -u
-APP="/build-user/Documents/资源探测-GitHub源码/build/资源探测.app"
-AX="/build-user/Documents/资源探测-GitHub源码/build/ui-probe/AXProbe"
-TYPE="/build-user/Documents/资源探测-GitHub源码/build/ui-probe/UIType"
+REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+APP="$REPO/build/资源探测.app"
+AX="$REPO/build/ui-probe/AXProbe"
+TYPE="$REPO/build/ui-probe/UIType"
 URL="${1:-https://plyr.io/}"
 WATCH="${2:-70}"
 

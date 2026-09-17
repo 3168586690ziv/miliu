@@ -1,10 +1,11 @@
 #!/bin/bash
 # build/ui-probe/accept5.sh — 黑盒验收⑤：选长标题视频，右侧标题完整显示、无尾部省略号、下方字段/按钮/直链不被顶出或重叠
 set -u
-APP="/build-user/Documents/资源探测-GitHub源码/build/资源探测.app"
-AX="/build-user/Documents/资源探测-GitHub源码/build/ui-probe/AXProbe"
-DRIVE="/build-user/Documents/资源探测-GitHub源码/build/ui-probe/UIDrive"
-AUD="python3 /build-user/Documents/资源探测-GitHub源码/build/ui-probe/ui_audit.py"
+REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+APP="$REPO/build/资源探测.app"
+AX="$REPO/build/ui-probe/AXProbe"
+DRIVE="$REPO/build/ui-probe/UIDrive"
+AUD="python3 $REPO/build/ui-probe/ui_audit.py"
 URL="${1:-https://plyr.io/}"
 
 "$AX" "$APP" submit "$URL" >/dev/null 2>&1

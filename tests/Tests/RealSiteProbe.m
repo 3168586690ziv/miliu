@@ -841,7 +841,9 @@ static int RSRunDownloadIsolated(NSString *urlString) {
     RSCheck(media != nil && [media.mediaURL containsString:@"1080p"],
             @"入队前选中的确实是 1080p 档位（%s）", RSRedactedURL(media.mediaURL).UTF8String);
 
-    NSString *base = @"/build-user/Documents/资源探测-GitHub源码/build/quality-20260912";
+    // 输出目录可用环境变量 RD_REALSITE_OUT 覆盖，未设置时相对当前工作目录取 build/quality-20260912
+    NSString *base = NSProcessInfo.processInfo.environment[@"RD_REALSITE_OUT"];
+    if (base.length == 0) { base = @"build/quality-20260912"; }
     NSURL *isoTmp = [NSURL fileURLWithPath:[base stringByAppendingPathComponent:@"iso-tmp"]];
     NSURL *dest = [NSURL fileURLWithPath:[base stringByAppendingPathComponent:@"iso-dest"]];
     [[NSFileManager defaultManager] createDirectoryAtURL:dest withIntermediateDirectories:YES attributes:nil error:nil];
