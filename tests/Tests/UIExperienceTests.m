@@ -162,10 +162,11 @@ static void TestSettingsPageStable(void) {
     page.frame = NSMakeRect(0, 0, 760, 438);
     [app layoutSettingsControls];
 
-    // 三档比例控件存在、稳定 identifier、恰好三项
-    Check(app.settingsPaneRatioPopup != nil, @"UIX-1 设置页存在比例控件");
-    Check([app.settingsPaneRatioPopup.identifier isEqualToString:@"RDPaneRatioPopup"], @"UIX-2 比例控件 identifier 稳定");
-    Check(app.settingsPaneRatioPopup.numberOfItems == 3, @"UIX-3 比例控件恰好三档（实际 %ld）", (long)app.settingsPaneRatioPopup.numberOfItems);
+    // 三档比例控件存在、稳定 identifier、恰好三段
+    // （第 12 轮把「要展开的下拉菜单」换成「三档平铺分段控件」，identifier 保持不变）
+    Check(app.settingsPaneRatioControl != nil, @"UIX-1 设置页存在比例控件");
+    Check([app.settingsPaneRatioControl.identifier isEqualToString:@"RDPaneRatioPopup"], @"UIX-2 比例控件 identifier 稳定");
+    Check(app.settingsPaneRatioControl.segmentCount == 3, @"UIX-3 比例控件恰好三档（实际 %ld）", (long)app.settingsPaneRatioControl.segmentCount);
 
     // 所有控件在最小窗口 bounds 内
     for (NSView *v in page.subviews) {
@@ -181,8 +182,8 @@ static void TestSettingsPageStable(void) {
     if (ratioLabel && locLabel && ratioHint && locHint) {
         Check(!RectsOverlap(ratioLabel.frame, locLabel.frame), @"UIX-6 比例标题与下载位置标题不重叠");
         Check(!RectsOverlap(ratioHint.frame, locHint.frame), @"UIX-7 比例说明与下载位置说明不重叠");
-        Check(!RectsOverlap(app.settingsPaneRatioPopup.frame, locLabel.frame), @"UIX-8 比例下拉不与下载位置标题重叠");
-        Check(!RectsOverlap(app.settingsPaneRatioPopup.frame, locHint.frame), @"UIX-9 比例下拉不与下载位置说明重叠");
+        Check(!RectsOverlap(app.settingsPaneRatioControl.frame, locLabel.frame), @"UIX-8 比例控件不与下载位置标题重叠");
+        Check(!RectsOverlap(app.settingsPaneRatioControl.frame, locHint.frame), @"UIX-9 比例控件不与下载位置说明重叠");
         Check(NSMaxY(ratioLabel.frame) > NSMaxY(locLabel.frame), @"UIX-10 比例行位于下载位置行上方");
     }
 }

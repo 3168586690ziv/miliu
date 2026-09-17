@@ -165,7 +165,7 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 @property BOOL filterImagesOnly;
 @property NSSwitch *settingsVideoSwitch;
 @property NSSwitch *settingsImagesSwitch;
-@property NSPopUpButton *settingsPaneRatioPopup;
+@property NSSegmentedControl *settingsPaneRatioControl;
 @property NSButton *clearDownloadRecordsButton;
 @property NSTextField *settingsVersionLabel;  // 设置页右下角版本号（构建期生成，运行期固定）
 @property NSTextField *checkLabel;
@@ -1926,8 +1926,8 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     [self applyFilterChange];
 }
 
-- (void)changePaneRatio:(NSPopUpButton *)sender {
-    NSInteger index = MAX(0, MIN(2, sender.indexOfSelectedItem));
+- (void)changePaneRatio:(NSSegmentedControl *)sender {
+    NSInteger index = MAX(0, MIN(2, sender.selectedSegment));
     [PreferencesStore.shared setInteger:index forKey:SevenZZKeyMainPaneRatio];
     [self layoutWorkspace];
 }
@@ -1967,20 +1967,27 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     self.settingsImagesSwitch.action = @selector(toggleFilterImagesOnly:);
     [self.settingsPage addSubview:self.settingsImagesSwitch];
 
-    // 主界面左右栏比例：三档均立即生效，并持久化到 PreferencesStore
+    // 主界面左右栏比例：三档**平铺**，点哪档切哪档（原先是要展开的下拉菜单，多一步操作）
+    // identifier 故意沿用 "RDPaneRatioPopup"：它是 build/ui-probe/accept2.sh 的黑盒定位锚点，
+    // 换控件类型不改这个 id，既有验收脚本继续可用。
     [self settingsLabelAtY:340 text:@"左右栏比例"];
     NSTextField *ratioHint = [self settingsHintAtY:316 text:@"调整资源列表与详情区域的宽度比例"];
     [self.settingsPage addSubview:ratioHint];
-    self.settingsPaneRatioPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(790, 334, 128, 26) pullsDown:NO];
-    self.settingsPaneRatioPopup.identifier = @"RDPaneRatioPopup";
-    [self.settingsPaneRatioPopup addItemsWithTitles:@[@"左 3 : 右 7", @"左 2 : 右 8", @"左 2.5 : 右 7.5"]];
+    NSSegmentedControl *ratioControl =
+        [NSSegmentedControl segmentedControlWithLabels:@[@"3 : 7", @"2 : 8", @"2.5 : 7.5"]
+                                          trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                target:self
+                                                action:@selector(changePaneRatio:)];
+    ratioControl.identifier = @"RDPaneRatioPopup";
+    // 右边界 918 与「选择」「清除」对齐（AX 实测三者 maxX 相同）；三档等宽平铺。
+    ratioControl.frame = NSMakeRect(732, 334, 186, 26);
+    ratioControl.segmentStyle = NSSegmentStyleRounded;
+    ratioControl.font = [NSFont systemFontOfSize:11.5];
     NSInteger ratioIndex = [PreferencesStore.shared integerForKey:SevenZZKeyMainPaneRatio defaultValue:0];
     if (ratioIndex < 0 || ratioIndex > 2) ratioIndex = 0;
-    [self.settingsPaneRatioPopup selectItemAtIndex:ratioIndex];
-    self.settingsPaneRatioPopup.target = self;
-    self.settingsPaneRatioPopup.action = @selector(changePaneRatio:);
-    self.settingsPaneRatioPopup.font = [NSFont systemFontOfSize:11.5];
-    [self.settingsPage addSubview:self.settingsPaneRatioPopup];
+    ratioControl.selectedSegment = ratioIndex;
+    self.settingsPaneRatioControl = ratioControl;
+    [self.settingsPage addSubview:ratioControl];
 
     // 下载位置：沿用过滤项的标题、说明文字、色号与 90px 行距
     NSTextField *locationLabel = [self settingsLabelAtY:250 text:@"下载位置"];
