@@ -17,7 +17,7 @@ if run 4; then
 echo "================ ④ 探测阶段文案（真实网址）================"
 for u in "https://hlsjs.video-dev.org/demo/" "https://plyr.io/"; do
   echo "--- 网址 $u"
-  "$AX" "$APP" press "← 返回探测" >/dev/null 2>&1; sleep 0.4
+  "$AX" "$APP" pressid "RDBackButton" >/dev/null 2>&1; sleep 0.4
   "$AX" "$APP" submit "$u" >/dev/null 2>&1
   "$AX" "$APP" press "⏎ 重新探测" >/dev/null 2>&1
   "$AX" "$APP" watchstatus 60 0.10
@@ -26,7 +26,7 @@ fi
 
 if run 5; then
 echo "================ ⑤ 长标题：右侧完整显示 + 下方字段/直链/按钮不重叠 ================"
-"$AX" "$APP" press "← 返回探测" >/dev/null 2>&1; sleep 0.4
+"$AX" "$APP" pressid "RDBackButton" >/dev/null 2>&1; sleep 0.4
 "$AX" "$APP" submit "https://plyr.io/" >/dev/null 2>&1
 "$AX" "$APP" press "⏎ 重新探测" >/dev/null 2>&1
 "$AX" "$APP" watchstatus 45 0.2 | tail -2
@@ -72,7 +72,7 @@ for tier in "左 3 : 右 7" "左 2 : 右 8" "左 2.5 : 右 7.5"; do
   $AUD "$APP" audit 9 | tail -3
 done
 echo "--- 返回主界面（比例 2.5:7.5 下的左右栏）"
-"$AX" "$APP" press "← 返回探测" >/dev/null 2>&1; sleep 0.8
+"$AX" "$APP" pressid "RDBackButton" >/dev/null 2>&1; sleep 0.8
 $AUD "$APP" panes
 $AUD "$APP" audit 9 | tail -3
 echo "--- 下载列表页"

@@ -41,6 +41,37 @@
 - (BOOL)isFlipped { return YES; }
 @end
 
+// 设置页的「返回」按钮：形态照 macOS 系统设置（圆形箭头），但按本项目风格
+// **去掉常驻浅灰底**（2026-09-17 主人定案）—— 静止时只有一个干净的箭头，
+// 鼠标移上去或按下时才浮出一层浅色圆底作为反馈，保证它仍然"像个能点的东西"。
+@interface RDHoverCircleButton : NSButton
+@property (nonatomic, strong) NSTrackingArea *rdHoverArea;
+@property (nonatomic, assign) BOOL rdHovered;
+@end
+
+@implementation RDHoverCircleButton
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (self.rdHoverArea) [self removeTrackingArea:self.rdHoverArea];
+    self.rdHoverArea = [[NSTrackingArea alloc] initWithRect:self.bounds
+                                                    options:(NSTrackingMouseEnteredAndExited |
+                                                             NSTrackingActiveInKeyWindow)
+                                                      owner:self
+                                                   userInfo:nil];
+    [self addTrackingArea:self.rdHoverArea];
+}
+- (void)mouseEntered:(NSEvent *)event { self.rdHovered = YES; [self setNeedsDisplay:YES]; }
+- (void)mouseExited:(NSEvent *)event  { self.rdHovered = NO;  [self setNeedsDisplay:YES]; }
+- (void)drawRect:(NSRect)dirtyRect {
+    BOOL pressed = self.cell.isHighlighted;
+    if (self.rdHovered || pressed) {
+        [[NSColor colorWithWhite:0.0 alpha:(pressed ? 0.13 : 0.06)] setFill];
+        [[NSBezierPath bezierPathWithOvalInRect:NSInsetRect(self.bounds, 0.5, 0.5)] fill];
+    }
+    [super drawRect:dirtyRect];
+}
+@end
+
 @implementation RDDownloadRowView
 - (void)setSelected:(BOOL)selected {
     [super setSelected:selected];
@@ -1790,7 +1821,10 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 
     // ── 页面级固定刻度 ──
     const CGFloat pagePadX = 30.0, pagePadTop = 10.0, pagePadBottom = 8.0;
-    const CGFloat titleH = 22.0, titleGap = 5.0, backH = 24.0, backGap = 8.0;
+    // 页头现在只有**一行**：返回箭头与标题同行（2026-09-17 定案，macOS 系统设置形态 + 去掉常驻底）。
+    // backSize 取 24（官方 28）是为了最窄窗口也放得进 30pt 的页面内边距：
+    // 按钮左缘 = colX - (backSize + backGapX)，而 colX 最小为 30，故 24 + 4 = 28 ≤ 30。
+    const CGFloat titleH = 22.0, backSize = 24.0, backGapX = 4.0;
     const CGFloat versionH = 14.0, versionW = 130.0, versionGap = 8.0;
     const CGFloat maxContentW = 980.0;
 
@@ -1833,20 +1867,23 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     // 此时与「不居中」的行为完全一致。
     CGFloat versionTop = pagePadBottom + versionH;
     CGFloat scrollBottom = versionTop + versionGap;
-    CGFloat headerH = titleH + titleGap + backH + backGap;
+    CGFloat headerH = MAX(titleH, backSize);   // 页头一行：箭头与标题并排，取两者较高者
     // 参与居中的「可见整块」= 标题顶 → 最后一张卡片底 = 页头 + 文档上内边距 + 表单净高。
     // 刻意**不**把文档下内边距 bodyPadBottom 算进去，否则下方留白会比上方多出一截。
     CGFloat blockH = headerH + contentH - bodyPadBottom;
     CGFloat topOffset = MAX(pagePadTop, floor((H - scrollBottom - blockH) / 2.0));
 
-    // ── 页头（页面坐标，y 向上）──
-    CGFloat y = H - topOffset;
-    NSTextField *title = self.settingsTitleLabel;
-    title.frame = NSMakeRect(colX, y - titleH, MAX(60.0, MIN(420.0, colW)), titleH);
-    y -= titleH + titleGap;
+    // ── 页头：**一行**，返回箭头在标题左侧，两者垂直居中（页面坐标，y 向上）──
+    // 箭头左缘与下方卡片左缘对齐（colX），标题跟在箭头右侧 —— "左基准线"由箭头承担，
+    // 与主人确认过的 HTML 稿一致。若把箭头挂到 colX 左边，窄窗口下会顶到窗口边缘。
+    CGFloat rowTop = H - topOffset;
+    CGFloat rowBottom = rowTop - headerH;
     NSButton *back = self.settingsBackButton;
-    back.frame = NSMakeRect(colX, y - backH, 96.0, backH);
-    y -= backH + backGap;
+    back.frame = NSMakeRect(colX, rowBottom + (headerH - backSize) / 2.0, backSize, backSize);
+    NSTextField *title = self.settingsTitleLabel;
+    title.frame = NSMakeRect(colX + backSize + backGapX, rowBottom + (headerH - titleH) / 2.0,
+                             MAX(60.0, MIN(420.0, colW) - backSize - backGapX), titleH);
+    CGFloat y = rowBottom;
 
     // ── 滚动容器：页头之下、版本号带之上 ──
     CGFloat scrollH = MAX(0.0, y - scrollBottom);
@@ -2068,10 +2105,29 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     [page addSubview:title];
     self.settingsTitleLabel = title;
 
-    NSButton *back = [NSButton buttonWithTitle:@"← 返回探测" target:self action:@selector(switchBackToHome:)];
-    back.controlSize = NSControlSizeSmall;
-    back.font = [NSFont systemFontOfSize:12];
-    back.frame = NSMakeRect(30, 0, 96, 24);
+    // 返回：macOS 系统设置式的圆形箭头，但**去掉常驻浅灰底**（2026-09-17 主人定案）。
+    // 只在悬停/按下时由 RDHoverCircleButton 画一层浅色圆底。
+    // 注意：title 仍保留完整字样且**不删除** —— 它不参与显示（imagePosition = NSImageOnly），
+    // 但 AX 与 build/ui-probe/accept{1,2,4,_all}.sh 共 6 个验收脚本都按这个标题定位按钮，
+    // 删掉会让它们全部失效。
+    NSImage *chevron = [NSImage imageWithSystemSymbolName:@"chevron.left"
+                                 accessibilityDescription:@"返回探测"];
+    chevron = [chevron imageWithSymbolConfiguration:
+               [NSImageSymbolConfiguration configurationWithPointSize:12.5
+                                                               weight:NSFontWeightSemibold]];
+    RDHoverCircleButton *back = [RDHoverCircleButton buttonWithImage:chevron
+                                                              target:self
+                                                              action:@selector(switchBackToHome:)];
+    back.bordered = NO;
+    // 顺序很重要：**先设 title，再设 imagePosition**。
+    // setTitle: 会把 imagePosition 重置回"图 + 文"，若反过来写，按钮会画出被截断的
+    // 标题文字（实测渲染成「← ‹ …」，10 倍放大一眼可见是坏的）。
+    back.title = @"← 返回探测";
+    back.imagePosition = NSImageOnly;
+    back.imageScaling = NSImageScaleProportionallyDown;
+    back.toolTip = @"返回探测";
+    back.identifier = @"RDBackButton";
+    back.frame = NSMakeRect(2, 0, 24, 24);
     [page addSubview:back];
     self.settingsBackButton = back;
 

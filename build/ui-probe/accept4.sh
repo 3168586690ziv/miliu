@@ -7,7 +7,7 @@ TYPE="/build-user/Documents/资源探测-GitHub源码/build/ui-probe/UIType"
 URL="${1:-https://plyr.io/}"
 WATCH="${2:-70}"
 
-"$AX" "$APP" press "← 返回探测" >/dev/null 2>&1
+"$AX" "$APP" pressid "RDBackButton" >/dev/null 2>&1
 sleep 0.5
 "$AX" "$APP" focus-text
 "$TYPE" "$APP" "$URL"

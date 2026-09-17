@@ -9,7 +9,7 @@ BID="com.sevenzz.resource-detector"
 echo "== 步骤1：改成「左 2.5 : 右 7.5」"
 "$AX" "$APP" press "设置" >/dev/null 2>&1; sleep 0.5
 "$AX" "$APP" popup-pick "左 2.5 : 右 7.5" >/dev/null 2>&1; sleep 0.4
-"$AX" "$APP" press "← 返回探测" >/dev/null 2>&1; sleep 0.7
+"$AX" "$APP" pressid "RDBackButton" >/dev/null 2>&1; sleep 0.7
 $AUD "$APP" panes
 echo "存储值=$(defaults read "$BID" ZZResourceDetector.MainPaneRatio 2>/dev/null)"
 
@@ -23,6 +23,6 @@ open -n "$APP"; sleep 5
 "$AX" "$APP" info
 "$AX" "$APP" press "设置" >/dev/null 2>&1; sleep 0.6
 "$AX" "$APP" find "RDPaneRatioPopup" | head -3
-"$AX" "$APP" press "← 返回探测" >/dev/null 2>&1; sleep 0.7
+"$AX" "$APP" pressid "RDBackButton" >/dev/null 2>&1; sleep 0.7
 $AUD "$APP" panes
 echo "存储值=$(defaults read "$BID" ZZResourceDetector.MainPaneRatio 2>/dev/null)"
