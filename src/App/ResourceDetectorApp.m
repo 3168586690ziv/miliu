@@ -1781,13 +1781,19 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     const CGFloat titleH = 22.0, titleGap = 5.0, backH = 24.0, backGap = 8.0;
     const CGFloat groupLabelH = 12.0, groupLabelGap = 3.0, groupGap = 6.0;
     const CGFloat versionH = 14.0, versionW = 130.0;
-    const CGFloat cardPadYBase = 3.0, cardPadYMax = 24.0;
     const CGFloat rowTitleH = 16.0, rowHintH = 13.0, rowHintGap = 3.0;
-    const CGFloat minRowH = 34.0, maxRowH = 64.0;
-    // 大窗口下的「防散开」硬上限：组间距最多各加 extraGapMax，剩下的富余一律
-    // 交给卡片内的上下留白（cardPadY），窗口再大也不会把卡片拉得老远。
-    // 2026-09-17 主人反馈：1680×1050 下组间距被撑到 120pt，难看 —— 就是这里没有上限导致的。
-    const CGFloat extraGapMax = 9.0;
+    // ── 间距规律：固定刻度，绝不随窗口拉伸（GitHub Primer：base-8 刻度 4/8/16/24/32/40，
+    //    间距是常量，容器变大不会把间距撑开）。行高与卡片留白都取「舒适档」，只有窗口
+    //    小到装不下时才整体压缩；窗口再大也不会把它们撑大。──
+    // 舒适档：一行 32pt 内容（标题 16 + 间隙 3 + 说明 13）+ 上下各 6pt = 44pt
+    // 紧凑档（仅最小窗口）：36pt，内容刚好装下
+    const CGFloat minRowH = 34.0, maxRowH = 44.0;
+    const CGFloat cardPadYBase = 3.0, cardPadYMax = 8.0;
+    // 组间距的额外增量上限：也让组间距保持在「固定刻度」的量级，不做无上限拉伸
+    const CGFloat extraGapMax = 8.0;
+    // 内容列最大宽度：窗口再宽也把表单收在一条舒适的列里，避免「标题在最左、控件在最右」
+    // 那种上千点的横向空洞（Primer 的容器也有 max-width 约束）。
+    const CGFloat maxContentW = 1000.0;
 
     NSUInteger cardCount = self.settingsCards.count;
     NSUInteger rowCount = self.settingsRowTitles.count;
@@ -1809,8 +1815,8 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     // 极端小窗口下若最小行高仍装不下，继续压缩：宁可行内挤一点，也绝不越界（RD-11 是硬断言）
     if (rowH * (CGFloat)rowCount > avail) rowH = MAX(24.0, floor(avail / (CGFloat)rowCount));
 
-    // 富余空间分配：① 组间距每处最多 extraGapMax ② 其余转成卡片内上下留白（有上限）
-    // ③ 仍有剩余就留白在底部，绝不再拉伸间距。
+    // 富余空间分配：只允许把组间距与卡片留白推到「舒适档」上限，之后一律停止 ——
+    // 剩余空间就是页面留白（窗口很大时下方留白是正常的，绝不靠撑大控件去填）。
     CGFloat extra = MAX(0.0, H - (overhead + rowH * (CGFloat)rowCount));
     CGFloat extraGap = 0.0, cardPadY = cardPadYBase;
     if (cardCount > 0) {
@@ -1820,7 +1826,9 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
         cardPadY = cardPadYBase + padExtra;
     }
 
-    CGFloat cardX = marginX, cardW = MAX(80.0, W - 2.0 * marginX);
+    // 内容列：宽度受 maxContentW 约束并水平居中；窗口窄时退化为「页面内宽」。
+    CGFloat cardW = MAX(80.0, MIN(W - 2.0 * marginX, maxContentW));
+    CGFloat cardX = floor((W - cardW) / 2.0);
     CGFloat titleW = MAX(60.0, MIN(420.0, cardW));
     CGFloat labelW = MAX(60.0, cardW - 2.0 * cardPadX - 200.0);   // 给右侧控件留位
     NSMutableArray<NSNumber *> *slotTop = [NSMutableArray arrayWithCapacity:rowCount];
@@ -1828,10 +1836,10 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     // ── 页头 ──
     CGFloat y = H - topMargin;
     NSTextField *title = self.settingsTitleLabel;
-    title.frame = NSMakeRect(marginX, y - titleH, titleW, titleH);
+    title.frame = NSMakeRect(cardX, y - titleH, titleW, titleH);
     y -= titleH + titleGap;
     NSButton *back = self.settingsBackButton;
-    back.frame = NSMakeRect(marginX, y - backH, 96.0, backH);
+    back.frame = NSMakeRect(cardX, y - backH, 96.0, backH);
     y -= backH + backGap;
 
     // ── 逐卡片排布 ──
@@ -1839,7 +1847,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     for (NSUInteger c = 0; c < cardCount; c++) {
         y -= extraGap;
         NSView *groupLabel = self.settingsGroupLabels[c];
-        groupLabel.frame = NSMakeRect(marginX, y - groupLabelH, MIN(240.0, cardW), groupLabelH);
+        groupLabel.frame = NSMakeRect(cardX, y - groupLabelH, MIN(240.0, cardW), groupLabelH);
         y -= groupLabelH + groupLabelGap;
 
         CGFloat cardH = rowsInCard[c] * rowH + 2.0 * cardPadY;
