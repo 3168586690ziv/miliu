@@ -1797,8 +1797,8 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     // ── 内容级固定刻度（文档视图内部，flipped：y 向下）──
     const CGFloat bodyPadTop = 8.0, bodyPadBottom = 12.0;
     const CGFloat groupLabelH = 12.0, groupLabelGap = 3.0, groupGap = 10.0;
-    const CGFloat cardPadX = 16.0, cardPadY = 8.0;
-    const CGFloat rowH = 48.0;
+    const CGFloat cardPadX = 16.0, cardPadY = 18.0;
+    const CGFloat rowH = 71.0;
     const CGFloat rowTitleH = 16.0, rowHintH = 13.0, rowHintGap = 3.0;
 
     // ── 内容列：宽度受 maxContentW 约束并水平居中，避免超宽窗口下

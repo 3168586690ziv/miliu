@@ -90,7 +90,7 @@ int main(int argc,const char **argv){@autoreleasepool{
     //   11a 页面固定控件（标题/返回/滚动容器/版本号）在最小内容区 760x438 的 bounds 内；
     //   11b 表单内容（卡片/分组标签/行标题/说明/控件/分隔线）全部落在滚动文档视图 bounds 内，
     //       即没有任何一行被裁掉、不可达；
-    //   11c 文档视图高度至少容纳 6 行 x 48pt，防止有人把内容压扁来「消除滚动条」。
+    //   11c 文档视图高度至少容纳 6 行 x 71pt，防止有人把内容压扁来「消除滚动条」。
     for (NSView *v in app.settingsPage.subviews) {
         Check(NSContainsRect(app.settingsPage.bounds,v.frame),[NSString stringWithFormat:@"RD-11a 最小内容区下页面固定控件在页内（%@）",NSStringFromClass(v.class)]);
     }
@@ -101,7 +101,7 @@ int main(int argc,const char **argv){@autoreleasepool{
         for (NSView *v in settingsDoc.subviews) {
             Check(NSContainsRect(settingsDoc.bounds,v.frame),[NSString stringWithFormat:@"RD-11b 表单内容落在滚动文档视图内（%@）",NSStringFromClass(v.class)]);
         }
-        Check(NSHeight(settingsDoc.frame)>=6.0*48.0,[NSString stringWithFormat:@"RD-11c 文档视图高度至少容纳 6 行 x 48pt（实际 %.1f，子控件 %lu 个）",NSHeight(settingsDoc.frame),(unsigned long)settingsDoc.subviews.count]);
+        Check(NSHeight(settingsDoc.frame)>=6.0*71.0,[NSString stringWithFormat:@"RD-11c 文档视图高度至少容纳 6 行 x 71pt（实际 %.1f，子控件 %lu 个）",NSHeight(settingsDoc.frame),(unsigned long)settingsDoc.subviews.count]);
     }
     RepairImageTransport *transport=[RepairImageTransport new];transport.data=png;RDMetadataService *ms=[[RDMetadataService alloc]initWithTransport:transport];DetectedMedia *m=[DetectedMedia new];m.mediaURL=@"https://example.com/cache.png";m.resourceKind=RDResourceKindImage;__block RDMetadataSnapshot *snap=nil;RDMetadataToken *t=[ms subscribeMedia:m reload:NO update:^(RDMetadataSnapshot *s){snap=s;}];
     Check(Wait(^BOOL{return snap&&snap.preview.state==RDMetadataKnown&&snap.size.state==RDMetadataKnown&&snap.dimensions.state==RDMetadataKnown;},4),@"RD-23 initial image metadata finishes");NSUInteger before=transport.requests;NSSize sz=[(NSValue *)snap.dimensions.value sizeValue];m.pixelWidth=sz.width;m.pixelHeight=sz.height;m.sizeBytes=[snap.size.value longLongValue];[t cancel];snap=nil;[ms subscribeMedia:m reload:NO update:^(RDMetadataSnapshot *s){snap=s;}];
