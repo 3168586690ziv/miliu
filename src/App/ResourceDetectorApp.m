@@ -1801,9 +1801,10 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     const CGFloat rowH = 71.0;
     const CGFloat rowTitleH = 16.0, rowHintH = 13.0, rowHintGap = 3.0;
 
-    // ── 内容列：宽度受 maxContentW 约束并水平居中，避免超宽窗口下
-    //    「标题在最左、控件在最右」的横向空洞。──
-    CGFloat colW = MAX(80.0, MIN(W - 2.0 * pagePadX, maxContentW));
+    // ── 内容列：基准来自普通窗口实测（窗口 1330pt → 列 980pt = 73.7%）。
+    //    窗口更宽时列按此比例一起变宽（maxContentW 降为下限基准，不再封顶）；
+    //    窗口更窄时维持原行为（列 = W - 2*pagePadX）。──
+    CGFloat colW = MAX(80.0, MIN(W - 2.0 * pagePadX, MAX(maxContentW, floor(W * 0.737))));
     CGFloat colX = floor((W - colW) / 2.0);
 
     NSUInteger cardCount = self.settingsCards.count;
@@ -1834,9 +1835,20 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
         if (c < 16) rowsInCard[c]++;
     }
 
+    // ── 内容真实高度只取决于分组数 / 行数与固定刻度（与窗口无关）。先算出来，
+    //    才能在滚动区更高时把富余高度上下均分；scrollH <= contentH 时 startY = 0。──
+    CGFloat contentH = bodyPadTop + bodyPadBottom;
+    for (NSUInteger c = 0; c < cardCount; c++) {
+        contentH += groupLabelH + groupLabelGap;
+        contentH += rowsInCard[c] * rowH + 2.0 * cardPadY;
+        if (c + 1 < cardCount) contentH += groupGap;
+    }
+    CGFloat docH = MAX(contentH, scrollH);
+    CGFloat startY = MAX(0.0, (docH - contentH) / 2.0);
+
     NSMutableArray<NSNumber *> *slotTop = [NSMutableArray arrayWithCapacity:rowCount];
     NSUInteger rowCursor = 0;
-    CGFloat dy = bodyPadTop;
+    CGFloat dy = startY + bodyPadTop;
     for (NSUInteger c = 0; c < cardCount; c++) {
         NSView *groupLabel = self.settingsGroupLabels[c];
         groupLabel.frame = NSMakeRect(0, dy, MIN(240.0, colW), groupLabelH);
@@ -1882,9 +1894,8 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
         self.settingsSeparators[s].frame = NSMakeRect(cardPadX, slot + rowH, colW - 2.0 * cardPadX, 1.0);
     }
 
-    // 文档高度 = 内容高度；滚动区更高时把富余空间留在底部（顶部对齐，内容不拉伸）
-    CGFloat contentH = dy + bodyPadBottom;
-    doc.frame = NSMakeRect(0, 0, colW, MAX(contentH, scrollH));
+    // 文档高度 = MAX(内容高度, 滚动区高度)；富余高度已在 startY 中上下均分
+    doc.frame = NSMakeRect(0, 0, colW, docH);
 
     // ── 右下角版本号（固定，不随内容滚动）──
     self.settingsVersionLabel.frame = NSMakeRect(W - pagePadX - versionW, pagePadBottom, versionW, versionH);
