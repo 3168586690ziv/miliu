@@ -110,6 +110,7 @@
 | 7 | 版本规则永久化：AGENTS.md + PROJECT_VERSION.json + `--release-fix` | v19425.7 |
 | 10 | 探测「正在准备呈现…」60 s 空等修复（统一呈现的就绪判定按订阅通道区分：仅预览通道只等缩略图）· 列表行摘要跟随所选画质档位 · 画质下拉缺 label 崩溃防护（报告：`outputs/fix-round-prep-20260913/REPORT.md`，**文件已不存在**） | v22307.10 |
 | 11 | UI 体验：设置页左右栏比例三档（3:7 / 2:8 / 2.5:7.5，偏好键 `SevenZZKeyMainPaneRatio`，非法值回退 3:7）· 探测状态文案统一为短文本，不再显示「正在探测第 N/M 个页面：host」· 详情标题完整多行显示不省略，缩略图/字段/直链按面板实际尺寸流式排布 · 设置页与详情区在最小窗口下 0 越界 0 重叠（报告：`outputs/ui-fix-20260916/REPORT.md`） | v24151.11 |
+| 12 | 真实站点抓取能力：由 91 站真实站点语料库（`tests/corpus/`，不进版本库）跑出的缺陷修复 —— ① 直链媒体/流清单地址完全探不到（静态腿改为按响应 MIME 分流，video/* 与 mpegurl/dash+xml 直接由 URL 生成媒体条目；MIME 为 text/html 时走原路径）；② 混合探测动态腿硬超时 20s → 45s（JS 单页应用实测 0 → 56 资源）；③ 静态腿 HTML 上限 2 MB → 8 MB，与 `WebProbe` / `ProductionDiscoveryHTMLProvider` 对齐。复跑 91 站：有资源 64 → 78 站，总耗时 7692s → 2513s，首屏耗时中位 0.89s（台账：`outputs/evidence-20260918/缺陷台账-全量测试.md`） | v24470.12 |
 
 > 新的正式发布轮次由 `--release-fix` 自动追加到 `PROJECT_VERSION.json`；
 > 本表由当时的执行者在本节末尾补充一行，且只描述事实。

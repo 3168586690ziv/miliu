@@ -1,7 +1,7 @@
 {
-  "fixRound": 11,
-  "lastReleaseVersion": "v24151.11",
+  "fixRound": 12,
+  "lastReleaseVersion": "v24470.12",
   "lastRelease": {
-    "digest": "756c313b9b860f4d86d7501e34daa04893e5638e15ab99b404297b82b8ca794e"
+    "digest": "58dbc5d8648b53ba5f22de6f0dbbe5be49cbc30800e4110801d512e409a82ce7"
   }
 }
