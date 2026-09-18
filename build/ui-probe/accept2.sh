@@ -2,7 +2,7 @@
 # build/ui-probe/accept2.sh — 黑盒验收②：关闭并重启 App，比例设置保留
 set -u
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
-APP="$REPO/build/资源探测.app"
+APP="$REPO/build/觅流.app"
 AX="$REPO/build/ui-probe/AXProbe"
 AUD="python3 $REPO/build/ui-probe/ui_audit.py"
 BID="com.sevenzz.resource-detector"

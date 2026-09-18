@@ -3,14 +3,15 @@
 //
 
 #import "ProductionDiscoveryHTMLProvider.h"
+#import "RDManualVerification.h"   // 共享会话存储（探测 WebView 与验证窗口同一实例）
 #import "URLPolicy.h"
 #import "ResourceURLGate.h"
 
 static const NSTimeInterval kHTMLLoadTimeout = 20.0;
 static const NSUInteger kHTMLMaxBytes = 8 * 1024 * 1024;
 
-// 默认工厂：主线程创建离屏真实 WKWebView（nonPersistentDataStore 由
-// 调用方在 configuration 上配置）。
+// 默认工厂：主线程创建离屏真实 WKWebView（App 容器内的持久化会话存储由
+// 调用方在 configuration 上配置，与手动验证窗口共用同一实例）。
 @interface ZZDiscoveryDefaultWebViewFactory : NSObject <ZZDiscoveryWebViewFactory>
 @end
 
@@ -81,8 +82,13 @@ static const NSUInteger kHTMLMaxBytes = 8 * 1024 * 1024;
     NSAssert([NSThread isMainThread], @"ProductionDiscoveryHTMLProvider 的 WebKit 操作只允许在主线程");
     if (!self.webView) {
         WKWebViewConfiguration *cfg = [WKWebViewConfiguration new];
-        // 会话隔离（security-hardening）：与生产资源探测 WebView 同款非持久化存储
-        cfg.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
+        // 会话延续（第 13 轮）：这里原来出于安全加固用了 nonPersistentDataStore，
+        // 结果是每次探测都是一位全新访客 —— Cookie、会话、以及用户手动完成人机验证
+        // 后拿到的通行证，探测一结束全部丢弃。现改为 App 容器内的**持久化**存储，
+        // 并与手动验证窗口共用同一个实例（RDSharedSessionDataStore），会话才能跨探测延续。
+        // 边界不变：只用 App 自己的存储，不共享/不读取 Safari 数据；
+        // Cookie 只由 WebKit 自己保管，本代码不读取、不打印、不导出。
+        cfg.websiteDataStore = [RDManualVerificationController sharedSessionDataStore];
         self.webView = [self.webViewFactory makeWebViewWithConfiguration:cfg];
         self.webView.navigationDelegate = self;
     }

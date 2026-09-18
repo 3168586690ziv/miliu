@@ -80,6 +80,16 @@ NS_ASSUME_NONNULL_BEGIN
 /// 取消当前任务（重复调用无害）。
 - (void)cancel;
 
+#pragma mark - 探测失败后的公开信号检查（会话延续配套）
+
+/// 读取页面 HTML，走探测自己的 WebKit 会话存储（与手动验证窗口同一实例）。
+/// 仅供「探测失败后，按页面公开文案/标题判断是否为人机验证页」这一条窄用途：
+/// 不读取、不打印、不外发任何 Cookie 或凭据，也不改变探测会话的状态。
+- (nullable id)loadHTMLForURL:(NSURL *)url completion:(ZZDiscoveryHTMLCompletion)completion;
+
+/// 取消上面那次 HTML 读取（重复调用无害）；不影响正在进行的探测任务。
+- (void)cancelHTMLRequest:(nullable id)token;
+
 #pragma mark - 站点模式翻页（纯 URL 工具）
 
 /// 解析 URL 的 page 页码；无 page 参数或值非法（非正整数）返回 1。

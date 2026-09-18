@@ -1,4 +1,4 @@
-# 资源探测
+# 觅流
 
 ## 项目简介
 
@@ -35,7 +35,7 @@ macOS 原生（Objective-C + AppKit）桌面应用：输入一个网址，探测
 bash scripts/build.sh
 ```
 
-- 产物：`build/资源探测.app`（universal：arm64 + x86_64，ad-hoc 或本机开发者身份签名）
+- 产物：`build/觅流.app`（universal：arm64 + x86_64，ad-hoc 或本机开发者身份签名）
 - 构建日志会打印且仅打印这三行版本信息：
 
   ```

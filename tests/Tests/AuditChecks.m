@@ -133,7 +133,10 @@ int main(int argc,const char **argv) { @autoreleasepool {
     if(argc>1){
         TestContext *native=AuditContext();id<RDDownloadBackend> backend=[NSClassFromString(@"SessionDownloadBackend") new];
         DownloadManager *nm=[[DownloadManager alloc] initWithBackend:backend tempRoot:native.tmpRoot store:[[DownloadStore alloc]initWithUserDefaults:native.ud]];
-        DownloadJob *nj=[nm enqueueItemWithSourceURL:[NSURL URLWithString:@"https://www.w3schools.com/html/mov_bbb.mp4"] folder:native.destFolder preferredName:@"public-test.mp4" sourcePageURL:@"https://www.w3schools.com/html/html5_video.asp" resourceKind:DownloadResourceVideo expectedLength:788493];
+        // 说明：此诊断分支（argc>1）需要一个**真实可下载**的公开文件；这里的 example.com
+        // 为占位主机（RFC2606 保留），不会有真实文件，故该分支会报下载失败——它只打印状态，
+        // 不参与任何 Check 断言；需要验证真实下载时由操作者另行传入真实地址。
+        DownloadJob *nj=[nm enqueueItemWithSourceURL:[NSURL URLWithString:@"https://example.com/public-sample.mp4"] folder:native.destFolder preferredName:@"public-test.mp4" sourcePageURL:@"https://example.com/" resourceKind:DownloadResourceVideo expectedLength:788493];
         Wait(^BOOL{return nj.state==DownloadJobStateCompleted||nj.state==DownloadJobStateFailed;},45);
         printf("NATIVE PUBLIC DOWNLOAD state=%ld bytes=%lld path=%s error=%s\n",(long)nj.state,FileSize(nj.destinationURL),nj.destinationURL.path.UTF8String,(nj.errorText?:@"").UTF8String);
     }

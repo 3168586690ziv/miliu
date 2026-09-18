@@ -15,6 +15,7 @@
 #import "RDQualityTier.h"
 #import "DownloadLinkRefresher.h"
 #import "RDHybridPageProbe.h"
+#import "RDManualVerification.h"   // 手动验证后继续探测（第 13 轮接线）
 #import "RDGeneratedVersion.h"  // 构建期生成（scripts/generate-version.sh → build/generated/）
 
 // AppKit 的 NSProgressIndicator 即使把 frame 压到 1px，仍可能按控件尺寸
@@ -177,7 +178,7 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
     RDDownloadFilterFailed,
 };
 
-@interface ResourceDetectorAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, DownloadManagerDelegate>
+@interface ResourceDetectorAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, DownloadManagerDelegate, WKNavigationDelegate>
 @property (nonatomic, assign) RDDownloadFilter downloadFilter;
 @property RDSlashWindow *window;
 @property NSView *homePage;
@@ -208,6 +209,10 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 @property NSSwitch *settingsImagesSwitch;
 @property NSSegmentedControl *settingsPaneRatioControl;
 @property NSButton *clearDownloadRecordsButton;
+@property NSButton *clearSiteSessionButton;   // 设置页「清除网站会话」（第 13 轮新增）
+// 清除网站会话是**异步**操作；该 token 用于作废过期完成回调，避免其覆盖更新的探测/取消状态
+// （2026-09-18 无 GUI 受控复现：清除进行中发起新探测，迟到回调会把状态文案改回“网站会话已清除”）。
+@property (nonatomic, assign) NSInteger sessionClearGeneration;
 @property NSTextField *settingsVersionLabel;  // 设置页右下角版本号（构建期生成，运行期固定）
 @property NSTextField *checkLabel;
 @property NSTextField *statusNote;
@@ -284,6 +289,13 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 @property (nonatomic, assign) BOOL explorationResultsSuppressed;      // 探索未完成前列表不呈现任何行
 @property (nonatomic, copy) NSString *pendingCompletionStatus;
 @property (nonatomic, assign) BOOL pendingCompletionShowsCheck;
+// ── 手动验证后继续探测（第 13 轮接线；模块本体见 RDManualVerification.h 的红线）──
+// 只在「探测失败 + 页面出现人机验证/登录类公开信号」时提示用户，由用户自己决定是否
+// 打开验证窗口、自己完成验证；App 不替用户点击、不模拟验证过程、不读取或外发 Cookie。
+@property (nonatomic, strong) RDManualVerificationController *manualVerification;
+@property (nonatomic, copy, nullable) NSURL *lastScanSeedURL;       // 本轮探测的种子地址
+@property (nonatomic, strong, nullable) id verificationCheckToken;  // 公开信号检查的 HTML 读取凭据
+@property (nonatomic, assign) NSInteger verificationCheckGeneration;
 @property DiscoverySessionController *session;
 @property DownloadManager *downloadManager;
 @property (nonatomic, copy) NSString *latestDownloadJobIdentifier;
@@ -409,7 +421,7 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
                                          CGEventMaskBit(kCGEventKeyDown),
                                          RDSpaceTapCallback, (__bridge void *)self);
     if (!tap) {
-        NSLog(@"[hotkey] ⌘空格 事件口创建失败：需要在 系统设置→隐私与安全性→辅助功能 中允许「资源探测」");
+        NSLog(@"[hotkey] ⌘空格 事件口创建失败：需要在 系统设置→隐私与安全性→辅助功能 中允许「觅流」");
         // 只在用户明确想要 ⌘空格 时才引导（应用内 ⌘P 无需任何权限）。
         // 弹过一次或用户点过“以后再说”就永久记住，绝不在每次启动时打扰。
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -419,7 +431,7 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
             alert.messageText = @"⌘空格 暂停下载需要一次系统授权";
             alert.informativeText = @"APP 内直接按 ⌘P 即可暂停/继续下载，无需任何权限。"
                                      "若你更想用 ⌘空格（系统级），请在「系统设置 → 隐私与安全性 → 辅助功能」"
-                                     "中打开「资源探测」并重启 APP；不想授权就忽略本提示，下次不再出现。";
+                                     "中打开「觅流」并重启 APP；不想授权就忽略本提示，下次不再出现。";
             [alert addButtonWithTitle:@"打开设置"];
             [alert addButtonWithTitle:@"用 ⌘P 就好"];
             if ([alert runModal] == NSAlertFirstButtonReturn) {
@@ -481,10 +493,10 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     NSMenuItem *appItem = [[NSMenuItem alloc] init];
     [mainMenu addItem:appItem];
     NSMenu *appMenu = [[NSMenu alloc] init];
-    [appMenu addItemWithTitle:@"关于 资源探测" action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+    [appMenu addItemWithTitle:@"关于 觅流" action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
     [appMenu addItem:[NSMenuItem separatorItem]];
-    [appMenu addItemWithTitle:@"隐藏 资源探测" action:@selector(hide:) keyEquivalent:@"h"];
-    [appMenu addItemWithTitle:@"退出 资源探测" action:@selector(terminate:) keyEquivalent:@"q"];
+    [appMenu addItemWithTitle:@"隐藏 觅流" action:@selector(hide:) keyEquivalent:@"h"];
+    [appMenu addItemWithTitle:@"退出 觅流" action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = appMenu;
 
     NSMenuItem *editItem = [[NSMenuItem alloc] initWithTitle:@"编辑" action:nil keyEquivalent:@""];
@@ -536,7 +548,7 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
 
     NSRect frame = NSMakeRect(0, 0, 980, 700);
     self.window = [[RDSlashWindow alloc] initWithContentRect:frame styleMask:(NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskResizable) backing:NSBackingStoreBuffered defer:NO];
-    self.window.title = @"资源探测";
+    self.window.title = @"觅流";
     // 暖纸背景 #FAF8F4：纸感浅色，眩光低于纯白，纯黑斜杠如墨水落于纸上
     NSColor *paperColor = [NSColor colorWithSRGBRed:0.980 green:0.973 blue:0.957 alpha:1.0];
     self.window.backgroundColor = paperColor;
@@ -2276,6 +2288,21 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     [self.clearDownloadRecordsButton sizeToFit];
     addRow(@"一键清除下载记录", nil, @[self.clearDownloadRecordsButton]);
 
+    // 第 13 轮新增：清除 App 自己的网站会话（Cookie / 缓存 / 本地存储 / IndexedDB）。
+    // 与「一键清除下载记录」同行同构：无边框、红色文字、sizeToFit、带 identifier。
+    // 只清 App 容器内的存储（WKWebsiteDataStore.defaultDataStore），不触碰 Safari；
+    // 不读取、不打印、不导出被清除的内容。
+    self.clearSiteSessionButton = [NSButton buttonWithTitle:@"清除" target:self action:@selector(clearSiteSession:)];
+    self.clearSiteSessionButton.bordered = NO;
+    self.clearSiteSessionButton.font = [NSFont systemFontOfSize:12];
+    self.clearSiteSessionButton.identifier = @"RDClearSiteSessionButton";
+    self.clearSiteSessionButton.attributedTitle =
+        [[NSAttributedString alloc] initWithString:@"清除"
+                                        attributes:@{NSFontAttributeName: self.clearSiteSessionButton.font,
+                                                     NSForegroundColorAttributeName: [NSColor systemRedColor]}];
+    [self.clearSiteSessionButton sizeToFit];
+    addRow(@"清除网站会话", nil, @[self.clearSiteSessionButton]);
+
     // 卡片 4：日志 —— 独立成组（主人 2026-09-17 明确要求），把原来飘在页面顶部中间的
     // 「打开日志 / 导出诊断」收成与其它行同构的一行。
     // 第 12 轮起表单区可滚动，最小窗口下「日志」会被滚出可视区，但仍在文档视图内可达。
@@ -2346,6 +2373,28 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     [self.downloadManager clearAllDownloadRecords];
     [self refreshDownloadsList];
     self.statusNote.stringValue = @"下载记录已清除（磁盘文件未删除）";
+}
+
+// 清除 App 自己的网站会话：Cookie / 缓存 / 本地存储 / IndexedDB 一并清空。
+// 只作用于 App 容器内的存储，不动 Safari；不读取、不打印被清除的内容。
+- (void)clearSiteSession:(id)sender {
+    self.clearSiteSessionButton.enabled = NO;
+    self.statusNote.stringValue = @"正在清除网站会话…";
+    NSInteger clearOp = ++self.sessionClearGeneration;
+    __weak typeof(self) weakSelf = self;
+    [RDManualVerificationController clearSharedSessionDataStoreWithCompletion:^{
+        typeof(self) sself = weakSelf;
+        if (!sself) return;
+        // 过期回调（清除期间已开始新探测/取消等更新的操作）：只恢复按钮可用，
+        // **绝不改写**更新的状态文案；成功路径（无更新操作）保持原有文案与行为不变。
+        if (sself.sessionClearGeneration != clearOp) {
+            sself.clearSiteSessionButton.enabled = YES;
+            return;
+        }
+        sself.clearSiteSessionButton.enabled = YES;
+        sself.statusNote.stringValue = @"网站会话已清除（仅本 App 的 Cookie/缓存/本地存储）";
+        RDLogWrite(@"app", @"已清除本 App 的网站会话数据（不读取、不打印任何 Cookie 内容）");
+    }];
 }
 
 - (void)chooseDownloadLocation:(id)sender {
@@ -2446,6 +2495,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 }
 
 - (void)scan:(id)sender {
+    self.sessionClearGeneration += 1;   // 新的探测意图作废在途的“清除会话”完成回调
     if (self.scanning) { self.statusNote.stringValue = @"正在探测中，按 Esc 取消后再试"; return; }
     NSString *s = [self.urlField.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     NSURL *u = [NSURL URLWithString:s];
@@ -2454,6 +2504,10 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     // 连接，更不允许迟到的快照写进这一轮的结果。统一呈现状态一并重置，
     // 新探测绝不继承上一轮的加载状态。
     [self cancelPresentationPreparation];
+    // 手动验证状态同样不得跨轮继承：新探测就关掉旧的验证窗口与待恢复状态，
+    // 绝不因为上一轮遗留的状态自动恢复探测。
+    [self cleanupManualVerification];
+    self.lastScanSeedURL = u;
     self.pendingCompletionStatus = nil;
     // 严格统一呈现：新探索开始就抑制列表呈现，探索完成才一次性出现。
     self.explorationResultsSuppressed = YES;
@@ -2480,6 +2534,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 }
 
 - (void)cancelScan:(id)sender {
+    self.sessionClearGeneration += 1;   // 取消同样作废在途的“清除会话”完成回调
     // 准备呈现阶段（页面探测已回调完成、列表缩略图/详情仍在读取）也必须可取消。
     if (!self.scanning && !self.presentationPreparing) return;
     [self cancelPresentationPreparation];
@@ -2494,6 +2549,201 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     self.scanGeneration += 1;   // 作废本次探次的迟到回调，避免覆盖“已取消探测”
     self.modeButton.hidden = NO;
     self.statusNote.stringValue = @"已取消探测";
+    [self cleanupManualVerification];
+}
+
+#pragma mark - 手动验证后继续探测（第 13 轮接线）
+
+// 模块本体（识别规则与红线）见 RDManualVerification.h。这里只做三件事：
+// ① 探测失败时按**公开文案/标题**判断是不是人机验证页；② 给用户一个「打开验证窗口」
+// 的入口；③ 用户自己完成验证后，按该模块的原设计**恢复一次**真实探测。
+// 绝不替用户点击、绝不模拟验证过程、绝不读取/打印/外发 Cookie。
+
+// 从 HTML 里取 <title> 文本（只用于公开信号判定，不做 DOM 解析）。
+static NSString *RDVerificationTitleFromHTML(NSString *html) {
+    if (!html.length) return @"";
+    NSRange open = [html rangeOfString:@"<title" options:NSCaseInsensitiveSearch];
+    if (open.location == NSNotFound) return @"";
+    NSRange close = [html rangeOfString:@">" options:0 range:NSMakeRange(NSMaxRange(open), html.length - NSMaxRange(open))];
+    if (close.location == NSNotFound) return @"";
+    NSUInteger from = NSMaxRange(close);
+    NSRange end = [html rangeOfString:@"</title" options:NSCaseInsensitiveSearch
+                                range:NSMakeRange(from, html.length - from)];
+    if (end.location == NSNotFound) return @"";
+    NSString *raw = [html substringWithRange:NSMakeRange(from, end.location - from)];
+    return [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+}
+
+// 懒加载控制器并装上「恢复一次探测」的回调（该回调只会被模块在用户操作后触发一次）。
+- (RDManualVerificationController *)manualVerification {
+    if (!_manualVerification) {
+        _manualVerification = [RDManualVerificationController new];
+        __weak typeof(self) weakSelf = self;
+        _manualVerification.resumeHandler = ^(NSString *url) {
+            typeof(self) sself = weakSelf;
+            if (!sself) return;
+            [sself resumeProbeAfterManualVerificationWithURL:url];
+        };
+    }
+    return _manualVerification;
+}
+
+// 本轮探测失败且一个资源都没拿到：只读一次页面 HTML，按公开文案判断是否需要
+// 用户手动完成人机验证。HTML 读取走探测自己的 WebKit 会话存储（与验证窗口同一实例），
+// 但**不读取任何 Cookie**：这里只看页面正文与标题里本来就写给用户看的字样。
+- (void)beginVerificationSignalCheckForURL:(NSURL *)url generation:(NSInteger)generation {
+    [self cancelVerificationSignalCheck];
+    self.verificationCheckGeneration = generation;
+    __weak typeof(self) weakSelf = self;
+    self.verificationCheckToken =
+        [self.session loadHTMLForURL:url completion:^(NSString *html, NSURL *finalURL, NSError *error) {
+            typeof(self) sself = weakSelf;
+            if (!sself) return;
+            sself.verificationCheckToken = nil;
+            // 迟到回调作废：已经换了新探次、已经在探测中、或用户已取消。
+            if (sself.scanGeneration != generation || sself.scanning) return;
+            NSString *pageHTML = html ?: @"";
+            NSString *title = RDVerificationTitleFromHTML(pageHTML);
+            if (![RDVerificationDetector pageRequiresHumanVerificationWithHTML:pageHTML
+                                                                        title:title
+                                                               httpStatusCode:0]) return;
+            NSString *reason = [RDVerificationDetector localizedReasonForVerificationPageWithHTML:pageHTML
+                                                                                           title:title];
+            [sself presentManualVerificationPromptWithReason:reason URL:url];
+        }];
+}
+
+- (void)cancelVerificationSignalCheck {
+    if (!self.verificationCheckToken) return;
+    [self.session cancelHTMLRequest:self.verificationCheckToken];
+    self.verificationCheckToken = nil;
+}
+
+// 用户可见的提示 + 「打开验证窗口」入口。用户不点，就什么都不发生（不自动重试）。
+- (void)presentManualVerificationPromptWithReason:(NSString *)reason URL:(NSURL *)url {
+    self.statusNote.stringValue = reason;
+    RDLogWrite(@"probe", @"页面出现人机验证类公开信号，提示用户手动验证 url=%@", url.absoluteString ?: @"(nil)");
+    // 无界面 / 无人值守运行（窗口不可见）不弹窗：避免打断黑盒探针与批量测试。
+    if (!self.window.isVisible) return;
+    [self.manualVerification prepareVerificationForURL:url.absoluteString
+                                             dataStore:[RDManualVerificationController sharedSessionDataStore]];
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"需要手动完成人机验证";
+    alert.informativeText = [NSString stringWithFormat:
+        @"%@\n\n可以打开验证窗口，由你自己完成验证；完成后 App 会再探测一次。\n"
+        @"App 不会替你点击、不会模拟验证过程，也不会读取或外发任何 Cookie。", reason];
+    [alert addButtonWithTitle:@"打开验证窗口"];
+    [alert addButtonWithTitle:@"稍后"];
+    __weak typeof(self) weakSelf = self;
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+        typeof(self) sself = weakSelf;
+        if (!sself) return;
+        if (response == NSAlertFirstButtonReturn) [sself openManualVerificationWindow];
+        else [sself.manualVerification cancelManualVerification];   // 用户选择稍后：不打开、不重试
+    }];
+}
+
+// 可见验证窗口：配置**强制**取自模块的 verificationWebViewConfiguration，
+// 其 websiteDataStore 就是探测 WebView 用的那一个实例（同源会话自然延续）。
+- (void)openManualVerificationWindow {
+    NSString *pending = self.manualVerification.pendingURL;
+    NSURL *pendingURL = pending.length ? [NSURL URLWithString:pending] : nil;
+    if (!pendingURL.host.length) { [self cleanupManualVerification]; return; }
+
+    NSRect contentRect = NSMakeRect(0, 0, 900, 640);
+    NSWindow *window = [[NSWindow alloc] initWithContentRect:contentRect
+                                                  styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                                                             NSWindowStyleMaskResizable)
+                                                    backing:NSBackingStoreBuffered
+                                                      defer:NO];
+    window.title = @"手动完成验证";
+    window.releasedWhenClosed = NO;
+    NSView *content = window.contentView;
+
+    CGFloat barH = 60;
+    WKWebView *web = [[WKWebView alloc] initWithFrame:NSMakeRect(0, barH,
+                                                                NSWidth(contentRect), NSHeight(contentRect) - barH)
+                                        configuration:[self.manualVerification verificationWebViewConfiguration]];
+    web.navigationDelegate = self;
+    web.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [content addSubview:web];
+
+    NSTextField *hint = [[NSTextField alloc] initWithFrame:NSMakeRect(16, 10, NSWidth(contentRect) - 320, 40)];
+    hint.bezeled = NO; hint.drawsBackground = NO; hint.editable = NO; hint.selectable = NO;
+    hint.font = [NSFont systemFontOfSize:11];
+    hint.textColor = [NSColor secondaryLabelColor];
+    hint.stringValue = @"请在这个窗口里自己完成验证。完成后点右侧「验证完成，继续探测」；App 只会在你点击后恢复一次探测。";
+    hint.autoresizingMask = NSViewWidthSizable;
+    [content addSubview:hint];
+
+    NSButton *done = [NSButton buttonWithTitle:@"验证完成，继续探测" target:self action:@selector(confirmManualVerification:)];
+    done.controlSize = NSControlSizeSmall;
+    done.font = [NSFont systemFontOfSize:11.5];
+    done.identifier = @"RDManualVerificationResumeButton";
+    [done sizeToFit];
+    NSButton *cancel = [NSButton buttonWithTitle:@"取消" target:self action:@selector(cancelManualVerificationFromWindow:)];
+    cancel.controlSize = NSControlSizeSmall;
+    cancel.font = [NSFont systemFontOfSize:11.5];
+    cancel.identifier = @"RDManualVerificationCancelButton";
+    [cancel sizeToFit];
+    CGFloat buttonY = floor((barH - NSHeight(done.frame)) / 2.0) + 6;
+    cancel.frame = NSMakeRect(NSWidth(contentRect) - 16 - NSWidth(cancel.frame), buttonY,
+                              NSWidth(cancel.frame), NSHeight(cancel.frame));
+    cancel.autoresizingMask = NSViewMinXMargin;
+    done.frame = NSMakeRect(NSMinX(cancel.frame) - 10 - NSWidth(done.frame), buttonY,
+                            NSWidth(done.frame), NSHeight(done.frame));
+    done.autoresizingMask = NSViewMinXMargin;
+    [content addSubview:done];
+    [content addSubview:cancel];
+
+    [self.manualVerification attachVerificationWindow:window webView:web];
+    [web loadRequest:[NSURLRequest requestWithURL:pendingURL]];
+    [window center];
+    [window makeKeyAndOrderFront:nil];
+}
+
+// 用户点击「验证完成，继续探测」：挑战仍在 → 不开探测（模块返回 NO，只给提示）；
+// 挑战已消失 → 模块关闭窗口并触发 resumeHandler，恢复**一次**真实探测。
+- (void)confirmManualVerification:(id)sender {
+    if ([self.manualVerification resumeAfterVerification]) return;
+    self.statusNote.stringValue = @"看起来验证还没完成，请先在验证窗口里完成后再点一次";
+}
+
+- (void)cancelManualVerificationFromWindow:(id)sender {
+    [self.manualVerification cancelManualVerification];
+    self.statusNote.stringValue = @"已取消手动验证";
+}
+
+// 模块 resumeHandler 的唯一出口：这里就是那次「恢复一次探测」，不循环、不自动重试。
+- (void)resumeProbeAfterManualVerificationWithURL:(NSString *)url {
+    if (!url.length) return;
+    RDLogWrite(@"probe", @"用户手动完成验证后恢复一次探测 url=%@", url);
+    self.urlField.stringValue = url;
+    [self scan:nil];
+}
+
+// 关窗、切页、退出：清理待恢复状态，绝不恢复探测。
+- (void)cleanupManualVerification {
+    [self cancelVerificationSignalCheck];
+    [self.manualVerification cleanupManualVerification];
+}
+
+// 可见验证 WebView 每次导航完成：按可见页内容更新「挑战是否仍在」（模块据此放行恢复）。
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    if (webView != self.manualVerification.verificationWebView) return;
+    __weak typeof(self) weakSelf = self;
+    [webView evaluateJavaScript:@"document.documentElement.outerHTML"
+              completionHandler:^(id _Nullable html, NSError * _Nullable error) {
+        typeof(self) sself = weakSelf;
+        if (!sself) return;
+        if (webView != sself.manualVerification.verificationWebView) return;   // 窗口已关闭
+        NSString *pageHTML = [html isKindOfClass:[NSString class]] ? (NSString *)html : @"";
+        NSString *title = RDVerificationTitleFromHTML(pageHTML);
+        sself.manualVerification.verificationPresent =
+            [RDVerificationDetector pageRequiresHumanVerificationWithHTML:pageHTML
+                                                                   title:title
+                                                          httpStatusCode:0];
+    }];
 }
 
 - (void)finishScanWithResult:(ZZResourceDiscoveryResult *)result {
@@ -2527,6 +2777,12 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
         self.pendingCompletionShowsCheck = YES;
     }
     self.statusNote.stringValue = @"正在准备呈现…";
+    // 一个资源都没拿到、且确实有失败：按页面公开文案判断是否要请用户手动完成验证。
+    // 只是「提示 + 入口」，用户不点就什么都不发生（不自动重试、不替用户点击）。
+    if (count == 0 && errors.count > 0) {
+        NSURL *seed = result.seedURL ?: self.lastScanSeedURL;
+        if (seed.host.length) [self beginVerificationSignalCheckForURL:seed generation:self.scanGeneration];
+    }
     [self beginUnifiedPresentationForResult:result];
     // 严格统一呈现：探索未完成前列表不出现任何行（“内容先冒出来、数据后补”
     // 正是 2026-09-13 验收发现的加载逻辑错误）；探索完成后由
@@ -2540,6 +2796,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 // 启动下载列表为空、未完成任务无处可寻（2026-09-08 任务丢失事故）。
 - (void)applicationWillTerminate:(NSNotification *)notification {
     RDLogWrite(@"app", @"applicationWillTerminate");
+    [self cleanupManualVerification];   // 退出即清理待恢复状态，绝不恢复探测
     RDLogFlush();   // 常规日志走异步队列，退出前排空，最后一刻的诊断行才不会丢
     [self.downloadManager markInterruptedOnTerminate];
 }
@@ -2565,6 +2822,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     } else {
         [self cancelPresentationPreparation];
     }
+    [self cleanupManualVerification];   // 地址被改动：手动验证状态与提示一并作废
     self.pendingCompletionStatus = nil;
     self.explorationResultsSuppressed = NO;
     [self.metadataToken cancel];

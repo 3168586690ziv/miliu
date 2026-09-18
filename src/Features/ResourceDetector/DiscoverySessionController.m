@@ -537,6 +537,19 @@ static NSTimeInterval DSCListingRetryDelay(NSUInteger retryAttempt) {
     [self.coordinator cancel];
 }
 
+#pragma mark - 探测失败后的公开信号检查（会话延续配套）
+
+// 复用探测自己的 HTML 来源（生产实现是共用同一 WebKit 会话存储的离屏 WebView）。
+// 这是一条独立的、只读的页面读取：不进入探测会话的状态机，也不影响在途探测任务。
+- (nullable id)loadHTMLForURL:(NSURL *)url completion:(ZZDiscoveryHTMLCompletion)completion {
+    if (!url || !completion) return nil;
+    return [self.htmlProvider loadHTMLForURL:url completion:completion];
+}
+
+- (void)cancelHTMLRequest:(nullable id)token {
+    [self.htmlProvider cancelHTMLRequest:token];
+}
+
 #pragma mark - 站点模式翻页（纯 URL 工具）
 
 + (NSInteger)siteMaxPages {

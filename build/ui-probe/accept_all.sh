@@ -1,10 +1,10 @@
 #!/bin/bash
-# build/ui-probe/accept_all.sh — 黑盒验收 ③④⑤⑥⑦ 一体化（用 build.sh 产出的 build/资源探测.app）
+# build/ui-probe/accept_all.sh — 黑盒验收 ③④⑤⑥⑦ 一体化（用 build.sh 产出的 build/觅流.app）
 # 用法：bash build/ui-probe/accept_all.sh            # 全部
 #       bash build/ui-probe/accept_all.sh 4         # 只跑某一项
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-APP="$ROOT/build/资源探测.app"
+APP="$ROOT/build/觅流.app"
 AX="$ROOT/build/ui-probe/AXProbe"
 TYPE="$ROOT/build/ui-probe/UIType"
 DRIVE="$ROOT/build/ui-probe/UIDrive"
@@ -15,7 +15,7 @@ run() { [ "$ONLY" = "all" ] || [ "$ONLY" = "$1" ]; }
 
 if run 4; then
 echo "================ ④ 探测阶段文案（真实网址）================"
-for u in "https://hlsjs.video-dev.org/demo/" "https://plyr.io/"; do
+for u in "https://example.com/demo/" "https://example.com/"; do
   echo "--- 网址 $u"
   "$AX" "$APP" pressid "RDBackButton" >/dev/null 2>&1; sleep 0.4
   "$AX" "$APP" submit "$u" >/dev/null 2>&1
@@ -27,7 +27,7 @@ fi
 if run 5; then
 echo "================ ⑤ 长标题：右侧完整显示 + 下方字段/直链/按钮不重叠 ================"
 "$AX" "$APP" pressid "RDBackButton" >/dev/null 2>&1; sleep 0.4
-"$AX" "$APP" submit "https://plyr.io/" >/dev/null 2>&1
+"$AX" "$APP" submit "https://example.com/" >/dev/null 2>&1
 "$AX" "$APP" press "⏎ 重新探测" >/dev/null 2>&1
 "$AX" "$APP" watchstatus 45 0.2 | tail -2
 "$DRIVE" "$APP" select-row resource 0

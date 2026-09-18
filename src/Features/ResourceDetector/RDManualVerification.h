@@ -35,6 +35,21 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface RDManualVerificationController : NSObject
 
+#pragma mark App 会话存储（探测 WebView 与验证窗口的唯一共享实例）
+
+// App 容器内的**持久化**网站数据存储（= WKWebsiteDataStore.defaultDataStore）。
+// 资源探测 WebView（WebProbe / ProductionDiscoveryHTMLProvider）与手动验证窗口
+// 必须都从这里取同一个实例：会话（含用户手动完成人机验证后拿到的通行证）才能
+// 跨探测延续，否则每次探测都是一位全新访客。
+// 边界：只使用 App 自己容器内的存储，绝不共享或读取 Safari 的数据。
+// 隐私：App 只让 WebKit 自己保管 Cookie —— 代码不读取、不打印、不导出任何 Cookie 内容。
++ (WKWebsiteDataStore *)sharedSessionDataStore;
+
+// 清除 App 自己的全部网站数据（Cookie / 缓存 / 本地存储 / IndexedDB 等）。
+// 只作用于 App 容器内的存储，不触碰 Safari 或系统其它 App 的数据；
+// 不读取、不打印被清除的内容，只在完成后回调（主线程）。
++ (void)clearSharedSessionDataStoreWithCompletion:(void (^ _Nullable)(void))completion;
+
 @property (nonatomic, copy, nullable) NSString *pendingURL;            // 待恢复探测的 URL
 @property (nonatomic, strong, nullable) WKWebsiteDataStore *sharedDataStore; // 与资源探测 WebView 共享
 @property (nonatomic, strong, nullable) NSWindow *verificationWindow;  // 可见验证窗口（GUI 创建后注入）

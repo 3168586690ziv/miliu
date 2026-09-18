@@ -28,7 +28,7 @@ static NSError *StreamError(NSString *text) { return [NSError errorWithDomain:@"
 }
 - (void)start {
     NSError *error=nil;
-    if(!self.muxer || ![[NSFileManager defaultManager]isExecutableFileAtPath:self.muxer.path]){[self finish:nil response:nil error:StreamError(@"离线视频合成组件缺失，请重新安装完整的资源探测 App")];return;}
+    if(!self.muxer || ![[NSFileManager defaultManager]isExecutableFileAtPath:self.muxer.path]){[self finish:nil response:nil error:StreamError(@"离线视频合成组件缺失，请重新安装完整的觅流 App")];return;}
     if(![[NSFileManager defaultManager]createDirectoryAtURL:self.root withIntermediateDirectories:YES attributes:nil error:&error]){[self finish:nil response:nil error:error];return;}
     [self manifest:self.startURL ?: self.request.URL depth:0 completion:^{[self mux];}];
 }

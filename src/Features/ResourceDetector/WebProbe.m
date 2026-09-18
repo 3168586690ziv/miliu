@@ -3,6 +3,7 @@
 //
 #import "WebProbe.h"
 #import "RDLog.h"
+#import "RDManualVerification.h"   // 共享会话存储（探测 WebView 与验证窗口同一实例）
 #import "RDURLUtilities.h"
 #import "RDQualityTier.h"
 #import "URLPolicy.h"
@@ -967,7 +968,13 @@ static NSUInteger RDProbeNextTaskID(void) {
     self.detached = NO;
 
     WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];   // 主线程
-    cfg.websiteDataStore = WKWebsiteDataStore.nonPersistentDataStore;
+    // 会话延续（第 13 轮）：这里原来用 nonPersistentDataStore 做会话隔离，
+    // 结果是每次探测都是全新访客，用户手动完成人机验证拿到的通行证也无法用于真正的
+    // 资源探测。现改为 App 容器内的持久化存储，并与手动验证窗口共用同一实例
+    // （既让同源会话自然延续，也保证探测与验证窗口确实看到同一个会话）。
+    // 边界与隐私不变：只用 App 自己的存储，不共享/不读取 Safari 数据；
+    // Cookie 只由 WebKit 自己保管，本代码不读取、不打印、不导出。
+    cfg.websiteDataStore = [RDManualVerificationController sharedSessionDataStore];
     RDScriptBridgeHandler *bridge = [RDScriptBridgeHandler new];
     RDWebProbeSession *session = [[RDWebProbeSession alloc] initWithContext:ctx];
     __weak RDWebProbeSession *weakSession = session;

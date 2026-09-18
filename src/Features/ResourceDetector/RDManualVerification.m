@@ -92,12 +92,47 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark - RDManualVerificationController（hotfix-resource-manual-verification-resume-01）
 
-@interface RDManualVerificationController ()
+@interface RDManualVerificationController () <NSWindowDelegate>
++ (void)rd_setClearSessionOverrideForTesting:(void (^ _Nullable)(void (^completion)(void)))override;
 @property (nonatomic, assign, readwrite) NSUInteger resumeCallCount;
 @property (nonatomic, assign, readwrite) NSUInteger actualResumeCount;
 @end
 
 @implementation RDManualVerificationController
+
+#pragma mark App 会话存储（唯一共享实例）
+
++ (WKWebsiteDataStore *)sharedSessionDataStore {
+    // defaultDataStore = App 自己容器内的持久化存储（按 bundle id 隔离）。
+    // 原先探测侧用的是 nonPersistentDataStore（每次探测都是全新访客，Cookie 与
+    // 手动验证拿到的会话探测一结束就丢），这里统一改为持久化存储，并让探测 WebView
+    // 与验证窗口取同一个实例。仍然只动 App 自己的容器：不共享、不读取 Safari 的数据。
+    return WKWebsiteDataStore.defaultDataStore;
+}
+
+// 测试专用注入点（默认 nil → 生产行为完全不变）：让无 GUI 受控测试可以在**不触碰**
+// 真实 WKWebsiteDataStore.defaultDataStore、不触碰任何用户会话的前提下，控制清除完成的时机。
+static void (^gRDClearSessionOverrideForTesting)(void (^completion)(void)) = nil;
+
++ (void)rd_setClearSessionOverrideForTesting:(void (^ _Nullable)(void (^completion)(void)))override {
+    gRDClearSessionOverrideForTesting = [override copy];
+}
+
++ (void)clearSharedSessionDataStoreWithCompletion:(void (^ _Nullable)(void))completion {
+    if (gRDClearSessionOverrideForTesting) {   // 仅测试注入时走此分支
+        gRDClearSessionOverrideForTesting(completion ?: ^{});
+        return;
+    }
+    WKWebsiteDataStore *store = [self sharedSessionDataStore];
+    NSSet<NSString *> *allTypes = [WKWebsiteDataStore allWebsiteDataTypes];
+    [store removeDataOfTypes:allTypes
+               modifiedSince:[NSDate dateWithTimeIntervalSince1970:0]
+           completionHandler:^{
+        // 不读取、不打印、不落盘任何 Cookie / 凭据：这里只报告「已清除」这一个事实。
+        if (!completion) return;
+        dispatch_async(dispatch_get_main_queue(), completion);
+    }];
+}
 
 - (instancetype)init {
     self = [super init];
@@ -128,6 +163,20 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)attachVerificationWindow:(NSWindow *)window webView:(WKWebView *)webView {
     self.verificationWindow = window;
     self.verificationWebView = webView;
+    // 红叉关闭必须收尾（2026-09-18 受控复现：此前无人接住 windowWillClose，
+    // 关闭后 isPresenting 仍为 YES、窗口/WebView 仍被强引用，直到下一次 scan/cancel）。
+    window.delegate = self;
+}
+
+- (void)windowWillClose:(NSNotification *)notification {
+    if (notification.object != self.verificationWindow) return;   // 只处理验证窗口
+    // 注意：**不调用 close**，否则 close 内再触发本回调会造成重入；此处只做状态清空。
+    if (self.verificationWebView) [self.verificationWebView stopLoading];
+    self.verificationWebView = nil;
+    self.verificationWindow = nil;
+    self.pendingURL = nil;
+    self.isPresenting = NO;
+    self.verificationPresent = NO;
 }
 
 - (BOOL)verificationStillPresentInWebView:(WKWebView * _Nullable)webView {

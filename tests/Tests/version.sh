@@ -105,14 +105,14 @@ ASAN_OPTIONS=detect_leaks=0 \
   "$OUT/VersionTests" "$@"
 
 # ── 4. 默认构建（不带 --release-fix，不递增轮数，不改动 PROJECT_VERSION.json） ──
-bash "$REPO/scripts/build.sh" "$BUILD/资源探测.app" > "$OUT/build.log" 2>&1 || { cat "$OUT/build.log"; fail "默认构建失败"; }
+bash "$REPO/scripts/build.sh" "$BUILD/觅流.app" > "$OUT/build.log" 2>&1 || { cat "$OUT/build.log"; fail "默认构建失败"; }
 grep -qx "CODE_LINES=$CODE_LINES" "$OUT/build.log" || fail "构建日志缺少/不匹配 CODE_LINES=$CODE_LINES"
 grep -qx "FIX_ROUND=$FIX_ROUND" "$OUT/build.log" || fail "构建日志缺少/不匹配 FIX_ROUND=$FIX_ROUND"
 grep -qx "DISPLAY_VERSION=$DISPLAY_VERSION" "$OUT/build.log" || fail "构建日志缺少/不匹配 DISPLAY_VERSION=$DISPLAY_VERSION"
 [ "$(cat "$JSON_REAL")" = "$JSON_BEFORE" ] || fail "默认构建修改了 PROJECT_VERSION.json（默认构建绝不递增/改动轮数）"
 
 # ── 5. App 二进制 / Info.plist / 构建日志 / lastReleaseVersion 一致性 ──
-APP="$BUILD/资源探测.app"; BIN="$APP/Contents/MacOS/SevenZZResourceDetector"
+APP="$BUILD/觅流.app"; BIN="$APP/Contents/MacOS/SevenZZResourceDetector"
 SHORT="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 BUILDNO="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")"
 [ "$SHORT" = "$DISPLAY_VERSION" ] || fail "CFBundleShortVersionString($SHORT) != DISPLAY_VERSION($DISPLAY_VERSION)"

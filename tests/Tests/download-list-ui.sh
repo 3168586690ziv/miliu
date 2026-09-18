@@ -10,9 +10,9 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
-APP="$REPO/build/资源探测.app"
+APP="$REPO/build/觅流.app"
 BIN="$APP/Contents/MacOS/SevenZZResourceDetector"
-PROCESS_NAME="资源探测"
+PROCESS_NAME="觅流"
 
 if [ "${RD_SKIP_AX:-0}" = "1" ]; then
   echo "SKIP: RD_SKIP_AX=1，跳过辅助功能自动化检查"
@@ -48,7 +48,7 @@ for _ in $(seq 1 40); do
 done
 
 RESULT="$(osascript <<'APPLESCRIPT' 2>&1
-tell application "System Events" to tell process "资源探测"
+tell application "System Events" to tell process "觅流"
   tell window 1
     click (first button whose name contains "下载列表")
     delay 1.2
@@ -120,4 +120,4 @@ if echo "$RESULT" | grep -q '^ROWNAME=视频\|^ROWNAME=图片'; then
   fail "行内主文本仍以类型称号开头"
 fi
 
-echo "PASS: 下载列表真实界面回归通过（行数=$EXPECT_ALL＝16 注入 + $REAL_INTERRUPTED 用户中断、四个筛选正确、空状态条件正确、行内为文件名且无类型称号）"
+echo "PASS: 下载列表真实界面回归通过（行数=$EXPECT_ALL=16 注入 + $REAL_INTERRUPTED 用户中断、四个筛选正确、空状态条件正确、行内为文件名且无类型称号）"

@@ -28,7 +28,7 @@ for arg in "$@"; do
     *) [ -z "$OUT" ] || { echo "FAIL: 多余参数：$arg" >&2; exit 2; }; OUT="$arg" ;;
   esac
 done
-OUT="${OUT:-$ROOT/build/资源探测.app}"; BIN="$OUT/Contents/MacOS/SevenZZResourceDetector"
+OUT="${OUT:-$ROOT/build/觅流.app}"; BIN="$OUT/Contents/MacOS/SevenZZResourceDetector"
 
 [ -f "$VERSION_JSON" ] || { echo "FAIL: 缺少 $VERSION_JSON（修复轮数唯一来源）" >&2; exit 1; }
 

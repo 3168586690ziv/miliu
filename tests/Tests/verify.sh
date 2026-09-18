@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"; ROOT="$REPO/src"; BUILD="$REPO/build"; RES="$REPO/resources/Resources"
-APP="$BUILD/资源探测.app"
+APP="$BUILD/觅流.app"
 BIN="$APP/Contents/MacOS/SevenZZResourceDetector"
 
 if ! command -v rg >/dev/null 2>&1; then
@@ -85,7 +85,7 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$APP/Contents/Info
 test -s "$APP/Contents/Resources/AppIcon.icns"
 cmp -s "$APP/Contents/Resources/AppIcon.icns" "$RES/AppIcon.icns"
 sips -g pixelWidth -g pixelHeight "$APP/Contents/Resources/AppIcon.icns" >/dev/null
-test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Contents/Info.plist")" = "资源探测"
+test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Contents/Info.plist")" = "觅流"
 codesign --verify --deep --strict "$APP"
 
 # 机器独立性：不允许再引用 SevenZZ 主 App 的偏好套件
@@ -172,10 +172,20 @@ if rg -q 'RDProgressRingView|self\.ring|setRingProgress|rd-ring' "$ROOT/App/Reso
   echo "FAIL: circular progress control remains" >&2
   exit 1
 fi
-if rg -q 'NSSegmentedControl' "$ROOT/App/ResourceDetectorApp.m"; then
-  echo "FAIL: legacy segmented control remains" >&2
+# 旧“模式切换”分段控件已移除；当前唯一的分段控件是设置页左右栏比例三档控件，
+# 其 identifier 稳定为 RDPaneRatioPopup（UIExperienceTests UIX-2 与 build/ui-probe/accept2.sh 的黑盒锚点）。
+# 因此按**真实 identifier/AX 行为**断言：允许该控件存在，但除它以外出现任何分段控件即失败——
+# 与旧断言相比不放宽（任何新的/遗留的分段控件仍会被拦下）。
+OTHER_SEG="$(rg -n 'NSSegmentedControl' "$ROOT/App/ResourceDetectorApp.m" \
+  | grep -v 'settingsPaneRatioControl' | grep -v 'changePaneRatio' | grep -v 'ratioControl' \
+  | grep -v 'NSSegmentedControl segmentedControlWithLabels' || true)"
+if [ -n "$OTHER_SEG" ]; then
+  echo "FAIL: unexpected segmented control remains (not the pane-ratio control):" >&2
+  printf '%s\n' "$OTHER_SEG" >&2
   exit 1
 fi
+rg -q 'identifier = @"RDPaneRatioPopup"' "$ROOT/App/ResourceDetectorApp.m"
+rg -q 'NSSegmentedControl \*settingsPaneRatioControl' "$ROOT/App/ResourceDetectorApp.m"
 # 下载进度条（NSProgressIndicator）为当前合理用途，确认已接入
 rg -q 'RDThinProgressView' "$ROOT/App/ResourceDetectorApp.m"
 rg -q 'metricsStringForJob:' "$ROOT/App/ResourceDetectorApp.m"

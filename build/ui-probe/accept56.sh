@@ -2,13 +2,13 @@
 # build/ui-probe/accept56.sh — ⑤ 长标题详情文本比对 + ⑥ 下载提交状态（黑盒，真实 App）
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-APP="$ROOT/build/资源探测.app"
+APP="$ROOT/build/觅流.app"
 AX="$ROOT/build/ui-probe/AXProbe"
 DRIVE="$ROOT/build/ui-probe/UIDrive"
 AUD="python3 $ROOT/build/ui-probe/ui_audit.py"
 
-echo "== 探测 plyr.io（真实网址）=="
-"$AX" "$APP" submit "https://plyr.io/" >/dev/null 2>&1
+echo "== 探测 example.com（示例网址）=="
+"$AX" "$APP" submit "https://example.com/" >/dev/null 2>&1
 "$AX" "$APP" press "⏎ 重新探测" >/dev/null 2>&1
 "$AX" "$APP" watchstatus 50 0.2 | tail -2
 echo "== 选中第 1 行 =="

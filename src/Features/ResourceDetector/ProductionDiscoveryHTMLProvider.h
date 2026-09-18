@@ -1,8 +1,9 @@
 //
 //  ProductionDiscoveryHTMLProvider.h — 第 5 阶段｜生产页面 HTML 来源
 //
-//  用专用 WKWebView（nonPersistentDataStore 会话隔离，与生产资源探测
-//  WebView 同款做法）加载页面并取回渲染后的 outerHTML：
+//  用专用 WKWebView（App 容器内的**持久化**会话存储，与手动验证窗口共用
+//  同一实例：第 13 轮起由会话隔离改为会话延续，见 .m 中的说明）加载页面并
+//  取回渲染后的 outerHTML：
 //  · 导航的每一跳（含重定向）经 URLPolicy（evaluateRedirect 文本校验 +
 //    ResourceURLGate verifyURLAsync DNS 后全 IP 校验）——与生产资源探测
 //    WebView 的 decidePolicyForNavigationAction 同一安全边界，不绕过任何

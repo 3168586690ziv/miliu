@@ -9,7 +9,7 @@ OUT="$REPO/build/bug16-tests"
 export RD_LOG_PATH="$OUT/test-ResourceDetector.log"
 mkdir -p "$OUT"
 SRC=("$REPO/tests/Tests/Bug16RegressionTests.m")
-for f in ResourceDiscoveryCoordinator MultiPageResourceProbe MultiPageProbeResult SubpageLinkExtractor RDResourceModeFilter DetectedMedia RDQualityTier RDResourceDisplayMetadata WebProbe URLPolicy ResourceDetectorViewModel; do
+for f in ResourceDiscoveryCoordinator MultiPageResourceProbe MultiPageProbeResult SubpageLinkExtractor RDResourceModeFilter DetectedMedia RDQualityTier RDResourceDisplayMetadata WebProbe RDManualVerification URLPolicy ResourceDetectorViewModel; do
   SRC+=("$ROOT/Features/ResourceDetector/$f.m")
 done
 for f in AppError DNSResolver IPAddressPolicy HTTPPrivacyPolicy HTTPRequest HTTPResult HTTPClient RDLog; do

@@ -84,7 +84,7 @@ def main():
     root = Path(__file__).resolve().parents[1]
     args = sys.argv[1:]
     outputs = [a for a in args if not a.startswith('-')]
-    output = Path(outputs[-1]).absolute() if outputs else root / 'build/资源探测.app'
+    output = Path(outputs[-1]).absolute() if outputs else root / 'build/觅流.app'
     try:
         with transaction(root, [output / 'Contents/Info.plist']):
             env = dict(os.environ, RD_BUILD_TRANSACTION_PID=str(os.getpid()))

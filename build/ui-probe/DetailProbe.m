@@ -72,12 +72,12 @@ int main(void) {
         for (int t = 0; t < 2; t++) {
             DetectedMedia *m = [DetectedMedia new];
             m.title = titles[t];
-            m.mediaURL = @"https://manifest-oci-us-ashburn-1-vop1.fastly.mux.com/b01KKUv00d96MgJ1inKYWu4b5enEJIVMnszJqBkHh00/tracks/v1/variant.m3u8";
-            m.sourcePageURL = @"https://plyr.io/";
+            m.mediaURL = @"https://cdn.example.com/b01KKUv00d96MgJ1inKYWu4b5enEJIVMnszJqBkHh00/tracks/v1/variant.m3u8";
+            m.sourcePageURL = @"https://example.com/";
             m.format = @"hls";
             m.resourceKind = RDResourceKindManifest;
-            m.declaredVariants = @[ @{@"label": @"720p", @"level": @720, @"url": @"https://manifest-oci-us-ashburn-1-vop1.fastly.mux.com/a/variant-720.m3u8"},
-                                    @{@"label": @"1080p", @"level": @1080, @"url": @"https://manifest-oci-us-ashburn-1-vop1.fastly.mux.com/a/variant-1080.m3u8"} ];
+            m.declaredVariants = @[ @{@"label": @"720p", @"level": @720, @"url": @"https://cdn.example.com/a/variant-720.m3u8"},
+                                    @{@"label": @"1080p", @"level": @1080, @"url": @"https://cdn.example.com/a/variant-1080.m3u8"} ];
             [app configureDetailForMedia:m];
             for (int i = 0; i < 5; i++) {
                 app.window.contentView.frame = NSMakeRect(0, 0, sizes[i][0], sizes[i][1]);

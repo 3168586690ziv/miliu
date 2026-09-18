@@ -17,8 +17,8 @@ export RD_WEBKIT_HTTP="http://127.0.0.1:${PORT%% *}"
 export RD_WEBKIT_HTTPS="https://127.0.0.1:${PORT##* }"
 printf '%s\n' '<?xml version="1.0"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoadsInWebContent</key><true/></dict></dict></plist>' > "$OUT/fixture.plist"
 SRC=("$REPO/tests/Tests/RealWebKitRedirectTests.m")
-for f in WebProbe URLPolicy DetectedMedia RDQualityTier RDResourceDisplayMetadata; do SRC+=("$ROOT/Features/ResourceDetector/$f.m"); done
-for f in AppError DNSResolver IPAddressPolicy HTTPPrivacyPolicy HTTPRequest HTTPResult HTTPClient; do SRC+=("$ROOT/Shared/Infrastructure/$f.m"); done
+for f in WebProbe RDManualVerification URLPolicy DetectedMedia RDQualityTier RDResourceDisplayMetadata; do SRC+=("$ROOT/Features/ResourceDetector/$f.m"); done
+for f in AppError DNSResolver IPAddressPolicy HTTPPrivacyPolicy HTTPRequest HTTPResult HTTPClient RDLog; do SRC+=("$ROOT/Shared/Infrastructure/$f.m"); done
 SRC+=("$ROOT/Shared/Infrastructure/Async/RequestGeneration.m")
 xcrun clang -fobjc-arc -g -O1 -framework Cocoa -framework WebKit -framework AVFoundation -framework Security \
  -I"$ROOT/Features/ResourceDetector" -I"$ROOT/Shared/Infrastructure" -I"$ROOT/Shared/Infrastructure/Async" \
