@@ -194,4 +194,16 @@ rg -q 'RDThinProgressView' "$ROOT/App/ResourceDetectorApp.m"
 rg -q 'metricsStringForJob:' "$ROOT/App/ResourceDetectorApp.m"
 rg -q 'self\.progressView\.progress' "$ROOT/App/ResourceDetectorApp.m"
 
+# 危险清除操作必须先弹「是否清除」确认框（2026-09-19 主人要求：防误触，且清除后
+# 设置页内要有就地反馈）。两个清除入口都必须经由 confirmClearWithMessage 并携带各自
+# 的确认文案；确认框默认键必须是「取消」（回车绝不触发清除）。
+rg -q 'confirmClearWithMessage' "$ROOT/App/ResourceDetectorApp.m"
+rg -U -q 'clearDownloadRecords:[\s\S]{0,400}confirmClearWithMessage[\s\S]{0,400}是否清除下载记录' "$ROOT/App/ResourceDetectorApp.m"
+rg -U -q 'clearSiteSession:[\s\S]{0,400}confirmClearWithMessage[\s\S]{0,400}是否清除网站会话' "$ROOT/App/ResourceDetectorApp.m"
+rg -q 'confirm.keyEquivalent = @""' "$ROOT/App/ResourceDetectorApp.m"
+rg -q 'cancel.keyEquivalent = @"\\r"' "$ROOT/App/ResourceDetectorApp.m"
+# 清除结果就地写进设置页本行说明（statusNote 在首页，设置页里看不到）
+rg -q 'clearDownloadRecordsHint.stringValue = @"已清除' "$ROOT/App/ResourceDetectorApp.m"
+rg -q 'clearSiteSessionHint.stringValue = @"已清除' "$ROOT/App/ResourceDetectorApp.m"
+
 echo "PASS: build, universal binary, macOS 13 target, bundle signing, app icon packaged and decodable, machine independence, no radar, view-based rows, slash-line UI with thin progress, download progress, site-mode, and download wiring checks"

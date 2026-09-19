@@ -224,6 +224,10 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 @property NSSegmentedControl *settingsProbeModeControl;
 @property NSButton *clearDownloadRecordsButton;
 @property NSButton *clearSiteSessionButton;   // 设置页「清除网站会话」（第 13 轮新增）
+// 清除结果就地反馈（2026-09-19 主人反馈：设置页里点「清除」后看不到任何反馈，不知道是否成功）。
+// 两行各自的说明文字兼作结果反馈：进行中 / 已清除都写在这里，设置页内直接可见。
+@property (nonatomic, weak) NSTextField *clearDownloadRecordsHint;
+@property (nonatomic, weak) NSTextField *clearSiteSessionHint;
 // 清除网站会话是**异步**操作；该 token 用于作废过期完成回调，避免其覆盖更新的探测/取消状态
 // （2026-09-18 无 GUI 受控复现：清除进行中发起新探测，迟到回调会把状态文案改回"网站会话已清除"）。
 @property (nonatomic, assign) NSInteger sessionClearGeneration;
@@ -2336,7 +2340,9 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
                                         attributes:@{NSFontAttributeName: self.clearDownloadRecordsButton.font,
                                                      NSForegroundColorAttributeName: [NSColor systemRedColor]}];
     [self.clearDownloadRecordsButton sizeToFit];
-    addRow(@"一键清除下载记录", nil, @[self.clearDownloadRecordsButton]);
+    addRow(@"一键清除下载记录", @"清空下载列表中的历史记录；磁盘上已下载的文件保留", @[self.clearDownloadRecordsButton]);
+    // 说明文字兼作结果反馈（见属性声明处注释）：记住本行 hint，清除后就地更新
+    if ([rowHints.lastObject isKindOfClass:[NSTextField class]]) self.clearDownloadRecordsHint = rowHints.lastObject;
 
     // 第 13 轮新增：清除 App 自己的网站会话（Cookie / 缓存 / 本地存储 / IndexedDB）。
     // 与「一键清除下载记录」同行同构：无边框、红色文字、sizeToFit、带 identifier。
@@ -2351,7 +2357,8 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
                                         attributes:@{NSFontAttributeName: self.clearSiteSessionButton.font,
                                                      NSForegroundColorAttributeName: [NSColor systemRedColor]}];
     [self.clearSiteSessionButton sizeToFit];
-    addRow(@"清除网站会话", nil, @[self.clearSiteSessionButton]);
+    addRow(@"清除网站会话", @"清除本 App 保存的 Cookie / 缓存 / 本地存储（不影响 Safari）", @[self.clearSiteSessionButton]);
+    if ([rowHints.lastObject isKindOfClass:[NSTextField class]]) self.clearSiteSessionHint = rowHints.lastObject;
 
     // 卡片 4：日志 —— 独立成组（主人 2026-09-17 明确要求），把原来飘在页面顶部中间的
     // 「打开日志 / 导出诊断」收成与其它行同构的一行。
@@ -2419,31 +2426,80 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     }
 }
 
+// 危险操作统一确认（2026-09-19 主人要求）：一键清除前必须弹「是否清除」确认框，防误触。
+// 呈现为 sheet；「取消」占用回车默认键（默认键指向安全侧），「清除」按系统规范标记为
+// 破坏性按钮（红色）。窗口不可见（黑盒探针/无人值守）时无人可确认，直接执行 —— 与项目
+// 既有「无界面不打扰」约定一致。
+- (void)confirmClearWithMessage:(NSString *)message
+                          detail:(NSString *)detail
+                    confirmTitle:(NSString *)confirmTitle
+                    afterConfirm:(void (^)(void))afterConfirm {
+    if (!self.window.isVisible) { afterConfirm(); return; }
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = message;
+    alert.informativeText = detail;
+    alert.alertStyle = NSAlertStyleWarning;
+    NSButton *confirm = [alert addButtonWithTitle:confirmTitle];
+    NSButton *cancel = [alert addButtonWithTitle:@"取消"];
+    confirm.hasDestructiveAction = YES;   // 红色 + 系统破坏性语义
+    confirm.keyEquivalent = @"";          // 回车绝不触发清除
+    cancel.keyEquivalent = @"\r";         // 回车 = 取消
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+        if (response == NSAlertFirstButtonReturn) afterConfirm();
+    }];
+}
+
 - (void)clearDownloadRecords:(id)sender {
-    [self.downloadManager clearAllDownloadRecords];
-    [self refreshDownloadsList];
-    self.statusNote.stringValue = @"下载记录已清除（磁盘文件未删除）";
+    __weak typeof(self) weakSelf = self;
+    [self confirmClearWithMessage:@"是否清除下载记录？"
+                           detail:@"将清空下载列表中的历史记录（已完成 / 已失败 / 已中断）；磁盘上已下载的文件不会被删除。此操作无法撤销。"
+                     confirmTitle:@"清除"
+                     afterConfirm:^{
+        typeof(self) sself = weakSelf;
+        if (!sself) return;
+        [sself.downloadManager clearAllDownloadRecords];
+        [sself refreshDownloadsList];
+        sself.statusNote.stringValue = @"下载记录已清除（磁盘文件未删除）";
+        // 设置页就地反馈：statusNote 在首页，设置页里看不见（主人 2026-09-19 反馈）
+        sself.clearDownloadRecordsHint.stringValue = @"已清除；磁盘上已下载的文件未被删除";
+        sself.clearDownloadRecordsHint.textColor = [NSColor systemGreenColor];
+        RDLogWrite(@"app", @"已清除全部下载记录（磁盘文件未删除）");
+    }];
 }
 
 // 清除 App 自己的网站会话：Cookie / 缓存 / 本地存储 / IndexedDB 一并清空。
 // 只作用于 App 容器内的存储，不动 Safari；不读取、不打印被清除的内容。
 - (void)clearSiteSession:(id)sender {
-    self.clearSiteSessionButton.enabled = NO;
-    self.statusNote.stringValue = @"正在清除网站会话…";
-    NSInteger clearOp = ++self.sessionClearGeneration;
     __weak typeof(self) weakSelf = self;
-    [RDManualVerificationController clearSharedSessionDataStoreWithCompletion:^{
+    [self confirmClearWithMessage:@"是否清除网站会话？"
+                           detail:@"将清除本 App 保存的网站会话数据（Cookie、缓存、本地存储、IndexedDB）。只影响本 App，不影响 Safari。此操作无法撤销。"
+                     confirmTitle:@"清除"
+                     afterConfirm:^{
         typeof(self) sself = weakSelf;
         if (!sself) return;
-        // 过期回调（清除期间已开始新探测/取消等更新的操作）：只恢复按钮可用，
-        // **绝不改写**更新的状态文案；成功路径（无更新操作）保持原有文案与行为不变。
-        if (sself.sessionClearGeneration != clearOp) {
-            sself.clearSiteSessionButton.enabled = YES;
-            return;
-        }
-        sself.clearSiteSessionButton.enabled = YES;
-        sself.statusNote.stringValue = @"网站会话已清除（仅本 App 的 Cookie/缓存/本地存储）";
-        RDLogWrite(@"app", @"已清除本 App 的网站会话数据（不读取、不打印任何 Cookie 内容）");
+        sself.clearSiteSessionButton.enabled = NO;
+        sself.statusNote.stringValue = @"正在清除网站会话…";
+        sself.clearSiteSessionHint.stringValue = @"正在清除…";
+        sself.clearSiteSessionHint.textColor = [[NSColor labelColor] colorWithAlphaComponent:0.60];
+        NSInteger clearOp = ++sself.sessionClearGeneration;
+        __weak typeof(sself) weakSelf2 = sself;
+        [RDManualVerificationController clearSharedSessionDataStoreWithCompletion:^{
+            typeof(sself) sself2 = weakSelf2;
+            if (!sself2) return;
+            // 过期回调（清除期间已开始新探测/取消等更新的操作）：恢复按钮与本行说明，
+            // **绝不改写**更新的全局状态文案；成功路径保持原有文案与行为不变。
+            if (sself2.sessionClearGeneration != clearOp) {
+                sself2.clearSiteSessionButton.enabled = YES;
+                sself2.clearSiteSessionHint.stringValue = @"清除本 App 保存的 Cookie / 缓存 / 本地存储（不影响 Safari）";
+                sself2.clearSiteSessionHint.textColor = [[NSColor labelColor] colorWithAlphaComponent:0.60];
+                return;
+            }
+            sself2.clearSiteSessionButton.enabled = YES;
+            sself2.statusNote.stringValue = @"网站会话已清除（仅本 App 的 Cookie/缓存/本地存储）";
+            sself2.clearSiteSessionHint.stringValue = @"已清除（仅本 App；Safari 不受影响）";
+            sself2.clearSiteSessionHint.textColor = [NSColor systemGreenColor];
+            RDLogWrite(@"app", @"已清除本 App 的网站会话数据（不读取、不打印任何 Cookie 内容）");
+        }];
     }];
 }
 
