@@ -112,6 +112,7 @@
 | 11 | UI 体验：设置页左右栏比例三档（3:7 / 2:8 / 2.5:7.5，偏好键 `SevenZZKeyMainPaneRatio`，非法值回退 3:7）· 探测状态文案统一为短文本，不再显示「正在探测第 N/M 个页面：host」· 详情标题完整多行显示不省略，缩略图/字段/直链按面板实际尺寸流式排布 · 设置页与详情区在最小窗口下 0 越界 0 重叠（报告：`outputs/ui-fix-20260916/REPORT.md`） | v24151.11 |
 | 12 | 真实站点抓取能力：由 91 站真实站点语料库（`tests/corpus/`，不进版本库）跑出的缺陷修复 —— ① 直链媒体/流清单地址完全探不到（静态腿改为按响应 MIME 分流，video/* 与 mpegurl/dash+xml 直接由 URL 生成媒体条目；MIME 为 text/html 时走原路径）；② 混合探测动态腿硬超时 20s → 45s（JS 单页应用实测 0 → 56 资源）；③ 静态腿 HTML 上限 2 MB → 8 MB，与 `WebProbe` / `ProductionDiscoveryHTMLProvider` 对齐。复跑 91 站：有资源 64 → 78 站，总耗时 7692s → 2513s，首屏耗时中位 0.89s（台账：`outputs/evidence-20260918/缺陷台账-全量测试.md`） | v24470.12 |
 | 13 | 发布前打基础与测试（五阶段 P-A~P-E）：Cloudflare-403 栈指纹拦截双栈回退（新增 `RDAdaptiveTransport` 元数据侧 + `RDCurlFallbackBackend`/`RDCurlHopper` 下载侧，逐跳 URLPolicy + DNS 全 IP 校验、fail-closed）· 下载链路修复（ffmpeg 合流扩展名白名单、系统代理下对端校验误杀）· 探测模式「总/单」迁入设置页并持久化 · 发行加固（`ResourceDetector.entitlements` + hardened runtime）· `DNSResolver` 超时分支空指针守卫（dns-bound 实测 SIGSEGV 修复，自初始提交潜伏）· 复核：14 套件串行全绿 + 31 站真实抽检 27/31 有资源（4 站网络受限；直链 12/12 全过）（报告：`outputs/plan/P-A`~`P-E`） | v26178.13 |
+| 14 | 设置页两个清除入口（一键清除下载记录 / 清除网站会话）加「是否清除」确认框（sheet 呈现；回车默认＝取消；清除按钮按系统规范标破坏性）· 清除结果就地写回本行说明（绿色「已清除…」），修复「点击清除无可见反馈」（根因：反馈只写首页 statusNote，设置页内不可见）· `verify.sh` 新增 8 条断言（两个入口必经确认框 / 回车不得触发清除 / 确认后必须写就地反馈）· 实测：14 套件串行全绿 + settings-probe 越界 0 / 重叠 0 + AX 黑盒两条路径「弹框 → 确认 → 行内变绿」 | v26234.14 |
 
 > 新的正式发布轮次由 `--release-fix` 自动追加到 `PROJECT_VERSION.json`；
 > 本表由当时的执行者在本节末尾补充一行，且只描述事实。
