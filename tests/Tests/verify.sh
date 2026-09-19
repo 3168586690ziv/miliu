@@ -194,7 +194,7 @@ rg -q 'RDThinProgressView' "$ROOT/App/ResourceDetectorApp.m"
 rg -q 'metricsStringForJob:' "$ROOT/App/ResourceDetectorApp.m"
 rg -q 'self\.progressView\.progress' "$ROOT/App/ResourceDetectorApp.m"
 
-# 危险清除操作必须先弹「是否清除」确认框（2026-09-19 主人要求：防误触，且清除后
+# 危险清除操作必须先弹「是否清除」确认框（2026-09-19 定案：防误触，且清除后
 # 设置页内要有就地反馈）。两个清除入口都必须经由 confirmClearWithMessage 并携带各自
 # 的确认文案；确认框默认键必须是「取消」（回车绝不触发清除）。
 rg -q 'confirmClearWithMessage' "$ROOT/App/ResourceDetectorApp.m"

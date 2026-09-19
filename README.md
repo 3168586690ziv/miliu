@@ -1,5 +1,14 @@
 # 觅流
 
+**Miliu** is a native macOS app that finds video / audio / image resources on a web page
+and downloads them at the quality you pick. It is written in Objective-C + AppKit, merges
+static HTML analysis with real WebKit rendering, parses HLS (m3u8) / DASH manifests,
+supports resumable downloads, and merges HLS segments with a bundled ffmpeg.
+Requires macOS 13+. Build with `bash scripts/build.sh` → `build/觅流.app` (universal).
+
+*Keywords: macOS media downloader · web page resource discovery · HLS / m3u8 · DASH ·
+WebKit · ffmpeg · Objective-C · AppKit.*
+
 ## 项目简介
 
 macOS 原生（Objective-C + AppKit）桌面应用：输入一个网址，探测该页面里的视频 / 音频 / 图片资源，

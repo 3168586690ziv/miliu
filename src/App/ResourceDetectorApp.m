@@ -57,7 +57,7 @@ static id<RDMetadataTransporting> RDProductionMetadataTransport(void) {
 }
 
 // 设置页的「返回」按钮：形态照 macOS 系统设置（圆形箭头），但按本项目风格
-// **去掉常驻浅灰底**（2026-09-17 主人定案）—— 静止时只有一个干净的箭头，
+// **去掉常驻浅灰底**（2026-09-17 定案）—— 静止时只有一个干净的箭头，
 // 鼠标移上去或按下时才浮出一层浅色圆底作为反馈，保证它仍然"像个能点的东西"。
 @interface RDHoverCircleButton : NSButton
 @property (nonatomic, strong) NSTrackingArea *rdHoverArea;
@@ -224,7 +224,7 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 @property NSSegmentedControl *settingsProbeModeControl;
 @property NSButton *clearDownloadRecordsButton;
 @property NSButton *clearSiteSessionButton;   // 设置页「清除网站会话」（第 13 轮新增）
-// 清除结果就地反馈（2026-09-19 主人反馈：设置页里点「清除」后看不到任何反馈，不知道是否成功）。
+// 清除结果就地反馈（2026-09-19 用户反馈：设置页里点「清除」后看不到任何反馈，不知道是否成功）。
 // 两行各自的说明文字兼作结果反馈：进行中 / 已清除都写在这里，设置页内直接可见。
 @property (nonatomic, weak) NSTextField *clearDownloadRecordsHint;
 @property (nonatomic, weak) NSTextField *clearSiteSessionHint;
@@ -1740,7 +1740,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     CGFloat valueW = MAX(80, contentW - 74);
     CGFloat captionH = 16;
 
-    // 直链组与下载按钮：正常空间下紧随键值行向下流式排布（2026-09-19 主人定案，
+    // 直链组与下载按钮：正常空间下紧随键值行向下流式排布（2026-09-19 定案，
     // 收紧行块与「下载直链」之间的大片留白）；仅当流式排布会越过面板底边距时
     // 退回下面的贴底兜底位置（极矮窗口仍保证不重叠、不越界）。
     // 「下载直链」小标题必须完整落在直链字段上方：字段高 24pt，标题与它再留 4pt 间距；
@@ -1908,7 +1908,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
         if (c + 1 < cardCount) contentH += groupGap;
     }
 
-    // ── 整块垂直居中（2026-09-17 主人要求：页头也要跟着下沉）──
+    // ── 整块垂直居中（2026-09-17 定案：页头也要跟着下沉）──
     // 把「页头 + 表单内容」当成一个整体，在「版本号带以上」的空间里居中，
     // 空出的高度分到 **标题上方** 与 **最后一张卡片下方** 各一半 —— 而不是全塞在
     // 页头与表单之间。窗口不够高时 floor 值为负，退化为贴顶（topOffset = pagePadTop），
@@ -1923,7 +1923,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 
     // ── 页头：**一行**，返回箭头在标题左侧，两者垂直居中（页面坐标，y 向上）──
     // 箭头左缘与下方卡片左缘对齐（colX），标题跟在箭头右侧 —— "左基准线"由箭头承担，
-    // 与主人确认过的 HTML 稿一致。若把箭头挂到 colX 左边，窄窗口下会顶到窗口边缘。
+    // 与确认过的 HTML 稿一致。若把箭头挂到 colX 左边，窄窗口下会顶到窗口边缘。
     CGFloat rowTop = H - topOffset;
     CGFloat rowBottom = rowTop - headerH;
     NSButton *back = self.settingsBackButton;
@@ -2157,7 +2157,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     [page addSubview:title];
     self.settingsTitleLabel = title;
 
-    // 返回：macOS 系统设置式的圆形箭头，但**去掉常驻浅灰底**（2026-09-17 主人定案）。
+    // 返回：macOS 系统设置式的圆形箭头，但**去掉常驻浅灰底**（2026-09-17 定案）。
     // 只在悬停/按下时由 RDHoverCircleButton 画一层浅色圆底。
     // 注意：title 仍保留完整字样且**不删除** —— 它不参与显示（imagePosition = NSImageOnly），
     // 但 AX 与 build/ui-probe/accept{1,2,4,_all}.sh 共 6 个验收脚本都按这个标题定位按钮，
@@ -2200,7 +2200,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 
     // ── 卡片背景 + 分组标签：先加入，保证留在 z 序下层 ──
     // 最后一组原叫「日志」，与组内那行的标题（也是「日志」）**完全重名**，读起来像做错了。
-    // 2026-09-17 主人选定改为「日志与诊断」：组名成了上位分类、行名仍是具体项，
+    // 2026-09-17 定案改为「日志与诊断」：组名成了上位分类、行名仍是具体项，
     // 沿用「下载 → 下载位置」那种"组是分类、行是具体项"的模式。
     NSArray<NSString *> *groupTitles = @[@"显示选项", @"布局", @"下载", @"数据管理", @"日志与诊断"];
     NSMutableArray<NSView *> *cards = [NSMutableArray arrayWithCapacity:groupTitles.count];
@@ -2360,7 +2360,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     addRow(@"清除网站会话", @"清除本 App 保存的 Cookie / 缓存 / 本地存储（不影响 Safari）", @[self.clearSiteSessionButton]);
     if ([rowHints.lastObject isKindOfClass:[NSTextField class]]) self.clearSiteSessionHint = rowHints.lastObject;
 
-    // 卡片 4：日志 —— 独立成组（主人 2026-09-17 明确要求），把原来飘在页面顶部中间的
+    // 卡片 4：日志 —— 独立成组（2026-09-17 定案），把原来飘在页面顶部中间的
     // 「打开日志 / 导出诊断」收成与其它行同构的一行。
     // 第 12 轮起表单区可滚动，最小窗口下「日志」会被滚出可视区，但仍在文档视图内可达。
     currentCard = 4;
@@ -2426,7 +2426,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     }
 }
 
-// 危险操作统一确认（2026-09-19 主人要求）：一键清除前必须弹「是否清除」确认框，防误触。
+// 危险操作统一确认（2026-09-19 定案）：一键清除前必须弹「是否清除」确认框，防误触。
 // 呈现为 sheet；「取消」占用回车默认键（默认键指向安全侧），「清除」按系统规范标记为
 // 破坏性按钮（红色）。窗口不可见（黑盒探针/无人值守）时无人可确认，直接执行 —— 与项目
 // 既有「无界面不打扰」约定一致。
@@ -2460,7 +2460,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
         [sself.downloadManager clearAllDownloadRecords];
         [sself refreshDownloadsList];
         sself.statusNote.stringValue = @"下载记录已清除（磁盘文件未删除）";
-        // 设置页就地反馈：statusNote 在首页，设置页里看不见（主人 2026-09-19 反馈）
+        // 设置页就地反馈：statusNote 在首页，设置页里看不见（2026-09-19 用户反馈）
         sself.clearDownloadRecordsHint.stringValue = @"已清除；磁盘上已下载的文件未被删除";
         sself.clearDownloadRecordsHint.textColor = [NSColor systemGreenColor];
         RDLogWrite(@"app", @"已清除全部下载记录（磁盘文件未删除）");

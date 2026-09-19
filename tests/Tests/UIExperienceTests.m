@@ -150,7 +150,7 @@ static void TestDetailTitleFullAndStable(void) {
     }
 }
 
-// 2026-09-19 主人定案：正常空间下「下载直链」组与下载按钮紧随键值行向下流式排布，
+// 2026-09-19 定案：正常空间下「下载直链」组与下载按钮紧随键值行向下流式排布，
 // 行块与直链小标题之间的区块间隔固定 24pt（旧行为贴底时实测留白 100-130pt）。
 static void TestLinkGroupFollowsRows(void) {
     ResourceDetectorAppDelegate *app = MakeLaunchedApp();
