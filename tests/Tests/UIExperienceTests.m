@@ -150,6 +150,26 @@ static void TestDetailTitleFullAndStable(void) {
     }
 }
 
+// 2026-09-19 主人定案：正常空间下「下载直链」组与下载按钮紧随键值行向下流式排布，
+// 行块与直链小标题之间的区块间隔固定 24pt（旧行为贴底时实测留白 100-130pt）。
+static void TestLinkGroupFollowsRows(void) {
+    ResourceDetectorAppDelegate *app = MakeLaunchedApp();
+    app.detailTitle.stringValue = @"流式布局验证标题";
+    SetContentSize(app, 980, 600);
+    CGFloat lastRowBottom = app.sourceValue.frame.origin.y;          // 来源行 frame 下沿
+    CGFloat linkTitleTop = NSMaxY(app.linkTitleLabel.frame);
+    Check(fabs((linkTitleTop + 24.0) - lastRowBottom) < 1.5,
+          @"UID-9 直链标题紧随来源行下方（间隔 24pt，实际 %.1f）", lastRowBottom - linkTitleTop);
+    CGFloat buttonY = app.detailDownloadButton.frame.origin.y;
+    Check(buttonY >= 12, @"UID-10 流式排布下下载按钮不越过面板底边距");
+    Check(fabs((app.linkField.frame.origin.y - 22.0) - buttonY) < 1.5,
+          @"UID-11 下载按钮紧随直链字段下方（间隔 22pt）");
+    // 极矮窗口仍退回贴底兜底：按钮不越界、无重叠（UID-5/7 已断言），这里只查贴底分支
+    SetContentSize(app, 760, 300);
+    Check(app.detailDownloadButton.frame.origin.y <= 12 + 1.5,
+          @"UID-12 极矮窗口下载按钮退回贴底兜底");
+}
+
 // 第 12 轮起行标题/说明位于滚动容器的文档视图内（不再是 settingsPage 的直接子视图），
 // 因此必须递归查找；否则这些断言会退化成「找不到控件 → 直接失败」或「静默跳过」。
 static NSTextField *RatioLabelIn(NSView *page, NSString *title) {
@@ -215,6 +235,7 @@ int main(int argc, const char **argv) {
         TestPaneRatio();
         TestStatusText();
         TestDetailTitleFullAndStable();
+        TestLinkGroupFollowsRows();
         TestSettingsPageStable();
         if (gFailures) {
             NSLog(@"FAILED: %d 项断言未通过", gFailures);

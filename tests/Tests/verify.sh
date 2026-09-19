@@ -137,7 +137,7 @@ rg -q 'URLAssetWithURL:local' "$ROOT/Features/ResourceDetector/RDMetadataService
 rg -q 'startSiteBatchWithURL' "$ROOT/App/ResourceDetectorApp.m"
 
 # 重新扫描结果重建后选中项必须被安全处置（BUG-011：reloadData 会按索引保留选中，
-# 残留的旧索引会让 ⌘D 下载到与新结果对不上的“错行”资源）。探测期间列表还会先被
+# 残留的旧索引会让 ⌘D 下载到与新结果对不上的"错行"资源）。探测期间列表还会先被
 # 临时结果重建一次（顺序可能与最终结果不同），因此按下标保留更不可靠：现在统一在
 # applyDiscoveryResult: 里重建，并按「资源身份」恢复选中，找不到就清空选中。
 rg -q 'applyDiscoveryResult:r final:YES' "$ROOT/App/ResourceDetectorApp.m"
@@ -172,20 +172,23 @@ if rg -q 'RDProgressRingView|self\.ring|setRingProgress|rd-ring' "$ROOT/App/Reso
   echo "FAIL: circular progress control remains" >&2
   exit 1
 fi
-# 旧“模式切换”分段控件已移除；当前唯一的分段控件是设置页左右栏比例三档控件，
-# 其 identifier 稳定为 RDPaneRatioPopup（UIExperienceTests UIX-2 与 build/ui-probe/accept2.sh 的黑盒锚点）。
-# 因此按**真实 identifier/AX 行为**断言：允许该控件存在，但除它以外出现任何分段控件即失败——
-# 与旧断言相比不放宽（任何新的/遗留的分段控件仍会被拦下）。
+# 旧"模式切换"分段控件已移除；当前设置页有两个分段控件：
+# 1. 左右栏比例三档（identifier = RDPaneRatioPopup）
+# 2. 探测模式「当前页/总站」（identifier = RDProbeModeControl）
+# 两者都是已知的合理控件；除此以外出现任何分段控件即失败。
 OTHER_SEG="$(rg -n 'NSSegmentedControl' "$ROOT/App/ResourceDetectorApp.m" \
   | grep -v 'settingsPaneRatioControl' | grep -v 'changePaneRatio' | grep -v 'ratioControl' \
+  | grep -v 'settingsProbeModeControl' | grep -v 'changeProbeMode' | grep -v 'probeModeControl' \
   | grep -v 'NSSegmentedControl segmentedControlWithLabels' || true)"
 if [ -n "$OTHER_SEG" ]; then
-  echo "FAIL: unexpected segmented control remains (not the pane-ratio control):" >&2
+  echo "FAIL: unexpected segmented control remains (not the pane-ratio or probe-mode control):" >&2
   printf '%s\n' "$OTHER_SEG" >&2
   exit 1
 fi
 rg -q 'identifier = @"RDPaneRatioPopup"' "$ROOT/App/ResourceDetectorApp.m"
 rg -q 'NSSegmentedControl \*settingsPaneRatioControl' "$ROOT/App/ResourceDetectorApp.m"
+rg -q 'identifier = @"RDProbeModeControl"' "$ROOT/App/ResourceDetectorApp.m"
+rg -q 'NSSegmentedControl \*settingsProbeModeControl' "$ROOT/App/ResourceDetectorApp.m"
 # 下载进度条（NSProgressIndicator）为当前合理用途，确认已接入
 rg -q 'RDThinProgressView' "$ROOT/App/ResourceDetectorApp.m"
 rg -q 'metricsStringForJob:' "$ROOT/App/ResourceDetectorApp.m"

@@ -34,6 +34,8 @@ extern NSString *const SevenZZKeyResourceSelectAllScope;
 extern NSString *const SevenZZKeyResourceDownloadDestination;
 extern NSString *const SevenZZKeyResourceDownloadCustomDirectory;   // 2026-09-03 自选下载目录（U 盘等）
 extern NSString *const SevenZZKeyMainPaneRatio;                    // 主界面左右栏比例：0=3:7，1=2:8，2=2.5:7.5
+extern NSString *const SevenZZKeyProbeMode;                       // 探测模式：0=当前页，1=总站
+extern NSString *const SevenZZKeySitePages;                       // 总站模式页数（正整数，默认 3）
 extern NSString *const SevenZZKeyLastMood;
 extern NSString *const SevenZZKeyLastMoodLabel;
 extern NSString *const SevenZZKeyRecentMoodQuoteIDs;

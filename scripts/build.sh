@@ -58,9 +58,9 @@ CODE_LINES="$(sed -n 's/^CODE_LINES=//p' "$GEN/version.log" | head -1)"
 FIX_ROUND="$(sed -n 's/^FIX_ROUND=//p' "$GEN/version.log" | head -1)"
 DISPLAY_VERSION="$(sed -n 's/^DISPLAY_VERSION=//p' "$GEN/version.log" | head -1)"
 mkdir -p "$(dirname "$BIN")" "$OUT/Contents/Resources"
-SRC=("$SRCROOT/App/ResourceDetectorApp.m" "$SRCROOT/App/ResourceResultRowView.m")
+SRC=("$SRCROOT/App/ResourceDetectorApp.m" "$SRCROOT/App/ResourceResultRowView.m" "$SRCROOT/App/RDAdaptiveTransport.m" "$SRCROOT/App/RDCurlFallbackBackend.m")
 for d in ResourceDetector ResourceDownload; do while IFS= read -r f; do SRC+=("$ROOT/$f"); done < <(find "$SRCROOT/Features/$d" -name '*.m' -print | sed "s#^$ROOT/##" | sort); done
-for f in AppError.m DNSResolver.m HTTPPrivacyPolicy.m IPAddressPolicy.m HTTPRequest.m HTTPResult.m HTTPClient.m RDLog.m; do SRC+=("$SRCROOT/Shared/Infrastructure/$f"); done
+for f in AppError.m DNSResolver.m HTTPPrivacyPolicy.m IPAddressPolicy.m HTTPRequest.m HTTPResult.m HTTPClient.m RDLog.m RDCurlHopper.m; do SRC+=("$SRCROOT/Shared/Infrastructure/$f"); done
 for f in RequestGeneration.m PerformancePolicy.m; do SRC+=("$SRCROOT/Shared/Infrastructure/$( [ "$f" = PerformancePolicy.m ] && echo Performance || echo Async )/$f"); done
 SRC+=("$SRCROOT/Shared/Infrastructure/PreferencesStore.m" "$SRCROOT/Shared/UI/DesignSystem/ColorTokens.m" "$SRCROOT/Shared/UI/DesignSystem/TypographyTokens.m" "$SRCROOT/Shared/UI/StateView.m" "$SRCROOT/Shared/UI/UIThemeSupport.m")
 # 通用二进制（arm64 + x86_64）+ macOS 13 部署目标（与 Info.plist LSMinimumSystemVersion 一致），换机可用
@@ -75,10 +75,12 @@ mkdir -p "$OUT/Contents/Resources/MediaTools"
 cp "$RES/MediaTools/"* "$OUT/Contents/Resources/MediaTools/"
 codesign --force --sign - "$OUT/Contents/Resources/MediaTools/ffmpeg"
 # 稳定身份签名（优先）：固定证书让 TCC 授权（辅助功能等）跨构建仍有效；
+# 正式身份下启用 hardened runtime + 最小 entitlements（JIT/网络客户端/用户自选文件读写）。
 # 证书不存在时回退 ad-hoc（每次重建授权失效）。
 SIG_ID="$(security find-identity -p codesigning -v 2>/dev/null | grep 'SevenZZDev' | awk '{print $2}' | head -1)"
+ENTITLEMENTS="$SRCROOT/Packaging/ResourceDetector.entitlements"
 if [ -n "$SIG_ID" ]; then
-  codesign --force --deep --sign "$SIG_ID" "$OUT"
+  codesign --force --deep --options runtime --entitlements "$ENTITLEMENTS" --sign "$SIG_ID" "$OUT"
 else
   codesign --force --sign - "$OUT"
 fi

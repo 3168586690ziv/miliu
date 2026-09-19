@@ -2,6 +2,7 @@
 #import "RDStreamPlan.h"
 #import "RDManifestParser.h"
 #import "PerformancePolicy.h"
+#import "RDLog.h"
 static NSError *StreamError(NSString *text) { return [NSError errorWithDomain:@"RDStream" code:1 userInfo:@{NSLocalizedDescriptionKey:text}]; }
 @interface RDStreamDownloadTask ()
 @property id<RDDownloadBackend> backend;
@@ -127,16 +128,33 @@ static NSError *StreamError(NSString *text) { return [NSError errorWithDomain:@"
 - (void)mux {
     [self step:^{
         NSMutableArray *args=[NSMutableArray arrayWithArray:@[@"-hide_banner",@"-nostdin",@"-loglevel",@"error",@"-y"]];
-        for(NSURL *input in self.inputs){[args addObjectsFromArray:@[@"-protocol_whitelist",@"file,crypto"]];if([input.pathExtension isEqual:@"m3u8"])[args addObjectsFromArray:@[@"-allowed_extensions",@"ALL"]];[args addObjectsFromArray:@[@"-i",input.path]];}
+        for(NSURL *input in self.inputs){[args addObjectsFromArray:@[@"-protocol_whitelist",@"file,crypto"]];if([input.pathExtension isEqual:@"m3u8"]){
+            // ffmpeg 8.0 hls 解复用器三道扩展名检查全开白名单：本地分片落地名可能无
+            // 常见多媒体扩展（resource-*.bin），旧参数 -allowed_extensions ALL 只过第一道
+            //（2026-09-19 现场：angel-one-hls / test_001 分片齐但合流被拒，stderr 已入日志）。
+            [args addObjectsFromArray:@[@"-allowed_extensions",@"ALL",@"-allowed_segment_extensions",@"ALL",@"-extension_picky",@"0"]];}
+            [args addObjectsFromArray:@[@"-i",input.path]];}
         [args addObjectsFromArray:@[@"-map",@"0:v:0"]];
         [args addObjectsFromArray:self.inputs.count>1 ? @[@"-map",@"1:a:0"] : @[@"-map",@"0:a:0?"]];
         [args addObjectsFromArray:@[@"-c",@"copy",@"-movflags",@"+faststart",@"-f",@"mp4",self.output.path]];
         NSTask *process=[NSTask new];process.executableURL=self.muxer;process.arguments=args;
-        process.standardInput=NSFileHandle.fileHandleWithNullDevice;process.standardOutput=NSFileHandle.fileHandleWithNullDevice;process.standardError=NSFileHandle.fileHandleWithNullDevice;
+        process.standardInput=NSFileHandle.fileHandleWithNullDevice;process.standardOutput=NSFileHandle.fileHandleWithNullDevice;
+        // ffmpeg 的 stderr 落临时文件：合成失败时把真实原因写进任务日志（此前被丢弃，
+        // "无法合成"在日志里无从诊断 —— 2026-09-19 现场复现 test_001/angel-one-hls 两站）。
+        NSString *errPath=[self.output.URLByDeletingLastPathComponent.path stringByAppendingPathComponent:@"mux-ffmpeg-err.log"];
+        [[NSFileManager defaultManager]removeItemAtPath:errPath error:nil];
+        if(![[NSFileManager defaultManager]createFileAtPath:errPath contents:nil attributes:nil]){errPath=nil;}
+        if(errPath){process.standardError=[NSFileHandle fileHandleForWritingAtPath:errPath];}
+        else process.standardError=NSFileHandle.fileHandleWithNullDevice;
         self.process=process;__weak typeof(self) weak=self;
         process.terminationHandler=^(NSTask *p){dispatch_async(dispatch_get_main_queue(),^{
             typeof(self) self=weak;if(!self||self.finished)return;
-            if(p.terminationStatus!=0){[self finish:nil response:nil error:StreamError(@"分片下载完成，但无法合成为可播放视频；请检查源站编码或重试")];return;}
+            if(p.terminationStatus!=0){
+                NSString *ffErr=errPath?[NSString stringWithContentsOfFile:errPath encoding:NSUTF8StringEncoding error:nil]:nil;
+                NSString *detail=[NSString stringWithFormat:@"分片下载完成，但无法合成为可播放视频；请检查源站编码或重试"];
+                if(ffErr.length)detail=[detail stringByAppendingFormat:@"（ffmpeg：%@）",ffErr.lastPathComponent];
+                RDLogWrite(@"dl", @"合流失败 ffmpeg 输出：%@（完整输出在同目录 mux-ffmpeg-err.log）", ffErr?:@"（空）");
+                [self finish:nil response:nil error:StreamError(detail)];return;}
             int64_t size=[[[NSFileManager defaultManager]attributesOfItemAtPath:self.output.path error:nil][NSFileSize] longLongValue];
             if(size<=0||![DownloadJob isLikelyVideoFileAtURL:self.output]){[self finish:nil response:nil error:StreamError(@"合成文件校验失败")];return;}
             NSHTTPURLResponse *response=[[NSHTTPURLResponse alloc]initWithURL:self.request.URL statusCode:200 HTTPVersion:@"HTTP/1.1" headerFields:@{@"Content-Type":@"video/mp4",@"Content-Length":@(size).stringValue}];

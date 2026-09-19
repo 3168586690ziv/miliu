@@ -184,6 +184,12 @@ static BOOL RDPeerAddressAllowedForIPs(NSString *address, NSArray<NSString *> *a
         cfg.timeoutIntervalForResource = 7 * 24 * 3600;
         cfg.networkServiceType = NSURLNetworkServiceTypeResponsiveData;
         cfg.HTTPMaximumConnectionsPerHost = [PerformancePolicy downloadConnections]; // 连接数只从 PerformancePolicy 获取
+        // 测试逃生口（env 门控，默认不设置=系统代理，生产行为不变）：无 GUI 真实下载
+        // 测试在系统代理环境下用 RD_SESSION_PROXY_OVERRIDE=direct 强制直连，
+        // 否则对端地址校验只能看到代理地址（2026-09-19 现场证据：19/19 站下载被拒）。
+        if ([NSProcessInfo.processInfo.environment[@"RD_SESSION_PROXY_OVERRIDE"] isEqualToString:@"direct"]) {
+            cfg.connectionProxyDictionary = @{};
+        }
         _session = [NSURLSession sessionWithConfiguration:cfg delegate:self delegateQueue:[NSOperationQueue mainQueue]];
         _contexts = [NSMutableDictionary dictionary];
         _reissueSessions = [NSMutableDictionary dictionary];
@@ -220,6 +226,11 @@ static BOOL RDPeerAddressAllowedForIPs(NSString *address, NSArray<NSString *> *a
     cfg.timeoutIntervalForResource = 7 * 24 * 3600;
     cfg.networkServiceType = NSURLNetworkServiceTypeResponsiveData;
     cfg.HTTPMaximumConnectionsPerHost = 1; // 一次重发只用这一条新连接
+    // 与主会话同一测试逃生口：重发是新会话，若不跟随直连覆盖，系统代理路径下
+    // 重试连接的对端校验必然失败（2026-09-19 现场：分段 7 重试被拒）。
+    if ([NSProcessInfo.processInfo.environment[@"RD_SESSION_PROXY_OVERRIDE"] isEqualToString:@"direct"]) {
+        cfg.connectionProxyDictionary = @{};
+    }
     NSURLSession *fresh = [NSURLSession sessionWithConfiguration:cfg delegate:self delegateQueue:[NSOperationQueue mainQueue]];
     NSMutableURLRequest *sanitized = [request mutableCopy];
     [HTTPPrivacyPolicy sanitizeMediaRequest:sanitized];
@@ -342,6 +353,11 @@ totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite {
     for (NSURLSessionTaskTransactionMetrics *tx in metrics.transactionMetrics) {
         NSString *address = tx.remoteAddress;
         if (!address.length) { ok = NO; break; }
+        // 经系统代理的连接：remoteAddress 是用户自己的代理地址（2026-09-19 实测
+        // remoteAddress=127.0.0.1 isProxyConnection=YES），与目标 DNS 解析 IP 比对
+        // 必然失配 —— 此前系统代理环境下所有下载 100% 被拒。代理场景下对端校验
+        // 不适用；SSRF 防线仍由请求前的 DNS 预检 + IP 分类（fail-closed）承担。
+        if (tx.isProxyConnection) continue;
         NSArray *ips = validated[tx.request.URL.absoluteString ?: @""];
         if (!RDPeerAddressAllowedForIPs(address, ips)) { ok = NO; break; }
     }
@@ -623,10 +639,20 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
     dispatch_once(&once, ^{
         NSString *tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"7zz-downloads"];
         SessionDownloadBackend *backend = [SessionDownloadBackend new];
+        // 生产：叠加 curl 按跳回退后端（Cloudflare 系宿主按栈指纹 403/挂起原生
+        // 传输时换栈重试，2026-09-19 真实站点根因）。运行时查类以保持本文件可被
+        // 测试套件单独链接——套件不编译 App 层的 RDCurlFallbackBackend，查类为
+        // nil 时即纯原生后端，行为与从前完全一致。
+        Class fallbackClass = NSClassFromString(@"RDCurlFallbackBackend");
+        id<RDDownloadBackend> effectiveBackend = backend;
+        if (fallbackClass && [fallbackClass respondsToSelector:@selector(backendWithNativeBackend:)]) {
+            id wrapper = [fallbackClass performSelector:@selector(backendWithNativeBackend:) withObject:backend];
+            if (wrapper) effectiveBackend = wrapper;
+        }
         // 独立 App 的完成/中断记录写入自身 bundle id 的 standard defaults，
         // 与 SevenZZ 主 App 完全解耦，换机后从空白记录开始。
         DownloadStore *store = [[DownloadStore alloc] initWithUserDefaults:[NSUserDefaults standardUserDefaults]];
-        mgr = [[DownloadManager alloc] initWithBackend:backend
+        mgr = [[DownloadManager alloc] initWithBackend:effectiveBackend
                                              tempRoot:[NSURL fileURLWithPath:tmp]
                                                 store:store];
     });
@@ -2121,19 +2147,19 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
 - (NSString *)singleFailureReason:(NSHTTPURLResponse *)resp writtenURL:(NSURL *)written job:(DownloadJob *)job {
     if (!written) return @"未收到文件";
     if (resp && (resp.statusCode < 200 || resp.statusCode >= 300))
-        return [NSString stringWithFormat:@"服务器返回 %ld，下载中止", (long)resp.statusCode];
+        return [NSString stringWithFormat:@"网站返回 %ld（网站方限制或链接失效，非应用故障），下载中止", (long)resp.statusCode];
     NSString *mime = resp.MIMEType.lowercaseString ?: @"";
     DownloadResourceKind verificationKind = job.resourceKind == DownloadResourceManifest ? DownloadResourceVideo : job.resourceKind;
     BOOL isVideoKind = verificationKind != DownloadResourceImage && verificationKind != DownloadResourceManifest;
     if (mime.length && isVideoKind && ![mime hasPrefix:@"video/"] &&
         ![mime isEqualToString:@"application/octet-stream"] &&
         ![mime isEqual:@"binary/octet-stream"])
-        return [NSString stringWithFormat:@"服务器返回 %@，不是视频文件", mime];
+        return [NSString stringWithFormat:@"网站返回 %@，不是视频文件（网站方限制，非应用故障）", mime];
     if ([DownloadJob isLikelyHTMLErrorFileAtURL:written] && isVideoKind)
-        return @"保存的内容是网页/错误页，不是视频文件";
+        return @"保存的内容是网页/错误页，不是视频文件（网站方未提供视频，非应用故障）";
     NSString *integrity = [self bodyIntegrityProblem:resp writtenURL:written job:job];
     if (integrity) return integrity;
-    return isVideoKind ? @"文件内容不是有效视频" : @"文件内容与预期格式不符";
+    return isVideoKind ? @"文件内容不是有效视频（网站方未提供有效内容，非应用故障）" : @"文件内容与预期格式不符";
 }
 
 #pragma mark - 完成 / 失败 / 取消

@@ -159,8 +159,9 @@ static NSOperationQueue *DNSResolverWorkQueue(void) {
             }
             // A resolver completion can land after the wait times out.  In that
             // case report the resolver's real answer, not a transient timeout.
-            if (lookup.completed) *status = lookup.status;
-            else *status = lookup.startedSystem ? DNSResolutionTimedOut : DNSResolutionBusy;
+            // status 可为 NULL（便捷封装 resolveIPsForHost: 传 NULL），写前必须判空。
+            if (lookup.completed) { if (status) *status = lookup.status; }
+            else if (status) *status = lookup.startedSystem ? DNSResolutionTimedOut : DNSResolutionBusy;
         }
         return @[];
     }

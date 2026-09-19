@@ -256,7 +256,6 @@ static ResourceDetectorAppDelegate *MakeHeadlessApp(UPStubService **outService, 
     app.thumbStatusLabel = [NSTextField labelWithString:@""];
     app.statusNote = [NSTextField labelWithString:@""];
     app.checkLabel = [NSTextField labelWithString:@""];
-    app.modeButton = [NSButton buttonWithTitle:@"总/单" target:nil action:nil];
     app.downloadsPage = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 760, 438)];
     app.downloadsTable = [[NSTableView alloc] initWithFrame:NSMakeRect(0, 0, 760, 300)];
     app.detailContent = @[app.thumbView, app.detailTitle, app.durationValue,

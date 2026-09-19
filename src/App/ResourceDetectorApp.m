@@ -42,6 +42,20 @@
 - (BOOL)isFlipped { return YES; }
 @end
 
+// 生产元数据传输装配：原生传输优先 + 「栈指纹拦截签名」（Cloudflare 系
+// 宿主 403 拦截页/挂起，2026-09-19 真实站点根因）时按跳回退 /usr/bin/curl。
+// 经运行时查类装配：测试套件单独编译本文件时不携带 App 层的 RDAdaptiveTransport.m，
+// 查类为 nil 即退回纯原生传输（与历史行为一致）；正式构建二进制里两者都在，命中回退。
+static id<RDMetadataTransporting> RDProductionMetadataTransport(void) {
+    Class cls = NSClassFromString(@"RDAdaptiveTransport");
+    if (cls && [cls respondsToSelector:@selector(adaptiveWithNativeTransport:)]) {
+        id adaptive = [cls performSelector:@selector(adaptiveWithNativeTransport:)
+                                withObject:[RDMetadataTransport new]];
+        if (adaptive) return adaptive;
+    }
+    return [RDMetadataTransport new];
+}
+
 // 设置页的「返回」按钮：形态照 macOS 系统设置（圆形箭头），但按本项目风格
 // **去掉常驻浅灰底**（2026-09-17 主人定案）—— 静止时只有一个干净的箭头，
 // 鼠标移上去或按下时才浮出一层浅色圆底作为反馈，保证它仍然"像个能点的东西"。
@@ -165,7 +179,7 @@
 // ── 统一呈现预算 ──
 // 页面探测回调完成 ≠ 可以呈现：列表缩略图与当前详情可能仍在读取。这两个量
 // 都到达终态（已读取 / 明确失败 / 超时 / 不支持）之前，进度不得到 100%，也
-// 不得显示“探测完成”；全部就绪后在同一轮主线程更新中一次性呈现。
+// 不得显示"探测完成"；全部就绪后在同一轮主线程更新中一次性呈现。
 static const NSUInteger kRDPresentationPreviewBudget = 12;   // 首屏缩略图行数上限
 static const NSTimeInterval kRDPresentationSafetyDeadline = 60.0;
 
@@ -199,7 +213,6 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 @property RDHybridPageProbe *refreshProbe;
 @property NSTextField *slashLabel;
 @property NSTextField *urlField;
-@property NSButton *modeButton;
 @property NSButton *settingsButton;
 @property NSTextField *pagesField;
 @property NSButton *pagesUnitButton;
@@ -208,10 +221,11 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 @property NSSwitch *settingsVideoSwitch;
 @property NSSwitch *settingsImagesSwitch;
 @property NSSegmentedControl *settingsPaneRatioControl;
+@property NSSegmentedControl *settingsProbeModeControl;
 @property NSButton *clearDownloadRecordsButton;
 @property NSButton *clearSiteSessionButton;   // 设置页「清除网站会话」（第 13 轮新增）
 // 清除网站会话是**异步**操作；该 token 用于作废过期完成回调，避免其覆盖更新的探测/取消状态
-// （2026-09-18 无 GUI 受控复现：清除进行中发起新探测，迟到回调会把状态文案改回“网站会话已清除”）。
+// （2026-09-18 无 GUI 受控复现：清除进行中发起新探测，迟到回调会把状态文案改回"网站会话已清除"）。
 @property (nonatomic, assign) NSInteger sessionClearGeneration;
 @property NSTextField *settingsVersionLabel;  // 设置页右下角版本号（构建期生成，运行期固定）
 @property NSTextField *checkLabel;
@@ -267,7 +281,7 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 @property RDMetadataToken *metadataToken;
 @property RDMetadataSnapshot *metadataSnapshot;
 @property NSMutableDictionary<NSString *, NSString *> *durationCache;
-// 用户为“当前选中行”选定的画质档位摘要（时长/大小文本），键 = 该行的资源身份。
+// 用户为"当前选中行"选定的画质档位摘要（时长/大小文本），键 = 该行的资源身份。
 // 详情显示的是行内某个档位时，列表行摘要必须与详情、与 ⌘D 实际下载的对象一致；
 // 否则会出现「列表说 30.4 MB、实际下 100.6 MB」的观感不一致（2026-09-13 真实验收发现）。
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *selectedTierRowDisplay;
@@ -388,7 +402,7 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 // ⌘空格 是系统 Spotlight 快捷键，在窗口服务层就被消费，NSWindow 级别的
 // performKeyEquivalent 永远收不到——必须用 CGEventTap 在会话层截获。
 // 策略：仅当本 APP 是前台应用时接管（吞掉事件并切换暂停），否则原样放行，
-// Spotlight 不受影响。事件口需要“辅助功能”权限：未授权时创建返回 NULL，
+// Spotlight 不受影响。事件口需要"辅助功能"权限：未授权时创建返回 NULL，
 // 只引导一次，绝不反复弹窗打断使用。
 static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *userInfo) {
     ResourceDetectorAppDelegate *delegate = (__bridge ResourceDetectorAppDelegate *)userInfo;
@@ -423,7 +437,7 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     if (!tap) {
         NSLog(@"[hotkey] ⌘空格 事件口创建失败：需要在 系统设置→隐私与安全性→辅助功能 中允许「觅流」");
         // 只在用户明确想要 ⌘空格 时才引导（应用内 ⌘P 无需任何权限）。
-        // 弹过一次或用户点过“以后再说”就永久记住，绝不在每次启动时打扰。
+        // 弹过一次或用户点过"以后再说"就永久记住，绝不在每次启动时打扰。
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
         if (![defaults boolForKey:@"ZZHotkeyGuideAnswered"]) {
             [defaults setBool:YES forKey:@"ZZHotkeyGuideAnswered"];
@@ -449,7 +463,7 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
 }
 
 // ⌘空格：有运行中的任务则全部暂停，否则继续暂停或中断的任务。
-// 列表与进度条保持展示暂停进度（“加载中”挂起状态），再按一次即恢复。
+// 列表与进度条保持展示暂停进度（"加载中"挂起状态），再按一次即恢复。
 - (void)toggleDownloadPauseResume:(id)sender {
     NSArray<DownloadJob *> *active = self.downloadManager.allJobs ?: @[];
     BOOL anyPaused = NO;
@@ -472,7 +486,7 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     }
     if (changed == 0 && shouldResume) {
         // resumeJob 在无空闲连接槽位时会保持 Paused（绝不突破并发上限）：
-        // 此时列表里明明有暂停任务，旧文案“没有可暂停/继续的下载”与事实矛盾。
+        // 此时列表里明明有暂停任务，旧文案"没有可暂停/继续的下载"与事实矛盾。
         self.statusNote.stringValue = @"连接数已满，稍后再次按 ⌘P 继续下载";
     } else if (changed == 0) {
         self.statusNote.stringValue = @"当前没有可暂停/继续的下载";
@@ -522,8 +536,11 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     NSApp.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
     [self buildMainMenu];  // 关键：提供 ⌘C/⌘V/⌘X/⌘Z/⌘A 的执行者（AppKit 中这些快捷键由菜单项分发）
     self.results = [NSMutableArray array];
-    self.mode = ZZResourceDiscoveryModeCurrentPage;
-    self.sitePages = 3;
+    // 探测模式：从持久化偏好读取（0=当前页，1=总站），非法值回退当前页
+    NSInteger persistedMode = [PreferencesStore.shared integerForKey:SevenZZKeyProbeMode defaultValue:0];
+    self.mode = (persistedMode == 1) ? ZZResourceDiscoveryModeSite : ZZResourceDiscoveryModeCurrentPage;
+    NSInteger persistedPages = [PreferencesStore.shared integerForKey:SevenZZKeySitePages defaultValue:3];
+    self.sitePages = (NSUInteger)MAX(1, persistedPages);
     // 内容过滤开关（可叠加，持久化在独立 App 自己的 defaults 中）
     NSUserDefaults *def = [NSUserDefaults standardUserDefaults];
     self.filterVideoOnly = [def boolForKey:@"ZZFilterVideoOnly"];
@@ -598,14 +615,7 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     self.urlField.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
     [self.homePage addSubview:self.urlField];
 
-    // 模式切换「总/单」：当前模式的字更亮，点击切换
-    self.modeButton = [self tinyButtonWithTitle:@"总/单" fontSize:12 color:[NSColor systemGrayColor] action:@selector(toggleMode:)];
-    self.modeButton.frame = NSMakeRect(918, 642, 42, 24);
-    self.modeButton.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
-    [self.homePage addSubview:self.modeButton];
-    [self updateModeButtonTitle];
-
-    // 「设置」入口（在总/单上方）：点击在同窗口内切换到设置页
+    // 「设置」入口：点击在同窗口内切换到设置页
     self.settingsButton = [self tinyButtonWithTitle:@"设置" fontSize:11.5 color:[NSColor systemGrayColor] action:@selector(showSettingsPage:)];
     self.settingsButton.frame = NSMakeRect(928, 674, 32, 24);
     self.settingsButton.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
@@ -628,7 +638,7 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     self.pagesField.stringValue = [NSString stringWithFormat:@"%lu", (unsigned long)self.sitePages];
     [self.homePage addSubview:self.pagesField];
 
-    // 「页」单位：与「总/单」同为 NSButton，保证两条文字绘制路径一致、高度天然对齐
+    // 「页」单位：NSButton 保证文字绘制路径一致、高度天然对齐
     self.pagesUnitButton = [NSButton buttonWithTitle:@"页" target:nil action:nil];
     self.pagesUnitButton.bordered = NO;
     self.pagesUnitButton.font = [NSFont systemFontOfSize:12];
@@ -644,6 +654,9 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     unitFrame.size.height = 24;
     self.pagesUnitButton.frame = unitFrame;
     [self.homePage addSubview:self.pagesUnitButton];
+
+    // 按持久化的探测模式初始化页数控件可见性
+    [self updatePagesFieldVisibility];
 
     // 探测进度：使用独立的细横向条和百分比文字。进度条只表达探测阶段，
     // 不再显示圆环控件。
@@ -672,7 +685,7 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     // ── 分栏布局：左结果列表 / 右详情面板（Finder 式） ──
     self.durationCache = [NSMutableDictionary dictionary];
     self.selectedTierRowDisplay = [NSMutableDictionary dictionary];
-    self.metadataService = [RDMetadataService new];
+    self.metadataService = [[RDMetadataService alloc] initWithTransport:RDProductionMetadataTransport()];
     self.detailGeneration = 0;
 
     // ── 分栏：左列表 / 右详情，手动布局保证 3:7 恒定 ──
@@ -723,7 +736,7 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     // ── 右下角快捷方式小字 ──
     [self buildFooterButtons];
 
-    // ── 探测会话回调 ──（含“新探测作废旧回调”的代次保护，见 installSessionHandlersForGeneration:）
+    // ── 探测会话回调 ──（含"新探测作废旧回调"的代次保护，见 installSessionHandlersForGeneration:）
     [self installSessionHandlersForGeneration:self.scanGeneration];
 
     [self.window center];
@@ -804,7 +817,7 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     self.thumbView = [self detailImageViewAtX:thumbX y:326 width:thumbW height:thumbH];
 
     // 缩略图状态字（覆盖在缩略图框内）：加载中/读取超时/读取失败都必须肉眼可辨，
-    // 不能留下无法区分“加载中”与“已失败”的纯空白框。
+    // 不能留下无法区分"加载中"与"已失败"的纯空白框。
     self.thumbStatusLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(8, 8, thumbW - 16, thumbH - 16)];
     self.thumbStatusLabel.bezeled = NO; self.thumbStatusLabel.drawsBackground = NO;
     self.thumbStatusLabel.editable = NO; self.thumbStatusLabel.selectable = NO;
@@ -957,7 +970,7 @@ static NSString *RDVariantPickerLabel(NSDictionary *v) {
 
     [self.variantPicker removeAllItems];
     // NSPopUpButton 添加条目后会隐式选中第一项，selectedItem 永远非 nil；
-    // “是否选中了当前媒体自己的档位”必须用规范化 URL 显式记录。
+    // "是否选中了当前媒体自己的档位"必须用规范化 URL 显式记录。
     BOOL matchedCurrent = NO;
     for (NSDictionary *v in m.declaredVariants) {
         [self.variantPicker addItemWithTitle:RDVariantPickerLabel(v)];
@@ -970,7 +983,7 @@ static NSString *RDVariantPickerLabel(NSDictionary *v) {
     if (m.declaredVariants.count && !matchedCurrent) {
         // 当前详情对象不属于任何具体档位（典型：HLS master）。界面此时显示
         // 的是第一项档位，必须通过真实选择逻辑把详情、链接与下载对象同步到
-        // 该档位；不允许“显示 480p、入队 master”。
+        // 该档位；不允许"显示 480p、入队 master"。
         [self.variantPicker selectItemAtIndex:0];
         if (self.variantPicker.selectedItem) {
             [self selectDeclaredVariant:nil];
@@ -1006,7 +1019,7 @@ static NSString *RDFormatForMediaURL(NSString *urlString) {
     NSDictionary *v = self.variantPicker.selectedItem.representedObject;
     DetectedMedia *current = self.detailMedia;
     if (!current || !v || [[DetectedMedia dedupKeyForURL:v[@"url"]] isEqual:[DetectedMedia dedupKeyForURL:current.mediaURL]]) return;
-    // 画质切换后的缩略图策略：只有“同一个海报 URL、且当前图就是从该海报来的”
+    // 画质切换后的缩略图策略：只有"同一个海报 URL、且当前图就是从该海报来的"
     // 才允许保留旧图（同一张图，保留避免闪烁）。海报失败后回退的视频首帧
     // 随资源 URL 变化，属于依赖画质的信息，绝不能带到新档位继续显示。
     RDMetadataSnapshot *snapshotBeforeSwitch = self.metadataSnapshot;
@@ -1058,7 +1071,9 @@ static NSString *RDFormatForMediaURL(NSString *urlString) {
 - (void)subscribeMetadataForMedia:(DetectedMedia *)m reload:(BOOL)reload {
     [self.metadataToken cancel];
     self.metadataSnapshot = nil;
-    if (!self.metadataService) self.metadataService = [RDMetadataService new];
+    if (!self.metadataService) {
+        self.metadataService = [[RDMetadataService alloc] initWithTransport:RDProductionMetadataTransport()];
+    }
     // 准备阶段中用户又选了别的行：把该行也纳入必需项，完成时机跟随当前选择。
     [self requirePresentationForMediaWhilePreparing:m];
     // 先同步恢复缓存：缩略图与已成功字段立即显示，再只请求缺失/过期字段。
@@ -1097,7 +1112,7 @@ static NSString *RDFormatForMediaURL(NSString *urlString) {
             NSArray<DetectedMedia *> *rowsBeforeMerge = [self.visibleMedia copy];
             // 静态声明与清单 Representation 真正合并：清单到达时若媒体已带静态
             // 档位（如 <source size>），两路候选过同一套归一化/去重后合成一份；
-            // 不再以“静态为空”为前提跳过清单档位。
+            // 不再以"静态为空"为前提跳过清单档位。
             // 直接传 snapshot.variants 原始字典，由 RDQualityTier 统一转换——
             // 调用方与被调用方类型一致（NSArray<NSDictionary*>），不做二次转换。
             NSArray *merged=[RDQualityTier normalizedVariantsByMergingDeclared:m.declaredVariants manifest:snapshot.variants];
@@ -1131,7 +1146,7 @@ static NSString *RDFormatForMediaURL(NSString *urlString) {
                     // 当前详情对象（master 或已被替换的旧档位 URL）不在合并结果
                     // 里：优先回退到同档新 URL（同档择优替换），否则确定性回退
                     // 到第一项；并通过真实选择逻辑同步详情与下载对象。绝不允许
-                    // “标签还是旧档位、下载对象已经变了”。
+                    // "标签还是旧档位、下载对象已经变了"。
                     NSInteger preferred = -1;
                     if (previousVariantLabel.length)
                         for (NSInteger i = 0; i < (NSInteger)self.variantPicker.numberOfItems; i++)
@@ -1240,7 +1255,7 @@ static NSString *RDFormatForMediaURL(NSString *urlString) {
 }
 
 // 详情当前展示的媒体属于哪一个可见行（档位切换后详情展示的是行内的某个档位，
-// 身份与行本身不同，必须按“行声明的档位集合”归属）。
+// 身份与行本身不同，必须按"行声明的档位集合"归属）。
 - (DetectedMedia *)visibleRowOwningMedia:(DetectedMedia *)media {
     if (!media.mediaURL.length) return nil;
     NSString *key = [DetectedMedia dedupKeyForURL:media.mediaURL];
@@ -1257,7 +1272,7 @@ static NSString *RDFormatForMediaURL(NSString *urlString) {
 }
 
 // 列表行摘要与详情保持一致：详情显示某行的档位时，把该档位的大小/时长同步到那一行；
-// 详情回到行本身（未切档位）时撤销覆盖。只有“当前选中行”允许持有覆盖项，
+// 详情回到行本身（未切档位）时撤销覆盖。只有"当前选中行"允许持有覆盖项，
 // 因此每次同步先清空，再按当前状态重建，不会留下旧行的过期摘要。
 - (void)syncSelectedRowTierDisplay {
     NSArray<DetectedMedia *> *visible = self.visibleMedia;
@@ -1312,7 +1327,7 @@ static NSString *RDFormatForMediaURL(NSString *urlString) {
 // 先按下载身份（保留全部参数）精确匹配，再退回分组身份（忽略 CDN 签名/过期参数）：
 // 真实网址上静态取页腿与动态取页腿各拿到一份签名不同的同一地址
 //（…secure=A 与 …secure=B），只按完整 URL 匹配会让用户在临时列表里选中的资源在
-// 最终列表里“消失”（选中被清空、详情被关掉）。分组身份保留路径，所以不会把
+// 最终列表里"消失"（选中被清空、详情被关掉）。分组身份保留路径，所以不会把
 // 480p/720p 这类不同档位误判成同一行。
 - (NSUInteger)visibleRowMatchingMedia:(DetectedMedia *)media {
     if (!media) return NSNotFound;
@@ -1330,7 +1345,7 @@ static NSString *RDFormatForMediaURL(NSString *urlString) {
 
 // 探测结果整体重建（临时结果与最终结果共用）。关键点：选中项必须按「资源身份」
 // 恢复而不是按下标——探测期间列表会先出现临时结果、随后被最终结果替换，两者顺序
-// 可能不同（动态腿的成员在合并结果里靠前），按下标保留会让 ⌘D 下载到“错行”
+// 可能不同（动态腿的成员在合并结果里靠前），按下标保留会让 ⌘D 下载到"错行"
 // 资源；详情面板显示同一资源时继续保留，不重复订阅。
 - (void)applyDiscoveryResult:(ZZResourceDiscoveryResult *)result final:(BOOL)isFinal {
     NSArray<DetectedMedia *> *before = self.visibleMedia;
@@ -1361,11 +1376,11 @@ static NSString *RDFormatForMediaURL(NSString *urlString) {
 }
 
 // 结果列表重建后把详情面板接到重建后的行对象上：
-// 详情当前展示的才是“用户选中的东西”。结果列表重建时，结果里可能只有该影片的
+// 详情当前展示的才是"用户选中的东西"。结果列表重建时，结果里可能只有该影片的
 // **行对象**（declaredVariants 首项，典型是 480p），而用户选中的是同一行的 1080p
 // 档位对象——它不在结果列表里。若按行对象比较，条件恒真，就会把 currentDownloadMedia
-// 静静换成 480p 却不重配详情，造成“界面仍显示 1080p（选择器/链接/274MB）、⌘D 却
-// 下载 480p（854x480 / 72.9MB）、且入队 expectedLength 变成 0”的现场故障。
+// 静静换成 480p 却不重配详情，造成"界面仍显示 1080p（选择器/链接/274MB）、⌘D 却
+// 下载 480p（854x480 / 72.9MB）、且入队 expectedLength 变成 0"的现场故障。
 // 因此这里以详情当前档位为准，并在重建后恢复同一档位，保证
 // 选择器 / 链接 / 详情对象 / 入队对象四者同步。
 - (void)restoreDetailForRestoredRow:(DetectedMedia *)restored {
@@ -1397,7 +1412,7 @@ static NSString *RDFormatForMediaURL(NSString *urlString) {
 
 #pragma mark - 统一呈现（页面探测完成 → 列表/缩略图/详情都就绪 → 一次性呈现）
 
-// 快照是否已到终态：任一字段仍为 Loading 都算“还没就绪”。
+// 快照是否已到终态：任一字段仍为 Loading 都算"还没就绪"。
 static BOOL RDPresentationFieldSettled(RDMetadataField *field) {
     return field != nil && field.state != RDMetadataLoading;
 }
@@ -1406,9 +1421,9 @@ static BOOL RDPresentationFieldSettled(RDMetadataField *field) {
 //  · 首屏缩略图预热通道（includeMediaLegs=NO）：按产品约定只承诺缩略图——生产
 //    RDMetadataService 对 previewOnly 订阅**故意不出队媒体腿**，时长/大小/分辨率
 //    会长期停在 Loading，留到用户真正选中该资源时再读。若这里仍要求四项全终态，
-//    这类行永远“不就绪”，统一呈现只能干等 kRDPresentationSafetyDeadline（60s）
+//    这类行永远"不就绪"，统一呈现只能干等 kRDPresentationSafetyDeadline（60s）
 //    才兜底提交（实测 hanime1.life 单资源页 67–74s，其中 60s 是纯空等）。
-// 只等缩略图落地：给定了必需项，就不把“等不到”当成“没就绪”。
+// 只等缩略图落地：给定了必需项，就不把"等不到"当成"没就绪"。
 static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL includeMediaLegs) {
     if (!snapshot) return NO;
     if (!RDPresentationFieldSettled(snapshot.preview)) return NO;
@@ -1433,7 +1448,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 //  1) 当前正在展示的详情：完整元数据（时长/大小/分辨率/预览）；
 //  2) 首屏前 N 行的缩略图（列表里用户第一眼看到的那几行）。
 // 行内的时长/大小仍只在用户真正选中该资源时读取（产品既有约定），因此不会
-// 在“探测完成”之后逐项跳出：没有人订阅的行根本不会后到。
+// 在"探测完成"之后逐项跳出：没有人订阅的行根本不会后到。
 - (void)beginUnifiedPresentationForResult:(ZZResourceDiscoveryResult *)result {
     [self cancelPresentationPreparation];
     NSInteger generation = self.presentationGeneration;
@@ -1446,8 +1461,8 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     if (self.detailMedia && self.detailMedia.mediaURL.length)
         [self registerPresentationMedia:self.detailMedia includeMediaLegs:YES entries:entries requirements:requirements];
     // 2) 首屏各行：**有画质档位声明的视频行，把每一档都要求到完整元数据**
-    //（时长/大小/分辨率）。产品要求“3 档画质之间的数据全部探索清楚，探索
-    // 进度条才能完成”；这也让用户切档位时不再“读取中…”。
+    //（时长/大小/分辨率）。产品要求"3 档画质之间的数据全部探索清楚，探索
+    // 进度条才能完成"；这也让用户切档位时不再"读取中…"。
     // 其余行（图片 / 未声明档位的视频行）仍走轻量的仅预览通道。
     NSUInteger budget = MIN(kRDPresentationPreviewBudget, visible.count);
     for (NSUInteger i = 0; i < budget; i++) {
@@ -1527,7 +1542,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     if (generation != self.presentationGeneration || !self.presentationPreparing) return;
     NSString *key = [DetectedMedia dedupKeyForURL:media.mediaURL];
     if (!key.length || [self.presentationSettled containsObject:key]) return;
-    // 该行当初是按哪条通道登记的，就按哪条通道的要求判“就绪”（见 settle 谓词注释）。
+    // 该行当初是按哪条通道登记的，就按哪条通道的要求判"就绪"（见 settle 谓词注释）。
     NSNumber *requirement = self.presentationRequirements[key];
     BOOL includeMediaLegs = requirement ? requirement.boolValue : YES;
     if (!RDPresentationSnapshotSettled(snapshot, includeMediaLegs)) return;
@@ -1539,7 +1554,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 
 // 统一呈现：列表、缩略图、详情、状态文案、进度在同一轮主线程更新中写完。
 // 准备阶段状态文字：就绪计数仍由元数据/缩略图事件驱动，但当前界面只显示
-// 固定的“正在整理下载选项…”文字；这里不再计算或绘制百分比进度。
+// 固定的"正在整理下载选项…"文字；这里不再计算或绘制百分比进度。
 - (void)refreshPreparationProgress {
     NSUInteger total = self.presentationRequirementTotal;
     if (!total) return;
@@ -1582,8 +1597,8 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     if (generation != self.presentationGeneration || !self.presentationPreparing) return;
     self.presentationPreparing = NO;
     self.explorationResultsSuppressed = NO;
-    // 只取消“仅预览”预热任务；画质档位探索任务必须继续跑完——它们的时长/
-    // 大小/分辨率要写入元数据缓存，用户之后切档位才不用重新“读取中…”。
+    // 只取消"仅预览"预热任务；画质档位探索任务必须继续跑完——它们的时长/
+    // 大小/分辨率要写入元数据缓存，用户之后切档位才不用重新"读取中…"。
     // （迟到快照不会改写界面：presentationSnapshotArrived 在非准备阶段直接丢弃。）
     for (NSDictionary *entry in self.presentationTokens)
         if (![entry[@"legs"] boolValue]) [(RDMetadataToken *)entry[@"token"] cancel];
@@ -1594,7 +1609,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 
     [self.table reloadData];              // 列表：行内时长/大小提示一次性生效
     [self refreshDetailPresentation];     // 详情：缩略图与字段一次性生效
-    self.modeButton.hidden = NO;
+    self.settingsProbeModeControl.enabled = YES;
     if (self.pendingCompletionShowsCheck) {
         self.checkLabel.hidden = NO;
         NSInteger checkGeneration = self.detailGeneration;
@@ -1610,7 +1625,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     self.pendingCompletionStatus = nil;
 }
 
-// 详情一次性刷新：缩略图要么是图像，要么是明确终态占位（绝不无限“读取中…”）。
+// 详情一次性刷新：缩略图要么是图像，要么是明确终态占位（绝不无限"读取中…"）。
 - (void)refreshDetailPresentation {
     if (!self.detailMedia) return;
     [self refreshDetailMetaLabels];
@@ -1721,18 +1736,17 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     CGFloat valueW = MAX(80, contentW - 74);
     CGFloat captionH = 16;
 
-    // 底部固定：下载按钮贴底，直链区在按钮之上。
+    // 直链组与下载按钮：正常空间下紧随键值行向下流式排布（2026-09-19 主人定案，
+    // 收紧行块与「下载直链」之间的大片留白）；仅当流式排布会越过面板底边距时
+    // 退回下面的贴底兜底位置（极矮窗口仍保证不重叠、不越界）。
     // 「下载直链」小标题必须完整落在直链字段上方：字段高 24pt，标题与它再留 4pt 间距；
     // 旧实现写 linkY+20，比字段上沿还低 4pt，标题会压住字段/复制按钮。
     CGFloat buttonH = 24;
-    CGFloat buttonY = 12;
-    if (self.detailDownloadButton) {
-        self.detailDownloadButton.frame = NSMakeRect(floor((paneW - 76) / 2.0), buttonY, 76, buttonH);
-    }
-    CGFloat linkY = buttonY + buttonH + 22;             // 直链文字区
+    CGFloat fallbackButtonY = 12;
+    CGFloat fallbackLinkY = fallbackButtonY + buttonH + 22;      // 直链文字区（兜底）
     CGFloat linkFieldH = 24;
-    CGFloat linkTitleY = linkY + linkFieldH + 4;        // “下载直链”小标题
-    CGFloat rowsBottomLimit = linkTitleY + 18;          // 键值行不得越过直链标题上沿
+    CGFloat fallbackLinkTitleY = fallbackLinkY + linkFieldH + 4; // "下载直链"小标题（兜底）
+    CGFloat rowsBottomLimit = fallbackLinkTitleY + 18;   // 键值行不得越过直链标题上沿
 
     // 标题：文字高度只取决于面板宽度，先算出来，缩略图才知道自己能占多少高度
     CGFloat titleW = contentW;
@@ -1801,17 +1815,35 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
         if (val) val.frame = NSMakeRect(valueX, y, valueW, captionH);
         y -= rowGap;
     }
+    // 行块下沿：画质下拉显示时取下拉自身下沿，否则取最后一行键值的下沿。
+    CGFloat rowsBlockBottom = y + rowGap;
     if (showPicker) {
         // 下拉排在第 5 个槽位（y 已被 4 行键值各减一次 rowGap），与「来源」整整隔一行
-        self.variantPicker.frame = NSMakeRect(valueX, MAX(rowsBottomLimit, y), MIN(120, valueW), 20);
+        CGFloat pickerY = MAX(rowsBottomLimit, y);
+        self.variantPicker.frame = NSMakeRect(valueX, pickerY, MIN(120, valueW), 20);
+        rowsBlockBottom = pickerY;
     }
 
-    // 直链区（URL 专用规则：单行中间省略）
+    // 直链区（URL 专用规则：单行中间省略）+ 下载按钮：流式排布，空间不足退回贴底。
+    CGFloat linkTitleY, linkY, buttonY;
+    const CGFloat sectionGap = 24;   // 键值行块与「下载直链」小标题的区块间隔
+    // 流式排布自上而下：sectionGap + 标题14 + 4 + 字段24 + 22 + 按钮24。
+    CGFloat flowButtonY = rowsBlockBottom - sectionGap - 14 - 4 - linkFieldH - 22 - buttonH;
+    if (flowButtonY >= 12) {
+        linkTitleY = rowsBlockBottom - sectionGap - 14;
+        linkY = linkTitleY - 4 - linkFieldH;
+        buttonY = linkY - 22;
+    } else {
+        buttonY = fallbackButtonY;
+        linkY = fallbackLinkY;
+        linkTitleY = fallbackLinkTitleY;
+    }
     if (self.linkTitleLabel) self.linkTitleLabel.frame = NSMakeRect(marginX, linkTitleY, contentW, 14);
     CGFloat copyW = 18;
     CGFloat linkW = MAX(80, contentW - copyW - 6);
     if (self.linkField) self.linkField.frame = NSMakeRect(marginX, linkY, linkW, linkFieldH);
     if (self.linkCopyButton) self.linkCopyButton.frame = NSMakeRect(marginX + linkW + 6, linkY + 3, copyW, copyW);
+    if (self.detailDownloadButton) self.detailDownloadButton.frame = NSMakeRect(floor((paneW - 76) / 2.0), buttonY, 76, buttonH);
 
     // 隐藏的分辨率行不参与布局
     if (self.dimensionTitle) self.dimensionTitle.hidden = YES;
@@ -2022,30 +2054,18 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     }
 }
 
-#pragma mark - 模式切换「总/单」与总站页数
+#pragma mark - 总站页数（模式切换已移至设置页）
 
-- (void)updateModeButtonTitle {
+- (void)updatePagesFieldVisibility {
     BOOL site = (self.mode == ZZResourceDiscoveryModeSite);
-    NSMutableAttributedString *title = [[NSMutableAttributedString alloc]
-        initWithString:@"总/单"
-            attributes:@{NSFontAttributeName: [NSFont systemFontOfSize:12],
-                         NSForegroundColorAttributeName: [NSColor systemGrayColor]}];
-    NSRange active = site ? NSMakeRange(0, 1) : NSMakeRange(2, 1);
-    [title addAttribute:NSForegroundColorAttributeName value:[NSColor labelColor] range:active];
-    [title addAttribute:NSFontAttributeName value:[NSFont systemFontOfSize:12 weight:NSFontWeightSemibold] range:active];
-    self.modeButton.attributedTitle = title;
     self.pagesField.hidden = !site;
     self.pagesUnitButton.hidden = !site;
-}
-
-- (void)toggleMode:(id)sender {
-    self.mode = (self.mode == ZZResourceDiscoveryModeSite) ? ZZResourceDiscoveryModeCurrentPage : ZZResourceDiscoveryModeSite;
-    [self updateModeButtonTitle];
 }
 
 - (void)commitPages:(id)sender {
     NSInteger v = MAX((NSInteger)1, MIN(DiscoverySessionController.siteMaxPages, self.pagesField.integerValue));
     self.sitePages = (NSUInteger)v;
+    [PreferencesStore.shared setInteger:v forKey:SevenZZKeySitePages];
     self.pagesField.stringValue = [NSString stringWithFormat:@"%ld", (long)v];
     [self.window makeFirstResponder:self.urlField];
 }
@@ -2056,6 +2076,8 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 - (void)showSettingsPage:(id)sender {
     self.homePage.hidden = YES;
     self.settingsPage.hidden = NO;
+    // 同步探测模式控件状态（模式可能在主页被其他路径改变）
+    self.settingsProbeModeControl.selectedSegment = (self.mode == ZZResourceDiscoveryModeSite) ? 1 : 0;
     [self.window makeFirstResponder:nil];
 }
 
@@ -2100,6 +2122,20 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     NSInteger index = MAX(0, MIN(2, sender.selectedSegment));
     [PreferencesStore.shared setInteger:index forKey:SevenZZKeyMainPaneRatio];
     [self layoutWorkspace];
+}
+
+- (void)changeProbeMode:(NSSegmentedControl *)sender {
+    // 扫描与呈现期间禁止切换模式：mode 只在 scan: 入口读取，
+    // 中途改变会导致 UI 显示的模式与实际在跑的会话不一致。
+    // 呈现阶段（缩略图/元数据加载）同样禁止，与旧 modeButton.hidden 守卫范围一致。
+    if (self.scanning || self.presentationPreparing) {
+        sender.selectedSegment = (self.mode == ZZResourceDiscoveryModeSite) ? 1 : 0;
+        return;
+    }
+    BOOL site = (sender.selectedSegment == 1);
+    self.mode = site ? ZZResourceDiscoveryModeSite : ZZResourceDiscoveryModeCurrentPage;
+    [PreferencesStore.shared setInteger:site ? 1 : 0 forKey:SevenZZKeyProbeMode];
+    [self updatePagesFieldVisibility];
 }
 
 // 设置页布局：标题 + 返回（固定页头）+ 滚动表单区 + 右下角版本号。
@@ -2247,6 +2283,20 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     self.settingsImagesSwitch.target = self;
     self.settingsImagesSwitch.action = @selector(toggleFilterImagesOnly:);
     addRow(@"只显示图片", @"开启后，列表里只保留图片", @[self.settingsImagesSwitch]);
+    addSeparator();
+    // 探测模式：当前页 / 总站（持久化，与原主页「总/单」按钮功能一致）
+    NSSegmentedControl *probeModeControl =
+        [NSSegmentedControl segmentedControlWithLabels:@[@"当前页", @"总站"]
+                                          trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                target:self
+                                                action:@selector(changeProbeMode:)];
+    probeModeControl.identifier = @"RDProbeModeControl";
+    probeModeControl.frame = NSMakeRect(0, 0, 120, 26);
+    probeModeControl.segmentStyle = NSSegmentStyleRounded;
+    probeModeControl.font = [NSFont systemFontOfSize:11.5];
+    probeModeControl.selectedSegment = (self.mode == ZZResourceDiscoveryModeSite) ? 1 : 0;
+    self.settingsProbeModeControl = probeModeControl;
+    addRow(@"探测模式", @"探测当前网页或整个站点的资源", @[probeModeControl]);
 
     // 卡片 1：布局 —— 左右栏比例三档平铺（点哪档切哪档）。
     // identifier 故意沿用 "RDPaneRatioPopup"：它是 build/ui-probe/accept2.sh 的黑盒定位锚点，
@@ -2416,8 +2466,8 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     // 分组 key → rows 中的行位置。同一明确 video 元素内的全部成员
     // （video.src + 全部 source.src，有或无 size/label/width/height）共享稳定
     // family ID，因此无论是否声明标准画质都只占一行：未知/非标准画质不伪造
-    // 档位，但也绝不以第二行重复出现。没有 family ID 时才退回“候选集合完全
-    // 一致”的旧折叠键。每组先到者占位，择优者（declaredVariants 首项 URL）
+    // 档位，但也绝不以第二行重复出现。没有 family ID 时才退回"候选集合完全
+    // 一致"的旧折叠键。每组先到者占位，择优者（declaredVariants 首项 URL）
     // 到达时原位替换；择优项不在结果里时，首个占位行作为确定性回退。
     NSMutableDictionary<NSString *, NSNumber *> *rowByGroup=[NSMutableDictionary dictionary];
     for (DetectedMedia *m in self.results) {
@@ -2479,7 +2529,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
         });
     };
     // 临时结果（静态取页腿先回来）：先把列表显示出来，用户不必等动态 WebKit 腿
-    // 的 4–6 秒。探测还没结束，所以不动“探测完成”文案。
+    // 的 4–6 秒。探测还没结束，所以不动"探测完成"文案。
     self.session.interimResultHandler = ^(ZZResourceDiscoveryResult *r){
         dispatch_async(dispatch_get_main_queue(), ^{
             typeof(self) sself = weakSelf;
@@ -2495,7 +2545,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 }
 
 - (void)scan:(id)sender {
-    self.sessionClearGeneration += 1;   // 新的探测意图作废在途的“清除会话”完成回调
+    self.sessionClearGeneration += 1;   // 新的探测意图作废在途的"清除会话"完成回调
     if (self.scanning) { self.statusNote.stringValue = @"正在探测中，按 Esc 取消后再试"; return; }
     NSString *s = [self.urlField.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     NSURL *u = [NSURL URLWithString:s];
@@ -2515,7 +2565,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     [self installSessionHandlersForGeneration:self.scanGeneration];
     self.statusNote.stringValue = @"准备读取网址…";
     [self.metadataToken cancel];
-    [self.durationCache removeAllObjects]; // 旧 URL 的“获取中…”残留不得带入新结果
+    [self.durationCache removeAllObjects]; // 旧 URL 的"获取中…"残留不得带入新结果
     [self.selectedTierRowDisplay removeAllObjects]; // 旧 URL 的档位摘要同理
     [self.results removeAllObjects];
     [self.table reloadData];
@@ -2523,7 +2573,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     [self showDetailEmpty];
     self.previewShown = NO;
     self.scanning = YES;
-    self.modeButton.hidden = YES;
+    self.settingsProbeModeControl.enabled = NO;
     self.checkLabel.hidden = YES;
     self.statusNote.stringValue = @"正在读取网址…";
     if (self.mode == ZZResourceDiscoveryModeSite) {
@@ -2534,7 +2584,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 }
 
 - (void)cancelScan:(id)sender {
-    self.sessionClearGeneration += 1;   // 取消同样作废在途的“清除会话”完成回调
+    self.sessionClearGeneration += 1;   // 取消同样作废在途的"清除会话"完成回调
     // 准备呈现阶段（页面探测已回调完成、列表缩略图/详情仍在读取）也必须可取消。
     if (!self.scanning && !self.presentationPreparing) return;
     [self cancelPresentationPreparation];
@@ -2546,8 +2596,8 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     self.metadataToken = nil;
     self.metadataSnapshot = nil;
     self.scanning = NO;
-    self.scanGeneration += 1;   // 作废本次探次的迟到回调，避免覆盖“已取消探测”
-    self.modeButton.hidden = NO;
+    self.settingsProbeModeControl.enabled = YES;
+    self.scanGeneration += 1;   // 作废本次探次的迟到回调，避免覆盖"已取消探测"
     self.statusNote.stringValue = @"已取消探测";
     [self cleanupManualVerification];
 }
@@ -2753,13 +2803,13 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
         [self cancelPresentationPreparation];
         self.pendingCompletionStatus = nil;
         self.explorationResultsSuppressed = NO;
-        self.modeButton.hidden = NO;
-            self.statusNote.stringValue = @"已取消探测";
+        self.settingsProbeModeControl.enabled = YES;
+        self.statusNote.stringValue = @"已取消探测";
         return;
     }
     // 统一呈现：先把完成文案挂起，等列表缩略图与当前详情到达终态，
     // 再由 commitUnifiedPresentationForGeneration: 一次性写入。这样进度
-    // 100% / “探测完成”与列表、缩略图、详情始终互相一致。
+    // 100% / "探测完成"与列表、缩略图、详情始终互相一致。
     NSMutableArray<NSError *> *errors = [NSMutableArray array];
     if (result.error) [errors addObject:result.error];
     for (MultiPageProbePageResult *page in result.pageResults) if (page.status == MultiPageProbePageStatusFailed && page.error) [errors addObject:page.error];
@@ -2784,7 +2834,7 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
         if (seed.host.length) [self beginVerificationSignalCheckForURL:seed generation:self.scanGeneration];
     }
     [self beginUnifiedPresentationForResult:result];
-    // 严格统一呈现：探索未完成前列表不出现任何行（“内容先冒出来、数据后补”
+    // 严格统一呈现：探索未完成前列表不出现任何行（"内容先冒出来、数据后补"
     // 正是 2026-09-13 验收发现的加载逻辑错误）；探索完成后由
     // commitUnifiedPresentationForGeneration: 一次性 reloadData 呈现。
     if (self.presentationPreparing) [self.table reloadData];
@@ -3106,7 +3156,7 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
                                            columnIndexes:[NSIndexSet indexSetWithIndex:0]];
         }
     } else if (!sameRows) {
-        // 行集合/筛选归属变化（如下载中→已完成、失败进 “已失败”）：整表重建，
+        // 行集合/筛选归属变化（如下载中→已完成、失败进 "已失败"）：整表重建，
         // 但按 identifier 恢复选中、按可视原点恢复滚动位置，不让列表跳动。
         NSString *selectedIdentifier = nil;
         NSInteger selectedRow = self.downloadsTable.selectedRow;
@@ -3508,7 +3558,7 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
     // 指标文字
     self.metricsLabel.stringValue = [app metricsStringForJob:job];
     self.metricsLabel.frame = NSMakeRect(12, 10, width - 24, 16);
-    // 逐项同步辅助功能值，便于 UI 自动化核对“状态 / 指标 / 失败原因”的实时变化。
+    // 逐项同步辅助功能值，便于 UI 自动化核对"状态 / 指标 / 失败原因"的实时变化。
     self.stateLabel.accessibilityValue = self.stateLabel.stringValue;
     self.metricsLabel.accessibilityValue = self.metricsLabel.stringValue;
     self.errorLabel.accessibilityValue = self.errorLabel.stringValue;

@@ -1827,9 +1827,19 @@ static int RSRunDownload(NSString *urlString, NSString *referer, NSString *title
     DownloadManager *manager = [DownloadManager sharedManager];
     manager.defaultReferer = referer;
     NSURL *folder = destDir.length ? [NSURL fileURLWithPath:destDir] : [NSURL fileURLWithPath:NSTemporaryDirectory()];
-    DownloadJob *job = [manager enqueueItemWithSourceURL:[NSURL URLWithString:urlString] folder:folder
-                                           preferredName:title sourcePageURL:referer resourceKind:DownloadResourceVideo
+    // 与真实 UI 流程对齐（downloadSelected:）：清单地址按 Manifest 入队并保留
+    // streamMasterURL，走 RDStreamDownloadTask；否则单连接路径会拒绝 m3u8/mpd
+    //（"audio/mpegurl，不是视频文件"）——那是真实 App 的正确防呆，不是缺陷。
+    NSURL *source = [NSURL URLWithString:urlString];
+    DownloadResourceKind kind = DownloadResourceVideo;
+    NSString *srcPath = (source.path ?: @"").lowercaseString;
+    if ([srcPath hasSuffix:@".m3u8"] || [srcPath hasSuffix:@".mpd"]) {
+        kind = DownloadResourceManifest;
+    }
+    DownloadJob *job = [manager enqueueItemWithSourceURL:source folder:folder
+                                           preferredName:title sourcePageURL:referer resourceKind:kind
                                           expectedLength:0];
+    if (kind == DownloadResourceManifest) job.streamMasterURL = source.absoluteString;
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:900];
     double t0 = RSTicks();
     while (job.state != DownloadJobStateCompleted && job.state != DownloadJobStateFailed
@@ -2179,7 +2189,7 @@ int main(int argc, const char *argv[]) {
                 unsetenv("RD_PROBE_ALLOW_REAL_SHARED_MANAGER");
                 printf("RS-NOTE 已清除继承的 RD_PROBE_ALLOW_REAL_SHARED_MANAGER（本进程内不再生效）\n");
             }
-            BOOL allowReal = [m0 isEqualToString:@"appdl"];
+            BOOL allowReal = [m0 isEqualToString:@"appdl"] || [m0 isEqualToString:@"download"];
             if (!allowReal) {
                 RSInstallIsolatedSharedManager();
                 printf("RS-NOTE 已替换 +[DownloadManager sharedManager] 为本进程隔离替身\n");
@@ -2211,6 +2221,13 @@ int main(int argc, const char *argv[]) {
             NSString *title = [NSString stringWithUTF8String:argv[4]];
             double expect = argc > 5 ? atof(argv[5]) : 0;
             NSString *dest = argc > 6 ? [NSString stringWithUTF8String:argv[6]] : nil;
+            // 注意：download 分支在此直接 return，合流组件注入必须放在 return 之前
+            //（此前放在下方合并块里，download 路径永远走不到 —— 2026-09-19 现场 9 站复现）。
+            NSString *muxerPathDL = [[NSProcessInfo processInfo] environment][@"RD_PROBE_MUXER_PATH"];
+            if (muxerPathDL.length && [[NSFileManager defaultManager] isExecutableFileAtPath:muxerPathDL]) {
+                [DownloadManager sharedManager].rd_streamMuxerURL = [NSURL fileURLWithPath:muxerPathDL];
+                printf("RS-NOTE 注入真实合流组件（RD_PROBE_MUXER_PATH）：%s\n", muxerPathDL.UTF8String);
+            }
             return RSRunDownload(url, referer, title, expect, dest);
         }
         if ([mode isEqualToString:@"selfcheck"]) return RSSelfCheck();
@@ -2218,6 +2235,20 @@ int main(int argc, const char *argv[]) {
         if ([mode isEqualToString:@"variantcheck"]) return RSRunVariantCheck(url);
         if ([mode isEqualToString:@"variantrace"]) return RSRunVariantRace(url);
         if ([mode isEqualToString:@"downloadiso"]) return RSRunDownloadIsolated(url);
+        if ([mode isEqualToString:@"appdl"] || [mode isEqualToString:@"download"]) {
+            // 测试二进制没有主 bundle，生产代码按 mainBundle 找 MediaTools/ffmpeg 会找不到
+            // （2026-09-19 现场：19 站 HLS 合流全部"离线视频合成组件缺失"）。
+            // RD_PROBE_MUXER_PATH 显式注入仓库内真实 ffmpeg —— 走的是生产合流路径，非替身。
+            NSString *muxerPath = [[NSProcessInfo processInfo] environment][@"RD_PROBE_MUXER_PATH"];
+            if (muxerPath.length) {
+                if ([[NSFileManager defaultManager] isExecutableFileAtPath:muxerPath]) {
+                    [DownloadManager sharedManager].rd_streamMuxerURL = [NSURL fileURLWithPath:muxerPath];
+                    printf("RS-NOTE 注入真实合流组件（RD_PROBE_MUXER_PATH）：%s\n", muxerPath.UTF8String);
+                } else {
+                    printf("RS-NOTE RD_PROBE_MUXER_PATH 指向的文件不可执行，忽略：%s\n", muxerPath.UTF8String);
+                }
+            }
+        }
         if ([mode isEqualToString:@"appdl"]) {
             gRealDownload = YES;
             RSClearTerminalDownloadRecords();
