@@ -27,8 +27,9 @@ static NSArray<NSString *> *RDEphemeralQueryKeys(void) {
 
 + (RDQualityTierLevel)levelForShortSide:(double)shortSide {
     if (!(shortSide > 0) || !isfinite(shortSide)) return RDQualityTierNone;
-    static RDQualityTierLevel levels[] = { RDQualityTier480p, RDQualityTier720p, RDQualityTier1080p };
-    for (NSUInteger i = 0; i < 3; i++) {
+    static RDQualityTierLevel levels[] = { RDQualityTier360p, RDQualityTier480p, RDQualityTier720p,
+                                           RDQualityTier1080p, RDQualityTier1440p, RDQualityTier2160p };
+    for (NSUInteger i = 0; i < 6; i++) {
         double target = (double)levels[i];
         if (fabs(shortSide - target) <= target * kRDQualityTierRelativeTolerance) return levels[i];
     }
@@ -46,9 +47,12 @@ static NSArray<NSString *> *RDEphemeralQueryKeys(void) {
 
 + (NSString *)labelForLevel:(RDQualityTierLevel)level {
     switch (level) {
+        case RDQualityTier360p:  return @"360p";
         case RDQualityTier480p:  return @"480p";
         case RDQualityTier720p:  return @"720p";
         case RDQualityTier1080p: return @"1080p";
+        case RDQualityTier1440p: return @"1440p";
+        case RDQualityTier2160p: return @"2160p";
         default:                 return @"";
     }
 }
@@ -204,11 +208,13 @@ static NSComparisonResult RDCompareCandidates(RDQualityCandidate *a, RDQualityCa
         if (!buckets[bucket]) buckets[bucket] = [NSMutableArray array];
         [buckets[bucket] addObject:c];
     }
-    // 第三步：每档择优一个。产品规则：质量选择只提供实际存在的 480p/720p/1080p，
+    // 第三步：每档择优一个。产品规则：质量选择只提供实际存在的标准档位，
     // 缺档不生成；非标准尺寸（None 档）绝不自动变成额外质量选项——真实像素
     // 保留在详情“分辨率”行，由维度字段呈现，不在这里产生任何标签。
     NSMutableArray<NSDictionary<NSString *, id> *> *out = [NSMutableArray array];
-    for (NSNumber *levelNumber in [@[@(RDQualityTier480p), @(RDQualityTier720p), @(RDQualityTier1080p)] objectEnumerator]) {
+    NSArray<NSNumber *> *orderedLevels = @[@(RDQualityTier360p), @(RDQualityTier480p), @(RDQualityTier720p),
+                                           @(RDQualityTier1080p), @(RDQualityTier1440p), @(RDQualityTier2160p)];
+    for (NSNumber *levelNumber in orderedLevels) {
         NSArray<RDQualityCandidate *> *bucket = buckets[levelNumber];
         if (bucket.count == 0) continue; // 缺档不生成
         RDQualityCandidate *best = bucket.firstObject;

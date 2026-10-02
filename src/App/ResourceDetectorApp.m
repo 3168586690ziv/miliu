@@ -228,6 +228,9 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 // 两行各自的说明文字兼作结果反馈：进行中 / 已清除都写在这里，设置页内直接可见。
 @property (nonatomic, weak) NSTextField *clearDownloadRecordsHint;
 @property (nonatomic, weak) NSTextField *clearSiteSessionHint;
+// 「下载位置」行的说明文字兼作当前生效路径的常驻显示：进入设置页与选完目录后就地刷新，
+// 用户不点「选择」也能知道文件会落到哪里（2026-10-02 用户需求）。
+@property (nonatomic, weak) NSTextField *settingsDownloadLocationHint;
 // 清除网站会话是**异步**操作；该 token 用于作废过期完成回调，避免其覆盖更新的探测/取消状态
 // （2026-09-18 无 GUI 受控复现：清除进行中发起新探测，迟到回调会把状态文案改回"网站会话已清除"）。
 @property (nonatomic, assign) NSInteger sessionClearGeneration;
@@ -388,6 +391,10 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 @implementation ResourceDetectorAppDelegate
 
 - (void)dealloc {
+    // NSTimer 对 target 强引用：不 invalidate 会保活 delegate（retain cycle）。
+    // downloadRecencyTimer 是 30s 重复计时器，不清就永远循环。
+    [_downloadRecencyTimer invalidate];
+    [_downloadsRefreshTimer invalidate];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     if (_spaceTapSource) {
         CFRunLoopSourceInvalidate(_spaceTapSource);
@@ -2082,6 +2089,8 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     self.settingsPage.hidden = NO;
     // 同步探测模式控件状态（模式可能在主页被其他路径改变）
     self.settingsProbeModeControl.selectedSegment = (self.mode == ZZResourceDiscoveryModeSite) ? 1 : 0;
+    // 下载位置的实际生效目录可能变化（U 盘插拔、自定义目录被删）：每次进设置页都刷新
+    [self refreshDownloadLocationHint];
     [self.window makeFirstResponder:nil];
 }
 
@@ -2327,7 +2336,13 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     choose.controlSize = NSControlSizeSmall;
     choose.font = [NSFont systemFontOfSize:11.5];
     [choose sizeToFit];
-    addRow(@"下载位置", @"选择资源下载后保存的文件夹", @[choose]);
+    // 说明行常驻显示实际生效路径（含自定义失效回退的如实标注），选完目录后就地更新
+    addRow(@"下载位置", [self currentDownloadLocationHintText], @[choose]);
+    if ([rowHints.lastObject isKindOfClass:[NSTextField class]]) {
+        self.settingsDownloadLocationHint = rowHints.lastObject;
+        // 路径可能很长（U 盘等自定义目录）：中间截断，头尾都保留
+        self.settingsDownloadLocationHint.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    }
 
     // 卡片 3：数据管理
     currentCard = 3;
@@ -2511,7 +2526,35 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
         if (response != NSModalResponseOK || !panel.URL) return;
         [self.downloadSettings setCustomDirectoryURL:panel.URL];
         self.downloadSettings.downloadDestination = ResourceDownloadDestinationCustom;
+        [self refreshDownloadLocationHint];
     }];
+}
+
+// 「下载位置」行说明文字的当前值：实际生效目录（downloadDirectoryURL 已含
+// 自定义失效回退下载文件夹的规则）+ 失效回退时的如实标注。家目录缩写为 ~。
+- (NSString *)currentDownloadLocationHintText {
+    NSURL *dir = [self.downloadSettings downloadDirectoryURL];
+    NSString *path = dir.path ?: @"";
+    NSString *home = NSHomeDirectory();
+    if (home.length > 1 && [path hasPrefix:home]) {
+        path = [@"~" stringByAppendingString:[path substringFromIndex:home.length]];
+    }
+    NSMutableString *text = [NSMutableString stringWithFormat:@"当前下载位置：%@",
+                             path.length ? path : @"未设置"];
+    if (self.downloadSettings.downloadDestination == ResourceDownloadDestinationCustom) {
+        NSURL *custom = [self.downloadSettings customDirectoryURL];
+        BOOL isDir = NO;
+        BOOL alive = custom.path.length &&
+                     [[NSFileManager defaultManager] fileExistsAtPath:custom.path isDirectory:&isDir] && isDir;
+        if (!alive) [text appendString:@"（自定义位置当前不可用，已回退；重新选择可恢复）"];
+    }
+    return text;
+}
+
+- (void)refreshDownloadLocationHint {
+    if (!self.settingsDownloadLocationHint) return;
+    self.settingsDownloadLocationHint.stringValue = [self currentDownloadLocationHintText];
+    self.settingsDownloadLocationHint.textColor = [[NSColor labelColor] colorWithAlphaComponent:0.60];
 }
 
 #pragma mark - 内容过滤视图

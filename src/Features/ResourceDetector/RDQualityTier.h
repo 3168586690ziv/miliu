@@ -1,7 +1,8 @@
 //
 //  RDQualityTier.h — 通用质量档位归一化与候选去重
 //
-//  产品只认 480p/720p/1080p 三个标准档位；静态 HTML（<source size>）、
+//  产品认 360p/480p/720p/1080p/1440p/2160p 六个标准档位（2026-10-02 扩展：
+//  原三档会把手 4K/2K/低清源全部漏成无档）；静态 HTML（<source size>）、
 //  WebKit 动态事件、HLS master、DASH Representation 全部经由同一个
 //  归一化入口，禁止任何来源私造一套候选。
 //
@@ -13,9 +14,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 typedef NS_ENUM(NSInteger, RDQualityTierLevel) {
     RDQualityTierNone = 0,    // 无法归入标准档位（如 800×800 方形）——绝不伪装
+    RDQualityTier360p = 360,
     RDQualityTier480p = 480,
     RDQualityTier720p = 720,
     RDQualityTier1080p = 1080,
+    RDQualityTier1440p = 1440,
+    RDQualityTier2160p = 2160,
 };
 
 @interface RDQualityCandidate : NSObject

@@ -901,6 +901,32 @@ static void TestUnknownFreeSpaceDoesNotReject(void) {
           job.errorText.length ? job.errorText : @"(未拒绝)");
 }
 
+// T32（2026-10-02 补齐）：入队磁盘检查必须对照「本批需求量」而不只是固定阈值。
+// 旧逻辑只查 free < 1GB：剩 1.2GB 下 1.5GB 文件会放行，写到一半磁盘满才失败。
+// 新语义：required = 本批在途总量（含本文件）+ 保底水位；free >= required 放行。
+static void TestDiskShortageComparesRequiredBytes(void) {
+    int64_t const GB = 1024LL * 1024 * 1024;
+    // 1) 剩余充足（含旧语义下的放行场景）：free ≥ required → 放行
+    Check([DownloadManager diskSpaceShortageReasonForFreeBytes:120 * GB / 100
+                                                  requiredBytes:1 * GB] == nil,
+          @"T32: 剩余高于需求时不得拒绝");
+    // 2) 边界：恰好等于 → 放行（不允许差一个字节误拒）
+    Check([DownloadManager diskSpaceShortageReasonForFreeBytes:1 * GB
+                                                  requiredBytes:1 * GB] == nil,
+          @"T32: 剩余恰好等于需求时应放行");
+    // 3) 旧逻辑漏掉的真实场景：剩 1.2GB、水位 1GB、单文件 1.5GB → 需求 2.5GB > 剩余 → 拒绝
+    NSString *reason = [DownloadManager diskSpaceShortageReasonForFreeBytes:120 * GB / 100
+                                                             requiredBytes:25 * GB / 10];
+    Check([reason containsString:@"磁盘剩余空间不足"],
+          @"T32: 剩余低于本批需求时必须拒绝（实际：%@）", reason ?: @"(放行了)");
+    Check([reason containsString:@"1.2"] && [reason containsString:@"2.5"],
+          @"T32: 拒绝理由必须带剩余量与需求量数字（实际：%@）", reason);
+    // 4) 负值/零防御：不得崩溃或输出怪数字
+    NSString *zero = [DownloadManager diskSpaceShortageReasonForFreeBytes:0 requiredBytes:GB];
+    Check([zero containsString:@"磁盘剩余空间不足"] && ![zero containsString:@"-"],
+          @"T32: 零剩余时拒绝理由不得出现负数（实际：%@）", zero);
+}
+
 // T20: 退出持久化 + 幽灵中断清理：Queued 任务经 markInterruptedOnTerminate
 //      持久化 → 新 manager 恢复为 Interrupted → resume 后完成 →
 //      中断记录被清除（不得复活为幽灵中断任务），历史更新为完成。
@@ -3545,6 +3571,7 @@ int main(int argc, const char **argv) {
         TestFailureNotReportedAsSuccess();
         TestRejectedEnqueueStaysInList();
         TestUnknownFreeSpaceDoesNotReject();
+        TestDiskShortageComparesRequiredBytes();
         TestTerminatePersistsAndClearsInterrupted();
         TestFileNameSanitizationAndExtension();
         TestDNSFlapRetryBudget();

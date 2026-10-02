@@ -532,6 +532,16 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
     return RDCanonicalResourceURL(url);
 }
 
++ (NSString *)diskSpaceShortageReasonForFreeBytes:(int64_t)freeBytes
+                                    requiredBytes:(int64_t)requiredBytes {
+    if (freeBytes >= requiredBytes) return nil;
+    NSString *freeText = [NSByteCountFormatter stringFromByteCount:MAX(0, freeBytes)
+                                                        countStyle:NSByteCountFormatterCountStyleFile];
+    NSString *needText = [NSByteCountFormatter stringFromByteCount:MAX(0, requiredBytes)
+                                                        countStyle:NSByteCountFormatterCountStyleFile];
+    return [NSString stringWithFormat:@"磁盘剩余空间不足（剩余 %@，本批至少需要 %@），已停止下载", freeText, needText];
+}
+
 - (instancetype)initWithBackend:(id<RDDownloadBackend>)backend
                        tempRoot:(NSURL *)tempRoot
                           store:(DownloadStore *)store {
@@ -712,12 +722,17 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
     }
     NSDictionary *fs = [[NSFileManager defaultManager] attributesOfFileSystemForPath:folder.path error:nil];
     NSNumber *free = fs[NSFileSystemFreeSize];
-    // 只有“确实读到剩余空间、且低于阈值”才拒绝。取不到卷信息时（目标目录尚未创建、
+    // 只有“确实读到剩余空间”才判定短缺。取不到卷信息时（目标目录尚未创建、
     // 卷暂时不可读/未挂载）绝不能把“未知”当成 0：现场证据（2026-09-10）目标目录
     // 不存在 → 明明可用 146Gi 却报“磁盘剩余空间不足，已停止下载”，入队即被拒。
     // 与运行期检查 checkRuntimeLimitsForJob 的 `free && …` 语义保持一致。
-    if (free && free.longLongValue < [PerformancePolicy minimumFreeDiskSpace]) {
-        return @"磁盘剩余空间不足，已停止下载";
+    if (free) {
+        // 需求 = 本批在途总量（total 已含本文件）+ 保底水位。此前只对照固定阈值：
+        // 剩 1.2GB 下 1.5GB 文件会放行，写到一半磁盘满才失败（2026-10-02 补齐）。
+        int64_t required = total + [PerformancePolicy minimumFreeDiskSpace];
+        NSString *reason = [DownloadManager diskSpaceShortageReasonForFreeBytes:free.longLongValue
+                                                                  requiredBytes:required];
+        if (reason) return reason;
     }
     return nil;
 }

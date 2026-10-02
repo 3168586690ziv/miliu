@@ -90,6 +90,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// 是否启用入队异步 DNS 校验（默认开启；仅隔离 Mock 测试允许关闭，真实传输始终复查）。
 @property (nonatomic, assign) BOOL rd_enableEndpointResolution;
 
+/// 磁盘剩余空间短缺判定（纯函数，便于隔离测试）：剩余 ≥ 需求（本批在途总量 +
+/// 保底水位）返回 nil；不足返回带数字的中文拒绝理由。freeBytes 读不到时调用方
+/// 不得传入（未知 ≠ 0，见 T31 现场教训）。
++ (nullable NSString *)diskSpaceShortageReasonForFreeBytes:(int64_t)freeBytes
+                                              requiredBytes:(int64_t)requiredBytes;
+
 /// 用于入队去重的稳定资源身份：保留内容参数，规范化顺序并忽略常见的
 /// CDN 签名/过期参数。空或无效 URL 返回空字符串。
 + (NSString *)sourceIdentityForURL:(NSURL *)url;

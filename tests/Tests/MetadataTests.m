@@ -766,6 +766,35 @@ static void QualityTierTests(void) {
           @"源站声明高度按同一容差规则归档");
     CheckF([[RDQualityTier labelForLevel:RDQualityTier720p] isEqual:@"720p"], @"档位标签为 720p");
 
+    // 1b) 2026-10-02 扩展档位：360p / 1440p / 2160p（4K）与竖屏 4K 都必须归档；
+    //     扩展前这些全部落 None，不进画质下拉（用户长期使用的真实缺口）
+    CheckF([RDQualityTier levelForPixelWidth:640 height:360] == RDQualityTier360p, @"640x360 → 360p");
+    CheckF([RDQualityTier levelForPixelWidth:2560 height:1440] == RDQualityTier1440p, @"2560x1440 → 1440p");
+    CheckF([RDQualityTier levelForPixelWidth:3840 height:2160] == RDQualityTier2160p, @"3840x2160 → 2160p");
+    CheckF([RDQualityTier levelForPixelWidth:2160 height:3840] == RDQualityTier2160p, @"竖屏 2160x3840 按短边归 2160p");
+    CheckF([RDQualityTier levelForDeclaredHeight:2160] == RDQualityTier2160p &&
+           [RDQualityTier levelForDeclaredHeight:1440] == RDQualityTier1440p &&
+           [RDQualityTier levelForDeclaredHeight:360] == RDQualityTier360p,
+          @"声明高度 2160/1440/360 归档");
+    CheckF([[RDQualityTier labelForLevel:RDQualityTier2160p] isEqual:@"2160p"] &&
+           [[RDQualityTier labelForLevel:RDQualityTier1440p] isEqual:@"1440p"] &&
+           [[RDQualityTier labelForLevel:RDQualityTier360p] isEqual:@"360p"],
+          @"新档位标签正确");
+    // 4K + 1080p + 720p 混合：三档都进入质量选项且按升序排列（360p 缺档不生成）
+    NSArray *with4K = [RDQualityTier normalizedVariantsFromCandidates:@[
+        MTQualityCandidate(@"https://cdn.example.com/a-720.mp4", @"720", 1280, 720, 0, @"static-video"),
+        MTQualityCandidate(@"https://cdn.example.com/a-1080.mp4", @"1080", 1920, 1080, 0, @"static-video"),
+        MTQualityCandidate(@"https://cdn.example.com/a-2160.mp4", @"2160", 3840, 2160, 0, @"static-video"),
+    ]];
+    CheckF(with4K.count == 3 &&
+           [with4K[0][@"label"] isEqual:@"720p"] &&
+           [with4K[1][@"label"] isEqual:@"1080p"] &&
+           [with4K[2][@"label"] isEqual:@"2160p"],
+          @"4K 源进入质量选项且按档位升序（实际 %lu：%@）",
+          (unsigned long)with4K.count, [[with4K valueForKey:@"label"] componentsJoinedByString:@","]);
+    // 竖屏短视频 1080x1920 短边 1080 → 1080p（短视频站点常见形态）
+    CheckF([RDQualityTier levelForPixelWidth:1080 height:1920] == RDQualityTier1080p, @"竖屏 1080x1920 → 1080p");
+
     // 2) 800x800 + 854x480 + 1280x720 + 1920x1080：只有标准三档进入质量选项，
     //    非标准尺寸（800x800）绝不自动变成额外质量选项（真实像素由详情维度呈现）
     NSArray *mixed = [RDQualityTier normalizedVariantsFromCandidates:@[
@@ -841,11 +870,20 @@ static void QualityTierTests(void) {
         @{ @"url": @"https://cdn.example.com/v-720.mp4", @"resolution": @"1280x720", @"bandwidth": @"3000000" },
         @{ @"url": @"https://cdn.example.com/v-360.mp4", @"resolution": @"640x360", @"bandwidth": @"800000" },
     ]];
-    CheckF(merged.count == 1, @"静态+清单合并后仅保留标准档（360p 不作可选档，实际 %lu）", (unsigned long)merged.count);
-    CheckF([merged.firstObject[@"label"] isEqual:@"720p"] &&
-           [merged.firstObject[@"bandwidth"] longLongValue] == 3000000,
+    // 7) 静态声明 + 清单 Representation 合并：同档取带宽高者、同 URL 去重。
+    //    2026-10-02 档位扩展后 360p 是标准档：640x360 清单项应保留为可选档
+    //    （旧断言"360p 不作可选档"随三档体系一并作废）。
+    CheckF(merged.count == 2 &&
+           [merged[0][@"label"] isEqual:@"360p"] &&
+           [merged[1][@"label"] isEqual:@"720p"] &&
+           [merged[1][@"url"] isEqual:@"https://cdn.example.com/v-720.mp4"],
+          @"静态+清单合并：720p 取带宽高者去重、360p 保留为标准档（实际 %@）",
+          [merged description]);
+    NSDictionary *merged720 = nil;
+    for (NSDictionary *v in merged) if ([v[@"label"] isEqual:@"720p"]) merged720 = v;
+    CheckF([merged720[@"bandwidth"] longLongValue] == 3000000,
           @"合并后 720p 保留清单带宽信息");
-    CheckF([merged.firstObject[@"pixelWidth"] integerValue] == 1280,
+    CheckF([merged720[@"pixelWidth"] integerValue] == 1280,
           @"合并候选保留真实像素（1280x720）");
 
     // 8) 同档多 URL（生产解析器形态）：两个媒体都挂归一化后的分组，
@@ -1086,13 +1124,16 @@ static void SnapshotMergeIntegrationTests(void) {
     ((RDTestTable *)app.table).row = [RDTestRow new];
     app.variantPicker = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 90, 20) pullsDown:NO];
     [app subscribeMetadataForMedia:m reload:NO];
-    CheckF(Wait(^BOOL { return m.declaredVariants.count == 2; }, 10),
-          @"静态 720p + 清单 1080p 合并完成且不抛异常（实际 %lu）", (unsigned long)m.declaredVariants.count);
+    // 2026-10-02 档位扩展：清单的 640x360 也归 360p 档 → 360p/720p/1080p 三档
+    CheckF(Wait(^BOOL { return m.declaredVariants.count == 3; }, 10),
+          @"静态 720p + 清单 1080p/360p 合并完成且不抛异常（实际 %lu）", (unsigned long)m.declaredVariants.count);
+    CheckF((^{ NSMutableSet *s=[NSMutableSet set]; for (NSDictionary *v in m.declaredVariants) [s addObject:v[@"label"]];
+            return [s containsObject:@"360p"]&&[s containsObject:@"720p"]&&[s containsObject:@"1080p"]; })(),
+          @"合并后三档标签齐全");
     NSArray *labels = [m.declaredVariants valueForKey:@"label"];
-    CheckF([labels containsObject:@"720p"] && [labels containsObject:@"1080p"],
-          @"合并后选项为 720p/1080p（实际 %@）", labels);
-    CheckF(![labels containsObject:@"360p"], @"清单 360p 非标准档不进入选项");
-    CheckF(app.variantPicker.numberOfItems == 2, @"选择器共 2 项（实际 %lu）", (unsigned long)app.variantPicker.numberOfItems);
+    CheckF([labels containsObject:@"720p"] && [labels containsObject:@"1080p"] && [labels containsObject:@"360p"],
+          @"合并后选项为 360p/720p/1080p（实际 %@）", labels);
+    CheckF(app.variantPicker.numberOfItems == 3, @"选择器共 3 项：360p/720p/1080p（实际 %lu）", (unsigned long)app.variantPicker.numberOfItems);
     CheckF([app.variantPicker.selectedItem.representedObject[@"url"] isEqual:m.mediaURL],
           @"当前选择保持（选中项 URL = 媒体自身 URL）");
     CheckF([app.detailMedia.mediaURL isEqual:m.mediaURL],

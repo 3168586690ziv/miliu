@@ -513,6 +513,21 @@ static void SingleSourceVideoAndPlayerIdentity(void) {
     ResourceDetectorAppDelegate *bridgedApp = [ResourceDetectorAppDelegate new];
     bridgedApp.results = [bridged.media mutableCopy];
     Check(bridgedApp.visibleMedia.count == 2, @"同播放器一行 + 广告一行（实际 %lu）", (unsigned long)bridgedApp.visibleMedia.count);
+
+    // 2026-10-02 档位扩展后的全链路回归：播放器画质表事件带 4K/360 标签时，
+    // 合成 → 解析 → 归一化必须产出 2160p/360p 档（扩展前落 None 丢失）。
+    NSDictionary *p2160 = @{@"action":@"resource", @"url":@"https://cdn.example.com/m-2160.mp4", @"kind":@"video",
+                            @"player":@"ab12.p2", @"size":@"2160"};
+    NSDictionary *p360 = @{@"action":@"resource", @"url":@"https://cdn.example.com/m-360.mp4", @"kind":@"video",
+                           @"player":@"ab12.p2", @"size":@"360"};
+    NSMutableString *uhd = [NSMutableString string];
+    for (NSDictionary *e in @[p2160, p360]) [uhd appendString:[RDBridgeEventSynthesizer syntheticHTMLForEvent:e]];
+    RDProbeResult *uhdBridged = [RDProbeAnalyzer analyzeHTML:uhd baseURL:[NSURL URLWithString:@"https://example.com/watch4k"]];
+    NSMutableSet<NSString *> *uhdLabels = [NSMutableSet set];
+    for (DetectedMedia *m in uhdBridged.media) for (NSDictionary *v in m.declaredVariants) [uhdLabels addObject:v[@"label"]];
+    Check([uhdLabels containsObject:@"2160p"] && [uhdLabels containsObject:@"360p"],
+          @"4K/360 播放器声明进入质量选项（实际标签：%@）",
+          [uhdLabels.allObjects componentsJoinedByString:@","]);
 }
 
 #pragma mark - 5. 提前发布：消费链必须接受动态腿的第二次（最终）更新
