@@ -172,16 +172,18 @@ if rg -q 'RDProgressRingView|self\.ring|setRingProgress|rd-ring' "$ROOT/App/Reso
   echo "FAIL: circular progress control remains" >&2
   exit 1
 fi
-# 旧"模式切换"分段控件已移除；当前设置页有两个分段控件：
+# 旧"模式切换"分段控件已移除；当前设置页有三个分段控件：
 # 1. 左右栏比例三档（identifier = RDPaneRatioPopup）
 # 2. 探测模式「当前页/总站」（identifier = RDProbeModeControl）
-# 两者都是已知的合理控件；除此以外出现任何分段控件即失败。
+# 3. 下载性能「省电/标准」（identifier = RDPerformanceModeControl，2026-10-02 第16轮新增）
+# 三者都是已知的合理控件；除此以外出现任何分段控件即失败。
 OTHER_SEG="$(rg -n 'NSSegmentedControl' "$ROOT/App/ResourceDetectorApp.m" \
   | grep -v 'settingsPaneRatioControl' | grep -v 'changePaneRatio' | grep -v 'ratioControl' \
   | grep -v 'settingsProbeModeControl' | grep -v 'changeProbeMode' | grep -v 'probeModeControl' \
+  | grep -v 'settingsPerformanceControl' | grep -v 'changePerformanceMode' | grep -v 'perfControl' \
   | grep -v 'NSSegmentedControl segmentedControlWithLabels' || true)"
 if [ -n "$OTHER_SEG" ]; then
-  echo "FAIL: unexpected segmented control remains (not the pane-ratio or probe-mode control):" >&2
+  echo "FAIL: unexpected segmented control remains (not a whitelisted settings control):" >&2
   printf '%s\n' "$OTHER_SEG" >&2
   exit 1
 fi

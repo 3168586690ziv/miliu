@@ -9,6 +9,7 @@
 #import "DownloadManager.h"
 #import "ResourceDownloadSettings.h"
 #import "PreferencesStore.h"
+#import "PerformancePolicy.h"
 #import "ResourceResultRowView.h"
 #import "../Shared/UI/RDByteCountFormatting.h"
 #import "RDMetadataService.h"
@@ -231,6 +232,9 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 // 「下载位置」行的说明文字兼作当前生效路径的常驻显示：进入设置页与选完目录后就地刷新，
 // 用户不点「选择」也能知道文件会落到哪里（2026-10-02 用户需求）。
 @property (nonatomic, weak) NSTextField *settingsDownloadLocationHint;
+// 「下载性能」行分段控件（省电/标准）：PerformancePolicy 读同一 defaults 键，
+// 运行中的连接会话与调度器窗口在创建时已定值，切换对新任务部分生效、重启后完全生效。
+@property NSSegmentedControl *settingsPerformanceControl;
 // 清除网站会话是**异步**操作；该 token 用于作废过期完成回调，避免其覆盖更新的探测/取消状态
 // （2026-09-18 无 GUI 受控复现：清除进行中发起新探测，迟到回调会把状态文案改回"网站会话已清除"）。
 @property (nonatomic, assign) NSInteger sessionClearGeneration;
@@ -2137,6 +2141,14 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     [self layoutWorkspace];
 }
 
+- (void)changePerformanceMode:(NSSegmentedControl *)sender {
+    // 与 PerformancePolicy.currentMode 读同一 defaults 键（0 省电 / 1 标准）。
+    // 运行中的网络连接会话上限与调度器初始窗口在创建时已定值：
+    // 切换对新入队任务部分生效，重启后完全生效（行内说明已写明）。
+    NSInteger mode = (sender.selectedSegment == 0) ? 0 : 1;
+    [PreferencesStore.shared setInteger:mode forKey:SevenZZKeyPerformanceMode];
+}
+
 - (void)changeProbeMode:(NSSegmentedControl *)sender {
     // 扫描与呈现期间禁止切换模式：mode 只在 scan: 入口读取，
     // 中途改变会导致 UI 显示的模式与实际在跑的会话不一致。
@@ -2343,6 +2355,22 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
         // 路径可能很长（U 盘等自定义目录）：中间截断，头尾都保留
         self.settingsDownloadLocationHint.lineBreakMode = NSLineBreakByTruncatingMiddle;
     }
+    addSeparator();
+    // 下载性能：模式体系（省电/标准）自 Seven zz 时代就在 PerformancePolicy 里，
+    // 但独立 App 一直没有用户入口（2026-10-02 补上）。写 PreferencesStore 的
+    // 七 ZZ 键（默认 1=标准，迁移规则「保留」），PerformancePolicy 读同一键。
+    NSSegmentedControl *perfControl =
+        [NSSegmentedControl segmentedControlWithLabels:@[@"省电", @"标准"]
+                                          trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                target:self
+                                                action:@selector(changePerformanceMode:)];
+    perfControl.identifier = @"RDPerformanceModeControl";
+    perfControl.frame = NSMakeRect(0, 0, 120, 26);
+    perfControl.segmentStyle = NSSegmentStyleRounded;
+    perfControl.font = [NSFont systemFontOfSize:11.5];
+    perfControl.selectedSegment = ([PerformancePolicy currentMode] == 0) ? 0 : 1;
+    self.settingsPerformanceControl = perfControl;
+    addRow(@"下载性能", @"标准＝多连接分段提速（默认）；省电＝最多 2 条连接更稳；改动重启后完全生效", @[perfControl]);
 
     // 卡片 3：数据管理
     currentCard = 3;

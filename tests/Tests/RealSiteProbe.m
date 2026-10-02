@@ -1621,7 +1621,9 @@ static int RSRunApp(NSString *urlString) {
             variantChecks++;
             // 该档位的真实下载分辨率（入队对象 → 实际 URL）
             NSString *path = [NSURL URLWithString:current.mediaURL].path.lowercaseString ?: @"";
-            NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(\\d{3,4})p" options:0 error:nil];
+            // p 后不得紧跟字母/数字：排除 "1080px"/"1080playlist" 这类把好结果
+            // 误判 FAIL 的匹配（path 已 lowercase；2026-10-02 修工具正则误报）。
+            NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(\\d{3,4})p(?![a-z0-9])" options:0 error:nil];
             NSTextCheckingResult *m = [re firstMatchInString:path options:0 range:NSMakeRange(0, path.length)];
             if (m.numberOfRanges >= 2) {
                 NSString *declared = [path substringWithRange:[m rangeAtIndex:1]];
