@@ -36,6 +36,8 @@ extern NSString *const SevenZZKeyResourceDownloadCustomDirectory;   // 2026-09-0
 extern NSString *const SevenZZKeyMainPaneRatio;                    // 主界面左右栏比例：0=3:7，1=2:8，2=2.5:7.5
 extern NSString *const SevenZZKeyProbeMode;                       // 探测模式：0=当前页，1=总站
 extern NSString *const SevenZZKeySitePages;                       // 总站模式页数（正整数，默认 3）
+extern NSString *const SevenZZKeyWatchNotifyEnabled;               // 追更：新资源通知开关（BOOL，默认 YES；实际键 MiliuWatchNotifyEnabled）
+extern NSString *const SevenZZKeyWatchQuietHours;                  // 追更：静音时段（NSString "HH:mm-HH:mm"，字面 off=关闭；实际键 MiliuWatchQuietHours）
 extern NSString *const SevenZZKeyLastMood;
 extern NSString *const SevenZZKeyLastMoodLabel;
 extern NSString *const SevenZZKeyRecentMoodQuoteIDs;

@@ -7,7 +7,7 @@ export RD_LOG_PATH="$BUILD/test-ResourceDetector.log"
 mkdir -p "$BUILD"
 bash "$REPO/scripts/generate-version.sh" >/dev/null
 printf 'UI experience focused tests: %s\n' "$(date -u)"
-SRC=("$REPO/tests/Tests/UIExperienceTests.m" "$ROOT/App/ResourceResultRowView.m")
+SRC=("$REPO/tests/Tests/UIExperienceTests.m" "$ROOT/App/ResourceResultRowView.m" "$ROOT/App/RDWatchlistPage.m")
 while IFS= read -r f; do SRC+=("$f"); done < <(find "$ROOT/Features" -name '*.m' -print | sort)
 for f in AppError DNSResolver HTTPPrivacyPolicy IPAddressPolicy HTTPRequest HTTPResult HTTPClient PreferencesStore RDLog; do
   SRC+=("$ROOT/Shared/Infrastructure/$f.m")

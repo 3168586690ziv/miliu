@@ -58,7 +58,7 @@ CODE_LINES="$(sed -n 's/^CODE_LINES=//p' "$GEN/version.log" | head -1)"
 FIX_ROUND="$(sed -n 's/^FIX_ROUND=//p' "$GEN/version.log" | head -1)"
 DISPLAY_VERSION="$(sed -n 's/^DISPLAY_VERSION=//p' "$GEN/version.log" | head -1)"
 mkdir -p "$(dirname "$BIN")" "$OUT/Contents/Resources"
-SRC=("$SRCROOT/App/ResourceDetectorApp.m" "$SRCROOT/App/ResourceResultRowView.m" "$SRCROOT/App/RDAdaptiveTransport.m" "$SRCROOT/App/RDCurlFallbackBackend.m")
+SRC=("$SRCROOT/App/ResourceDetectorApp.m" "$SRCROOT/App/RDWatchlistPage.m" "$SRCROOT/App/ResourceResultRowView.m" "$SRCROOT/App/RDAdaptiveTransport.m" "$SRCROOT/App/RDCurlFallbackBackend.m")
 for d in ResourceDetector ResourceDownload; do while IFS= read -r f; do SRC+=("$ROOT/$f"); done < <(find "$SRCROOT/Features/$d" -name '*.m' -print | sed "s#^$ROOT/##" | sort); done
 for f in AppError.m DNSResolver.m HTTPPrivacyPolicy.m IPAddressPolicy.m HTTPRequest.m HTTPResult.m HTTPClient.m RDLog.m RDCurlHopper.m; do SRC+=("$SRCROOT/Shared/Infrastructure/$f"); done
 for f in RequestGeneration.m PerformancePolicy.m; do SRC+=("$SRCROOT/Shared/Infrastructure/$( [ "$f" = PerformancePolicy.m ] && echo Performance || echo Async )/$f"); done
@@ -100,6 +100,68 @@ if [ -f "$ICON_BASELINE" ]; then
   ICON_EXPECT="$(tr -d ' \n' < "$ICON_BASELINE")"
   [ "$ICON_NOW" = "$ICON_EXPECT" ] || { echo "FAIL: 工作区 Z 字图标 AppIcon.icns 校验和与基线不一致（不得修改用户图标）" >&2; exit 1; }
 fi
+
+# ── 追更助手（Watch Agent）构建：在主 bundle 流程完成后追加（WATCH-V1-CONTRACT §2/§3.2）──
+# 版本号逻辑、既有 codesign 段与上方构建后自检均未改动。本阶段放在 --release-fix 写轮数之前：
+# 助手构建/组装/自检任何一步失败都以非零退出结束整个构建，发布轮次记录不会执行，
+# build-transaction.py 会按既有事务语义回滚版本状态（不留错误轮数）。
+HELPER_SRC_DIR="$SRCROOT/Helpers"
+for HELPER_FILE in "$HELPER_SRC_DIR/RDWatchAgentMain.m" "$HELPER_SRC_DIR/RDWatchAgentController.m" \
+                   "$HELPER_SRC_DIR/Helper-Info.plist" \
+                   "$HELPER_SRC_DIR/LaunchAgent/com.sevenzz.miliu.watchlist.plist"; do
+  [ -f "$HELPER_FILE" ] || { echo "FAIL: 缺少追更助手源文件 $HELPER_FILE（契约 §2：助手侧产物未就位）" >&2; exit 1; }
+done
+HELPER_OUT="$OUT/Contents/Helpers/觅流追更助手.app"
+HELPER_BIN="$HELPER_OUT/Contents/MacOS/SevenZZWatchAgent"
+mkdir -p "$HELPER_OUT/Contents/MacOS" "$HELPER_OUT/Contents/Resources" "$HELPER_OUT/Contents/Library/LaunchAgents"
+# 编译清单：助手入口/控制器 + 探测引擎。探测引擎按契约 §2 参照主 bundle 的 find 写法把
+# src/Features/ResourceDetector 整个目录编入助手（以 #import 实际依赖为准，宁可多含同目录
+# 实现文件；RDWatchlistStore/RDHybridPageProbe/WebProbe/URLPolicy/ResourceDiscoveryCoordinator/
+# DetectedMedia 均在其中），再加上与主 bundle 第 63-65 行同一组 Shared 基础件。
+HELPER_SRC=("$HELPER_SRC_DIR/RDWatchAgentMain.m" "$HELPER_SRC_DIR/RDWatchAgentController.m")
+while IFS= read -r f; do HELPER_SRC+=("$ROOT/$f"); done < <(find "$SRCROOT/Features/ResourceDetector" -name '*.m' -print | sed "s#^$ROOT/##" | sort)
+for f in AppError.m DNSResolver.m HTTPPrivacyPolicy.m IPAddressPolicy.m HTTPRequest.m HTTPResult.m HTTPClient.m RDLog.m RDCurlHopper.m; do HELPER_SRC+=("$SRCROOT/Shared/Infrastructure/$f"); done
+for f in RequestGeneration.m PerformancePolicy.m; do HELPER_SRC+=("$SRCROOT/Shared/Infrastructure/$( [ "$f" = PerformancePolicy.m ] && echo Performance || echo Async )/$f"); done
+HELPER_SRC+=("$SRCROOT/Shared/Infrastructure/PreferencesStore.m" "$SRCROOT/Shared/UI/DesignSystem/ColorTokens.m" "$SRCROOT/Shared/UI/DesignSystem/TypographyTokens.m" "$SRCROOT/Shared/UI/StateView.m" "$SRCROOT/Shared/UI/UIThemeSupport.m")
+# 与主 bundle 同一套编译参数：universal（arm64 + x86_64）、macOS 13 部署目标
+# （集成修复：助手比主 bundle 多用 UserNotifications / ServiceManagement 两套框架，
+#  缺了会在链接期报 UNUserNotificationCenter / SMAppService 未定义符号）
+clang -arch arm64 -arch x86_64 -mmacosx-version-min=13.0 -fobjc-arc -Os -framework Cocoa -framework WebKit -framework UserNotifications -framework ServiceManagement -framework AVFoundation -framework CoreMedia -framework QuartzCore -framework ImageIO -framework UniformTypeIdentifiers -framework Security -I"$SRCROOT" -I"$GEN" -I"$SRCROOT/App" -I"$HELPER_SRC_DIR" -I"$SRCROOT/Features/ResourceDetector" -I"$SRCROOT/Shared" -I"$SRCROOT/Shared/Infrastructure" -I"$SRCROOT/Shared/Infrastructure/Async" -I"$SRCROOT/Shared/Infrastructure/Performance" -I"$SRCROOT/Shared/UI" -I"$SRCROOT/Shared/UI/DesignSystem" -o "$HELPER_BIN" "${HELPER_SRC[@]}"
+# 组装助手 bundle：Info.plist = 助手侧 Helper-Info.plist；LaunchAgent plist 内嵌（契约 §3.2）
+cp "$HELPER_SRC_DIR/Helper-Info.plist" "$HELPER_OUT/Contents/Info.plist"
+cp "$HELPER_SRC_DIR/LaunchAgent/com.sevenzz.miliu.watchlist.plist" "$HELPER_OUT/Contents/Library/LaunchAgents/com.sevenzz.miliu.watchlist.plist"
+# 版本一致性（AGENTS.md §3）：助手 Info.plist 两版本键与本次构建 DISPLAY_VERSION 对齐，
+# 不随 Helper-Info.plist 源文件里的历史快照漂移
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $DISPLAY_VERSION" "$HELPER_OUT/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $DISPLAY_VERSION" "$HELPER_OUT/Contents/Info.plist"
+# 签名助手 bundle：同一签名策略（稳定证书优先，否则 ad-hoc），照上方主 bundle codesign 段写法
+if [ -n "$SIG_ID" ]; then
+  codesign --force --deep --options runtime --entitlements "$ENTITLEMENTS" --sign "$SIG_ID" "$HELPER_OUT"
+else
+  codesign --force --sign - "$HELPER_OUT"
+fi
+# 助手组装发生在主 bundle 签名之后：向已签名 bundle 内新增嵌套内容会破坏外层资源封印，
+# 必须按同一策略重签外层，否则 verify.sh 既有断言 codesign --verify --deep --strict 会失败。
+if [ -n "$SIG_ID" ]; then
+  codesign --force --deep --options runtime --entitlements "$ENTITLEMENTS" --sign "$SIG_ID" "$OUT"
+else
+  codesign --force --sign - "$OUT"
+fi
+# ── 追加构建后自检：助手 bundle 存在、可执行就位、Helper-Info.plist 内 LSUIElement=true，
+#    bundle id 与内嵌 LaunchAgent 的 Label 符合契约 §3.2 的固定值 ──
+[ -d "$HELPER_OUT" ] || { echo "FAIL: 构建后自检失败：助手 bundle 缺失 $HELPER_OUT" >&2; exit 1; }
+[ -x "$HELPER_BIN" ] || { echo "FAIL: 构建后自检失败：助手可执行缺失 $HELPER_BIN" >&2; exit 1; }
+if ! plutil -lint "$HELPER_OUT/Contents/Info.plist" >/dev/null; then
+  echo "FAIL: 构建后自检失败：助手 Info.plist 不是合法 plist" >&2; exit 1
+fi
+[ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$HELPER_OUT/Contents/Info.plist")" = "true" ] \
+  || { echo "FAIL: 构建后自检失败：助手 Info.plist LSUIElement 必须为 true（契约 §3.2）" >&2; exit 1; }
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$HELPER_OUT/Contents/Info.plist")" = "com.sevenzz.resource-detector.watchlist" ] \
+  || { echo "FAIL: 构建后自检失败：助手 bundle id 必须为 com.sevenzz.resource-detector.watchlist（契约 §3.2）" >&2; exit 1; }
+[ -f "$HELPER_OUT/Contents/Library/LaunchAgents/com.sevenzz.miliu.watchlist.plist" ] \
+  || { echo "FAIL: 构建后自检失败：内嵌 LaunchAgent plist 缺失（契约 §3.2）" >&2; exit 1; }
+[ "$(/usr/libexec/PlistBuddy -c 'Print :Label' "$HELPER_OUT/Contents/Library/LaunchAgents/com.sevenzz.miliu.watchlist.plist")" = "com.sevenzz.miliu.watchlist" ] \
+  || { echo "FAIL: 构建后自检失败：LaunchAgent Label 必须为 com.sevenzz.miliu.watchlist（契约 §3.2）" >&2; exit 1; }
 
 # ── 正式发布收尾：自检成功后才原子写正式记录；写入失败仍由锁内事务恢复 ──
 if [ "$RELEASE_FIX" = 1 ]; then

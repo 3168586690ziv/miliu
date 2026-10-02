@@ -81,7 +81,7 @@ ICON_WORKSPACE="$(shasum -a 256 "$REPO/resources/Resources/AppIcon.icns" | awk '
 echo "PASS: 工作区 Z 字图标校验和未变（${ICON_WORKSPACE}）"
 
 # ── 3. 编译并运行设置页 UI 断言 ──
-SRC=("$REPO/tests/Tests/VersionTests.m" "$ROOT/App/ResourceResultRowView.m")
+SRC=("$REPO/tests/Tests/VersionTests.m" "$ROOT/App/ResourceResultRowView.m" "$ROOT/App/RDWatchlistPage.m")
 while IFS= read -r f; do SRC+=("$f"); done < <(find "$ROOT/Features" -name '*.m' -print | sort)
 for f in AppError DNSResolver HTTPPrivacyPolicy IPAddressPolicy HTTPRequest HTTPResult HTTPClient PreferencesStore RDLog; do
   SRC+=("$ROOT/Shared/Infrastructure/$f.m")

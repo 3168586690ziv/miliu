@@ -30,6 +30,10 @@ NSString *const SevenZZKeyResourceDownloadCustomDirectory = @"ZZResourceDownload
 NSString *const SevenZZKeyMainPaneRatio              = @"ZZResourceDetector.MainPaneRatio";
 NSString *const SevenZZKeyProbeMode                  = @"ZZResourceDetector.ProbeMode";
 NSString *const SevenZZKeySitePages                  = @"ZZResourceDetector.SitePages";
+// 追更（WATCH-V1-CONTRACT §3.3）：本工程无「常量名 → 实际键」映射层，常量值即 defaults 键，
+// 故实际键直接定为 MiliuWatch*（助手侧按同名键读取）。
+NSString *const SevenZZKeyWatchNotifyEnabled         = @"MiliuWatchNotifyEnabled";
+NSString *const SevenZZKeyWatchQuietHours            = @"MiliuWatchQuietHours";
 NSString *const SevenZZKeyLastMood                       = @"LastMood";
 NSString *const SevenZZKeyLastMoodLabel                  = @"LastMoodLabel";
 NSString *const SevenZZKeyRecentMoodQuoteIDs             = @"RecentMoodQuoteIDs";
@@ -228,6 +232,8 @@ NSString *const SevenZZKeySchemaVersion                  = @"SevenZZSchemaVersio
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyMainPaneRatio type:SevenZZPreferenceTypeInteger defaultValue:@(0) owningPage:@"settings" migrationRule:@"非法值回退 3:7"]];
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyProbeMode type:SevenZZPreferenceTypeInteger defaultValue:@(0) owningPage:@"settings" migrationRule:@"非法值回退当前页"]];
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeySitePages type:SevenZZPreferenceTypeInteger defaultValue:@(3) owningPage:@"settings" migrationRule:@"非法值回退 3"]];
+    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyWatchNotifyEnabled type:SevenZZPreferenceTypeBool defaultValue:@(YES) owningPage:@"watch" migrationRule:@"保留"]];
+    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyWatchQuietHours type:SevenZZPreferenceTypeString defaultValue:@"00:00-08:00" owningPage:@"watch" migrationRule:@"非法值回退 00:00-08:00，字面 off=关闭"]];
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyLastMood type:SevenZZPreferenceTypeDouble defaultValue:@(0) owningPage:@"mood" migrationRule:@"保留"]];
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyLastMoodLabel type:SevenZZPreferenceTypeString defaultValue:@"" owningPage:@"mood" migrationRule:@"保留"]];
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyRecentMoodQuoteIDs type:SevenZZPreferenceTypeArray defaultValue:@[] owningPage:@"mood" migrationRule:@"保留"]];
