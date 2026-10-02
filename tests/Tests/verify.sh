@@ -228,8 +228,14 @@ if ! test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$HELPER_APP/Conten
   echo "FAIL: helper Info.plist LSUIElement must be true (contract §3.2)" >&2
   exit 1
 fi
-if ! test -f "$HELPER_APP/Contents/Library/LaunchAgents/com.sevenzz.miliu.watchlist.plist"; then
+if ! test -f "$HELPER_APP/Contents/Library/LaunchAgents/com.sevenzz.resource-detector.watchlist.plist"; then
   echo "FAIL: embedded LaunchAgent plist missing in helper bundle (contract §3.2)" >&2
+  exit 1
+fi
+# SMAppService 实测（2026-10-03 安装后验收）：LimitLoadToSessionType 会令注册报
+# "plist content is invalid"（Aqua 会话由系统管理），禁止再引入。
+if grep -q "LimitLoadToSessionType" "$HELPER_APP/Contents/Library/LaunchAgents/com.sevenzz.resource-detector.watchlist.plist"; then
+  echo "FAIL: agent plist must not contain LimitLoadToSessionType (breaks SMAppService registration)" >&2
   exit 1
 fi
 

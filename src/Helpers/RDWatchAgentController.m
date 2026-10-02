@@ -32,7 +32,6 @@
 #import "RDWatchAgentController.h"
 
 #import <UserNotifications/UserNotifications.h>
-#import <ServiceManagement/ServiceManagement.h>
 
 #import "RDWatchlistStore.h"
 #import "DetectedMedia.h"
@@ -53,7 +52,6 @@ static NSString * const RDDefaultQuietHours = @"00:00-08:00";
 static NSString * const RDQuietHoursOff     = @"off";
 
 static NSString * const RDMainAppBundleID     = @"com.sevenzz.resource-detector";
-static NSString * const RDLaunchAgentPlistName = @"com.sevenzz.miliu.watchlist.plist";
 
 static NSString * const RDWatchAgentErrorDomain = @"RDWatchAgentErrorDomain";
 typedef NS_ENUM(NSInteger, RDWatchAgentErrorCode) {
@@ -143,6 +141,10 @@ static NSArray<NSString *> *RDFetchedKeysFromMedia(NSArray<DetectedMedia *> *med
     [self registerTickTimer];
     [self updateButtonBadge];
     RDLogWrite(@"app", @"追更助手：启动完成（bundle=%@）", [NSBundle mainBundle].bundleIdentifier ?: @"-");
+    // 启动即对齐开机自启偏好（2026-10-03 集成补全：App 侧拉起后由此完成首次注册）：
+    // 偏好开且未注册 → 自注册；bootstrap 会拉起 launchd 实例，随后本实例退出让位，
+    // 保证任何路径下助手单实例。
+    [self alignLoginItemOnLaunch];
     // 启动即先跑一轮（延迟 3s 留出托盘/授权时间；tick 内部尊重暂停与在飞状态）
     __weak RDWatchAgentController *weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(RDFirstTickDelaySeconds * NSEC_PER_SEC)),
@@ -561,30 +563,111 @@ static NSArray<NSString *> *RDFetchedKeysFromMedia(NSArray<DetectedMedia *> *med
     });
 }
 
-#pragma mark - SMAppService（LaunchAgent 注册 / 注销，契约 §3.2）
+#pragma mark - 开机自启（经典 LaunchAgent：~/Library/LaunchAgents/ + launchctl）
+
+- (void)alignLoginItemOnLaunch {
+    NSUserDefaults *suite = [[NSUserDefaults alloc] initWithSuiteName:RDMainAppBundleID];
+    BOOL autoLaunch = [suite boolForKey:@"MiliuWatchAutoLaunch"];
+    NSString *uid = [NSString stringWithFormat:@"%lu", (unsigned long)getuid()];
+    NSString *domain = [NSString stringWithFormat:@"gui/%@/com.sevenzz.resource-detector.watchlist", uid];
+    BOOL loaded = [self launchctlTask:@[ @"print", domain ] ignoreErrors:YES];
+    if (autoLaunch) {
+        // 已加载（本进程就是 launchd 拉起的，或先前已 bootstrap）：直接跳过——
+        // 否则 applyLoginItemEnabled 的「先 bootout 再 bootstrap」会杀掉 launchd
+        // 里的自己，服务被自己拆除（2026-10-03 实测双实例互踩的根因）。
+        if (loaded) return;
+        [self applyLoginItemEnabled:YES];
+    } else if (loaded) {
+        // 用户在助手未运行时关过开关：这次拉起即补注销
+        [self applyLoginItemEnabled:NO];
+    }
+}
+
+// 2026-10-03 安装后实测：SMAppService 对「嵌套子 App」架构一律报
+// "plist content is invalid"（最小 plist 亦然；其为顶层主 App 设计）。
+// 改用经典机制：助手运行时把 LaunchAgent plist 写到用户域，Program 指向自身
+// 可执行的绝对路径，launchctl bootstrap/bootout 启停。App 固定安装于
+// /Applications/觅流.app，路径稳定；重装同路径无需重写。
+- (NSURL *)userAgentPlistURL {
+    NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:
+        @"Library/LaunchAgents/com.sevenzz.resource-detector.watchlist.plist"];
+    return [NSURL fileURLWithPath:path];
+}
+
+- (BOOL)writeUserAgentPlist {
+    NSURL *executable = [[NSBundle mainBundle] executableURL];
+    if (!executable.path.length) {
+        RDLogWriteLevel(RDLogLevelWarn, @"app", @"追更助手：无法解析自身可执行路径，注册中止");
+        return NO;
+    }
+    NSDictionary *plist = @{
+        @"Label": @"com.sevenzz.resource-detector.watchlist",
+        @"Program": executable.path,
+        @"RunAtLoad": @YES,
+        @"KeepAlive": @NO,
+    };
+    NSError *err = nil;
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:plist
+                                                              format:NSPropertyListXMLFormat_v1_0
+                                                             options:0 error:&err];
+    if (!data || err) {
+        RDLogWriteLevel(RDLogLevelWarn, @"app", @"追更助手：LaunchAgent plist 序列化失败：%@",
+                        err.localizedDescription ?: @"-");
+        return NO;
+    }
+    [[NSFileManager defaultManager] createDirectoryAtPath:
+        [self userAgentPlistURL].URLByDeletingLastPathComponent.path
+                             withIntermediateDirectories:YES attributes:nil error:nil];
+    if (![data writeToURL:[self userAgentPlistURL] options:NSDataWritingAtomic error:&err]) {
+        RDLogWriteLevel(RDLogLevelWarn, @"app", @"追更助手：LaunchAgent plist 写入失败：%@",
+                        err.localizedDescription ?: @"-");
+        return NO;
+    }
+    return YES;
+}
+
+- (BOOL)launchctlTask:(NSArray<NSString *> *)arguments ignoreErrors:(BOOL)ignore {
+    NSTask *task = [[NSTask alloc] init];
+    task.launchPath = @"/bin/launchctl";
+    task.arguments = arguments;
+    task.standardOutput = [NSPipe pipe];
+    task.standardError = [NSPipe pipe];
+    [task launch];
+    [task waitUntilExit];
+    BOOL ok = task.terminationStatus == 0;
+    if (!ok && !ignore) {
+        NSData *errData = [[task.standardError fileHandleForReading] readDataToEndOfFile];
+        NSString *errText = errData.length ? [[NSString alloc] initWithData:errData encoding:NSUTF8StringEncoding] : @"-";
+        RDLogWriteLevel(RDLogLevelWarn, @"app", @"追更助手：launchctl %@ 退出 %ld：%@",
+                        arguments.firstObject, (long)task.terminationStatus,
+                        [errText stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]);
+    }
+    return ok;
+}
 
 - (void)applyLoginItemEnabled:(BOOL)enabled {
-    SMAppService *service = [SMAppService agentServiceWithPlistName:RDLaunchAgentPlistName];
-    NSError *error = nil;
-    BOOL ok = NO;
+    NSString *uid = [NSString stringWithFormat:@"%lu", (unsigned long)getuid()];
+    NSURL *plistURL = [self userAgentPlistURL];
     if (enabled) {
-        if (service.status == SMAppServiceStatusEnabled) {
-            RDLogWrite(@"app", @"追更助手：LaunchAgent 已注册，跳过");
-            return;
+        if (![self writeUserAgentPlist]) return;
+        // bootstrap 幂等：已加载时先 bootout 再进，避免「已加载」报错
+        [self launchctlTask:@[ @"bootout", [NSString stringWithFormat:@"gui/%@", uid], plistURL.path ] ignoreErrors:YES];
+        BOOL ok = [self launchctlTask:@[ @"bootstrap", [NSString stringWithFormat:@"gui/%@", uid], plistURL.path ] ignoreErrors:NO];
+        if (ok) {
+            RDLogWrite(@"app", @"追更助手：LaunchAgent 注册成功（launchctl bootstrap ok）");
+            // 让位：bootstrap 已由 launchd 拉起常驻实例，本（open/手动）实例延迟退出，
+            // 保证助手单实例；延迟 2s 留出本通知处理与菜单交互收尾。
+            __weak RDWatchAgentController *weakSelf = self;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ [NSApp terminate:weakSelf]; });
         }
-        ok = [service registerAndReturnError:&error];
     } else {
-        if (service.status == SMAppServiceStatusNotRegistered) {
-            RDLogWrite(@"app", @"追更助手：LaunchAgent 未注册，跳过注销");
-            return;
-        }
-        ok = [service unregisterAndReturnError:&error];
-    }
-    if (!ok) {
-        RDLogWriteLevel(RDLogLevelWarn, @"app", @"追更助手：SMAppService %@失败：%@",
-                        enabled ? @"注册" : @"注销", error.localizedDescription ?: @"-");
-    } else {
-        RDLogWrite(@"app", @"追更助手：SMAppService %@成功", enabled ? @"注册" : @"注销");
+        // 注销多由 launchd 实例自己执行：bootout 会终止本进程，后续代码跑不到——
+        // 因此先删 plist、先记日志，最后按 label 自杀式卸载（2026-10-03 实测修正）。
+        [[NSFileManager defaultManager] removeItemAtURL:plistURL error:nil];
+        RDLogWrite(@"app", @"追更助手：LaunchAgent 已注销并清理 plist");
+        [self launchctlTask:@[ @"bootout",
+            [NSString stringWithFormat:@"gui/%@/com.sevenzz.resource-detector.watchlist", uid] ] ignoreErrors:YES];
     }
 }
 

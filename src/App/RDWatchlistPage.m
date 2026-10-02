@@ -820,7 +820,8 @@ static NSRelativeDateTimeFormatter *RDWatchRelativeFormatter(void) {
 #pragma mark 设置卡动作
 
 // 开机自启（契约 §3.5）：助手运行中 → 发 com.sevenzz.miliu.watchService {enabled:BOOL}
-// 让助手注册/注销 SMAppService；未运行 → 仅写偏好并提示下次启动生效
+// 让助手注册/注销 LaunchAgent；未运行且打开 → 直接拉起助手（其启动时按偏好自注册，
+// 2026-10-03 集成补全：否则用户装完无入口首次启用常驻）
 - (void)watchAutoLaunchChanged:(NSSwitch *)sender {
     BOOL on = (sender.state == NSControlStateValueOn);
     [[NSUserDefaults standardUserDefaults] setBool:on forKey:kRDWatchAutoLaunchDefaultsKey];
@@ -829,9 +830,26 @@ static NSRelativeDateTimeFormatter *RDWatchRelativeFormatter(void) {
             postNotificationName:RDWatchNotificationWatchService object:nil
             userInfo:@{@"enabled": @(on)} deliverImmediately:YES];
         [self setStatusText:on ? @"已请求助手注册开机自启" : @"已请求助手注销开机自启"];
+    } else if (on) {
+        [self launchWatchAgent];
+        [self setStatusText:@"助手已拉起 · 正在注册开机自启"];
     } else {
-        [self setStatusText:@"助手未运行 · 设置已保存，下次助手启动时生效"];
+        [self setStatusText:@"助手未运行 · 设置已保存"];
     }
+}
+
+// 拉起内嵌助手（同 bundle 内相对定位；失败时按 bundle id 兜底）
+- (void)launchWatchAgent {
+    NSURL *helperURL = [[[NSBundle mainBundle] bundleURL]
+        URLByAppendingPathComponent:@"Contents/Helpers/觅流追更助手.app"];
+    BOOL dir = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:helperURL.path isDirectory:&dir] || !dir) {
+        helperURL = [[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:RDWatchAgentBundleIdentifier];
+    }
+    if (!helperURL) { [self setStatusText:@"未找到追更助手（安装可能不完整）"]; return; }
+    [[NSWorkspace sharedWorkspace] openApplicationAtURL:helperURL
+                                             configuration:[NSWorkspaceOpenConfiguration configuration]
+                                       completionHandler:nil];
 }
 
 - (void)watchNotifyChanged:(NSSwitch *)sender {

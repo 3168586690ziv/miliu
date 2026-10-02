@@ -108,7 +108,7 @@ fi
 HELPER_SRC_DIR="$SRCROOT/Helpers"
 for HELPER_FILE in "$HELPER_SRC_DIR/RDWatchAgentMain.m" "$HELPER_SRC_DIR/RDWatchAgentController.m" \
                    "$HELPER_SRC_DIR/Helper-Info.plist" \
-                   "$HELPER_SRC_DIR/LaunchAgent/com.sevenzz.miliu.watchlist.plist"; do
+                   "$HELPER_SRC_DIR/LaunchAgent/com.sevenzz.resource-detector.watchlist.plist"; do
   [ -f "$HELPER_FILE" ] || { echo "FAIL: 缺少追更助手源文件 $HELPER_FILE（契约 §2：助手侧产物未就位）" >&2; exit 1; }
 done
 HELPER_OUT="$OUT/Contents/Helpers/觅流追更助手.app"
@@ -129,7 +129,7 @@ HELPER_SRC+=("$SRCROOT/Shared/Infrastructure/PreferencesStore.m" "$SRCROOT/Share
 clang -arch arm64 -arch x86_64 -mmacosx-version-min=13.0 -fobjc-arc -Os -framework Cocoa -framework WebKit -framework UserNotifications -framework ServiceManagement -framework AVFoundation -framework CoreMedia -framework QuartzCore -framework ImageIO -framework UniformTypeIdentifiers -framework Security -I"$SRCROOT" -I"$GEN" -I"$SRCROOT/App" -I"$HELPER_SRC_DIR" -I"$SRCROOT/Features/ResourceDetector" -I"$SRCROOT/Shared" -I"$SRCROOT/Shared/Infrastructure" -I"$SRCROOT/Shared/Infrastructure/Async" -I"$SRCROOT/Shared/Infrastructure/Performance" -I"$SRCROOT/Shared/UI" -I"$SRCROOT/Shared/UI/DesignSystem" -o "$HELPER_BIN" "${HELPER_SRC[@]}"
 # 组装助手 bundle：Info.plist = 助手侧 Helper-Info.plist；LaunchAgent plist 内嵌（契约 §3.2）
 cp "$HELPER_SRC_DIR/Helper-Info.plist" "$HELPER_OUT/Contents/Info.plist"
-cp "$HELPER_SRC_DIR/LaunchAgent/com.sevenzz.miliu.watchlist.plist" "$HELPER_OUT/Contents/Library/LaunchAgents/com.sevenzz.miliu.watchlist.plist"
+cp "$HELPER_SRC_DIR/LaunchAgent/com.sevenzz.resource-detector.watchlist.plist" "$HELPER_OUT/Contents/Library/LaunchAgents/com.sevenzz.resource-detector.watchlist.plist"
 # 版本一致性（AGENTS.md §3）：助手 Info.plist 两版本键与本次构建 DISPLAY_VERSION 对齐，
 # 不随 Helper-Info.plist 源文件里的历史快照漂移
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $DISPLAY_VERSION" "$HELPER_OUT/Contents/Info.plist"
@@ -158,10 +158,10 @@ fi
   || { echo "FAIL: 构建后自检失败：助手 Info.plist LSUIElement 必须为 true（契约 §3.2）" >&2; exit 1; }
 [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$HELPER_OUT/Contents/Info.plist")" = "com.sevenzz.resource-detector.watchlist" ] \
   || { echo "FAIL: 构建后自检失败：助手 bundle id 必须为 com.sevenzz.resource-detector.watchlist（契约 §3.2）" >&2; exit 1; }
-[ -f "$HELPER_OUT/Contents/Library/LaunchAgents/com.sevenzz.miliu.watchlist.plist" ] \
+[ -f "$HELPER_OUT/Contents/Library/LaunchAgents/com.sevenzz.resource-detector.watchlist.plist" ] \
   || { echo "FAIL: 构建后自检失败：内嵌 LaunchAgent plist 缺失（契约 §3.2）" >&2; exit 1; }
-[ "$(/usr/libexec/PlistBuddy -c 'Print :Label' "$HELPER_OUT/Contents/Library/LaunchAgents/com.sevenzz.miliu.watchlist.plist")" = "com.sevenzz.miliu.watchlist" ] \
-  || { echo "FAIL: 构建后自检失败：LaunchAgent Label 必须为 com.sevenzz.miliu.watchlist（契约 §3.2）" >&2; exit 1; }
+[ "$(/usr/libexec/PlistBuddy -c 'Print :Label' "$HELPER_OUT/Contents/Library/LaunchAgents/com.sevenzz.resource-detector.watchlist.plist")" = "com.sevenzz.resource-detector.watchlist" ] \
+  || { echo "FAIL: 构建后自检失败：LaunchAgent Label 必须为 com.sevenzz.resource-detector.watchlist（契约 §3.2）" >&2; exit 1; }
 
 # ── 正式发布收尾：自检成功后才原子写正式记录；写入失败仍由锁内事务恢复 ──
 if [ "$RELEASE_FIX" = 1 ]; then

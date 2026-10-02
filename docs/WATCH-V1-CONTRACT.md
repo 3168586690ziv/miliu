@@ -21,7 +21,7 @@
 | 子任务 | 独占文件（新建 ★ / 修改 †） |
 | --- | --- |
 | A · App 侧 | †`src/App/ResourceDetectorApp.m`（只加最小接线）★`src/App/RDWatchlistPage.h` ★`src/App/RDWatchlistPage.m` †`src/Shared/Infrastructure/PreferencesStore.h` †`src/Shared/Infrastructure/PreferencesStore.m` |
-| B · 助手侧 | ★`src/Helpers/RDWatchAgentMain.m` ★`src/Helpers/RDWatchAgentController.h` ★`src/Helpers/RDWatchAgentController.m` ★`src/Helpers/Helper-Info.plist` ★`src/Helpers/LaunchAgent/com.sevenzz.miliu.watchlist.plist` |
+| B · 助手侧 | ★`src/Helpers/RDWatchAgentMain.m` ★`src/Helpers/RDWatchAgentController.h` ★`src/Helpers/RDWatchAgentController.m` ★`src/Helpers/Helper-Info.plist` ★`src/Helpers/LaunchAgent/com.sevenzz.resource-detector.watchlist.plist` |
 | C · 构建测试侧 | †`scripts/build.sh` †`tests/Tests/verify.sh` ★`tests/Tests/watch-ui.sh` |
 
 任何子任务不得创建/修改上表之外的文件（临时文件放 /tmp）。
@@ -42,8 +42,7 @@
 - Helper-Info.plist：`LSUIElement=true`、`LSMinimumSystemVersion=13.0`、
   `NSPrincipalClass=NSApplication`
 - 最终布局（C 组装）：`觅流.app/Contents/Helpers/觅流追更助手.app/`
-- LaunchAgent plist：label `com.sevenzz.miliu.watchlist`、`RunAtLoad=true`、
-  `LimitLoadToSessionType=Aqua`；放在助手 bundle 的
+- LaunchAgent plist：label `com.sevenzz.resource-detector.watchlist`、`RunAtLoad=true`；放在助手 bundle 的
   `Contents/Library/LaunchAgents/` 内，由助手用 `SMAppService.agent` 注册/注销。
 - 静音时段解析（B）：偏好字符串 `HH:mm-HH:mm`（跨零点合法，如 `00:00-08:00`）；
   字面 `off` 表示关闭静音。默认值 `00:00-08:00`。
