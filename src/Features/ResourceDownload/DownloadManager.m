@@ -183,7 +183,11 @@ static BOOL RDPeerAddressAllowedForIPs(NSString *address, NSArray<NSString *> *a
         cfg.timeoutIntervalForRequest = 30;
         cfg.timeoutIntervalForResource = 7 * 24 * 3600;
         cfg.networkServiceType = NSURLNetworkServiceTypeResponsiveData;
-        cfg.HTTPMaximumConnectionsPerHost = [PerformancePolicy downloadConnections]; // 连接数只从 PerformancePolicy 获取
+        // 连接数只从 PerformancePolicy 获取。上限取各档最大值（efficient）做
+        // 硬保险：实际并发始终由 transferScheduler 窗口控制（5 处调用点均即时
+        // 读 window），省电模式窗口=2 即实际 ≤2；这样性能模式切换不需要重建
+        // session（2026-10-02 第18轮：切档即时生效）。
+        cfg.HTTPMaximumConnectionsPerHost = [PerformancePolicy efficientDownloadConnections];
         // 测试逃生口（env 门控，默认不设置=系统代理，生产行为不变）：无 GUI 真实下载
         // 测试在系统代理环境下用 RD_SESSION_PROXY_OVERRIDE=direct 强制直连，
         // 否则对端地址校验只能看到代理地址（2026-09-19 现场证据：19/19 站下载被拒）。
@@ -540,6 +544,14 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
     NSString *needText = [NSByteCountFormatter stringFromByteCount:MAX(0, requiredBytes)
                                                         countStyle:NSByteCountFormatterCountStyleFile];
     return [NSString stringWithFormat:@"磁盘剩余空间不足（剩余 %@，本批至少需要 %@），已停止下载", freeText, needText];
+}
+
+/// 性能模式即时切换（2026-10-02 第18轮）：重设调度器窗口到当前档位，无需重启。
+/// 并发任务数（concurrentDownloadJobs）与分段开关本就每次动态读 PerformancePolicy；
+/// 进行中的分段按新上限自然收敛（降档后空闲槽位不再分配）。
+- (void)applyPerformanceModeChange {
+    NSInteger connections = [PerformancePolicy downloadConnections];
+    [self.transferScheduler applyModeWindow:connections maximum:connections];
 }
 
 - (instancetype)initWithBackend:(id<RDDownloadBackend>)backend

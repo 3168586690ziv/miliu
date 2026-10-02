@@ -96,6 +96,10 @@ NS_ASSUME_NONNULL_BEGIN
 + (nullable NSString *)diskSpaceShortageReasonForFreeBytes:(int64_t)freeBytes
                                               requiredBytes:(int64_t)requiredBytes;
 
+/// 性能模式即时切换（2026-10-02 第18轮）：按 PerformancePolicy 当前档位重设
+/// 传输调度窗口，切档后新分配立即生效，无需重启 App。
+- (void)applyPerformanceModeChange;
+
 /// 用于入队去重的稳定资源身份：保留内容参数，规范化顺序并忽略常见的
 /// CDN 签名/过期参数。空或无效 URL 返回空字符串。
 + (NSString *)sourceIdentityForURL:(NSURL *)url;

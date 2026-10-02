@@ -233,7 +233,7 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 // 用户不点「选择」也能知道文件会落到哪里（2026-10-02 用户需求）。
 @property (nonatomic, weak) NSTextField *settingsDownloadLocationHint;
 // 「下载性能」行分段控件（省电/标准）：PerformancePolicy 读同一 defaults 键，
-// 运行中的连接会话与调度器窗口在创建时已定值，切换对新任务部分生效、重启后完全生效。
+// 切换时经 DownloadManager.applyPerformanceModeChange 即时重设调度窗口（第 18 轮）。
 @property NSSegmentedControl *settingsPerformanceControl;
 // 清除网站会话是**异步**操作；该 token 用于作废过期完成回调，避免其覆盖更新的探测/取消状态
 // （2026-09-18 无 GUI 受控复现：清除进行中发起新探测，迟到回调会把状态文案改回"网站会话已清除"）。
@@ -2157,10 +2157,13 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 
 - (void)changePerformanceMode:(NSSegmentedControl *)sender {
     // 与 PerformancePolicy.currentMode 读同一 defaults 键（0 省电 / 1 标准）。
-    // 运行中的网络连接会话上限与调度器初始窗口在创建时已定值：
-    // 切换对新入队任务部分生效，重启后完全生效（行内说明已写明）。
+    // 写入后立即通知下载管理器重设调度窗口——切档即时生效，无需重启
+    //（2026-10-02 第18轮；进行中的分段按新上限自然收敛）。
     NSInteger mode = (sender.selectedSegment == 0) ? 0 : 1;
     [PreferencesStore.shared setInteger:mode forKey:SevenZZKeyPerformanceMode];
+    if ([self.downloadManager respondsToSelector:@selector(applyPerformanceModeChange)]) {
+        [self.downloadManager applyPerformanceModeChange];
+    }
 }
 
 - (void)changeProbeMode:(NSSegmentedControl *)sender {
@@ -2384,7 +2387,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     perfControl.font = [NSFont systemFontOfSize:11.5];
     perfControl.selectedSegment = ([PerformancePolicy currentMode] == 0) ? 0 : 1;
     self.settingsPerformanceControl = perfControl;
-    addRow(@"下载性能", @"标准＝多连接分段提速（默认）；省电＝最多 2 条连接更稳；改动重启后完全生效", @[perfControl]);
+    addRow(@"下载性能", @"标准＝多连接分段提速（默认）；省电＝最多 2 条连接更稳；切换立即生效", @[perfControl]);
 
     // 卡片 3：数据管理
     currentCard = 3;

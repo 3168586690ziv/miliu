@@ -84,4 +84,13 @@
 - (void)removeStreamIdentifier:(NSString *)identifier {
     if (identifier.length) [_streamRates removeObjectForKey:identifier];
 }
+
+- (void)applyModeWindow:(NSInteger)window maximum:(NSInteger)maximum {
+    _maximum = MAX(1, maximum);
+    _window = MIN(MAX(1, window), _maximum);
+    // 窗口突变是外部决策（用户切换性能模式），不是吞吐样本：清空自适应
+    // 计数，让后续升降重新从新基线累积证据。
+    _stableSamples = 0;
+    _lowRateSamples = 0;
+}
 @end
