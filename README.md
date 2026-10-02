@@ -3,7 +3,8 @@
 **Miliu** is a native macOS app that finds video / audio / image resources on a web page
 and downloads them at the quality you pick. It is written in Objective-C + AppKit, merges
 static HTML analysis with real WebKit rendering, parses HLS (m3u8) / DASH manifests,
-supports resumable downloads, and merges HLS segments with a bundled ffmpeg.
+supports resumable downloads, batch probing of multiple URLs in one paste, six quality
+tiers up to 2160p, and merges HLS segments with a bundled ffmpeg.
 Requires macOS 13+. Build with `bash scripts/build.sh` → `build/觅流.app` (universal).
 
 *Keywords: macOS media downloader · web page resource discovery · HLS / m3u8 · DASH ·
@@ -14,24 +15,35 @@ WebKit · ffmpeg · Objective-C · AppKit.*
 macOS 原生（Objective-C + AppKit）桌面应用：输入一个网址，探测该页面里的视频 / 音频 / 图片资源，
 选择画质档位后下载到本地。
 
+## 界面截图
+
+| 主界面 | 设置页 |
+| :---: | :---: |
+| ![主界面](docs/screenshots/home.png) | ![设置页](docs/screenshots/settings.png) |
+
 ## 功能特性
 
 - **真实网址探测**：静态 HTML 分析与真实 WebKit 动态渲染合并（`RDHybridPageProbe`），
   支持子页面链接提取、HLS / DASH manifest 解析、脚本内直链分析。
+- **批量探测**：输入框一次粘贴多个网址（换行或空格分隔，最多 20 个）即自动排队串行探测，
+  结果按资源身份跨网址去重、聚合到同一列表；Esc 取消整批并保留已完成结果。
 - **结果列表**：多页面探测（`MultiPageResourceProbe` / `ResourceDiscoveryCoordinator`），
   结果按「视频 / 图片」分类，可切换只显示视频或只显示图片；列表行摘要跟随所选画质档位。
-- **画质选择**：详情区提供画质档位下拉（480p / 720p / 1080p 等），档位与资源一一对应。
+- **画质选择**：详情区提供画质档位下拉（360p / 480p / 720p / 1080p / 1440p / 2160p 六档，
+  按实际存在的档位生成），档位与资源一一对应；videojs / jwplayer 站点的播放器画质表
+  会被一并采集。
 - **资源详情面板**：完整标题（多行显示、不省略）、时长 / 来源 / 下载直链等字段、
   缩略图及其生成进度（`RDThumbnailGenerator`）。
 - **下载管理**：多任务下载（`DownloadManager`）、断点与完整性校验（`DownloadStore`）、
   自适应传输调度（`AdaptiveTransferScheduler`）、HLS 分片流式下载（`RDStreamDownloadTask`），
-  分片流由随包的 ffmpeg 合流。
+  分片流由随包的 ffmpeg 合流；入队前按「本批在途总量 + 保底水位」预检目标卷剩余空间。
 - **下载列表**：与主界面同窗口的独立页面（非独立面板），含「全部 / 下载中 / 已成功 / 已失败」
   四个筛选态、进度条与指标文字。
 - **统一日志**：`RDLog` 统一日志组件（分级写入、轮转、崩溃处理、诊断导出），
   设置页「日志与诊断」可直接打开日志文件。
 - **设置页**：左右栏比例三档（左 3:右 7 / 左 2:右 8 / 左 2.5:右 7.5，写入偏好）、
-  只显示视频 / 只显示图片、下载位置、日志与诊断；右下角显示当前版本号。
+  只显示视频 / 只显示图片、探测模式（当前页 / 总站）、下载位置（常驻显示实际生效路径）、
+  下载性能（省电 / 标准）、日志与诊断；右下角显示当前版本号。
 
 ## 系统要求
 

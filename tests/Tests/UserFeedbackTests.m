@@ -121,6 +121,7 @@ static NSString *UFVariantURL(DetectedMedia *m, NSString *label) {
 - (id)viewAtColumn:(NSInteger)c row:(NSInteger)r makeIfNecessary:(BOOL)make { return self.row; }
 - (void)reloadData { self.reloads++; }
 - (void)selectRowIndexes:(NSIndexSet *)indexes byExtendingSelection:(BOOL)extend { self.selectedRow = (NSInteger)indexes.firstIndex; }
+- (void)deselectAll:(id)sender { self.selectedRow = -1; }
 @end
 
 static ResourceDetectorAppDelegate *MakeChainApp(UFChainMetadataService **outService,
@@ -1095,6 +1096,128 @@ static void D19_BothTiersSelectableAndEnqueueMatches(void) {
     Check(app.visibleMedia.count == 1, @"D19 选择档位后列表仍一行");
 }
 
+#pragma mark - 批量探测（2026-10-02 第17轮）
+
+// 记录 start 调用的会话替身：不真正探测，由测试手动投递 resultHandler。
+@interface UFTestBatchSession : DiscoverySessionController
+@property (nonatomic, strong) NSMutableArray<NSURL *> *startedURLs;
+@end
+@implementation UFTestBatchSession
+- (instancetype)init {
+    self = [super init];
+    if (self) _startedURLs = [NSMutableArray array];
+    return self;
+}
+- (void)startWithURL:(NSURL *)url mode:(ZZResourceDiscoveryMode)mode {
+    (void)mode; [self.startedURLs addObject:url];
+}
+- (void)startSiteBatchWithURL:(NSURL *)url listingPageCount:(NSUInteger)count {
+    (void)count; [self.startedURLs addObject:url];
+}
+- (void)cancel {}
+@end
+
+static DetectedMedia *UFMedia(NSString *url) {
+    DetectedMedia *m = [DetectedMedia new];
+    m.mediaURL = url;
+    m.resourceKind = RDResourceKindVideo;
+    return m;
+}
+
+static ZZResourceDiscoveryResult *UFResult(NSArray<NSString *> *urls, NSError *error) {
+    ZZResourceDiscoveryResult *r = [ZZResourceDiscoveryResult new];
+    r.seedURL = [NSURL URLWithString:@"https://fixture.invalid/seed"];
+    NSMutableArray<DetectedMedia *> *media = [NSMutableArray array];
+    for (NSString *u in urls) [media addObject:UFMedia(u)];
+    r.allMedia = media;
+    r.error = error;
+    return r;
+}
+
+// 轻量 App 骨架：只注入批量路径必需的依赖（table mock / urlField 真实例）。
+static ResourceDetectorAppDelegate *UFMakeBatchApp(UFTestBatchSession **outSession) {
+    ResourceDetectorAppDelegate *app = [ResourceDetectorAppDelegate new];
+    UFTestBatchSession *session = [UFTestBatchSession new];
+    app.session = session;
+    app.urlField = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 400, 22)];
+    app.statusNote = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 300, 16)];
+    UFChainTable *table = [UFChainTable new];
+    table.row = [UFChainRow new];
+    app.table = (NSTableView *)table;
+    app.results = [NSMutableArray array];
+    if (outSession) *outSession = session;
+    return app;
+}
+
+// B1 解析：换行/空格混合、顺序去重、非 http 过滤、上限 20
+static void B1_ParseBatchURLs(void) {
+    ResourceDetectorAppDelegate *app = [ResourceDetectorAppDelegate new];
+    NSArray<NSURL *> *urls = [app parseBatchURLsFromString:
+        @"https://a.invalid/1\nhttps://b.invalid/2  https://a.invalid/1\nftp://x.invalid/3\njavascript:alert(1)\nhttps://c.invalid/4"];
+    Check(urls.count == 3, [NSString stringWithFormat:@"B1 解析出 3 个有效网址（实际 %lu）", (unsigned long)urls.count]);
+    Check([urls[0].absoluteString isEqualToString:@"https://a.invalid/1"] &&
+          [urls[1].absoluteString isEqualToString:@"https://b.invalid/2"] &&
+          [urls[2].absoluteString isEqualToString:@"https://c.invalid/4"],
+          @"B1 保持输入顺序且去重、过滤非 http");
+    Check([app parseBatchURLsFromString:@"https://a.invalid/1"].count == 1, @"B1 单网址解析 1 个");
+    Check([app parseBatchURLsFromString:@"hello world"].count == 0, @"B1 无有效网址返回空");
+    NSMutableString *many = [NSMutableString string];
+    for (NSInteger i = 0; i < 30; i++) [many appendFormat:@"https://x.invalid/%ld\n", (long)i];
+    Check([app parseBatchURLsFromString:many].count == 20, @"B1 超 20 个时截断到 20");
+}
+
+// B2 批量驱动：3 个网址串行推进、跨网址去重聚合、错误计数、完成收尾
+static void B2_BatchDriveAndAggregate(void) {
+    UFTestBatchSession *session;
+    ResourceDetectorAppDelegate *app = UFMakeBatchApp(&session);
+    app.urlField.stringValue = @"https://a.invalid/1\nhttps://b.invalid/2\nhttps://c.invalid/3";
+    [app scan:nil];
+    Check(app.batchActive && app.batchTotal == 3 && app.scanning, @"B2 批量模式激活且开始探测");
+    Check(session.startedURLs.count == 1 && [session.startedURLs.lastObject.host isEqualToString:@"a.invalid"],
+          @"B2 首个网址已启动");
+    // resultHandler 的生产实现经 dispatch_async(main) 派发：投递后用 Wait 泵 runloop
+    session.resultHandler(UFResult(@[@"https://cdn.invalid/a-1.mp4", @"https://cdn.invalid/a-2.mp4"], nil));
+    Check(Wait(^BOOL { return session.startedURLs.count == 2; }, 3), @"B2 第一个完成自动驱动第二个");
+    Check([session.startedURLs.lastObject.host isEqualToString:@"b.invalid"], @"B2 第二个启动的是 b");
+    Check(Wait(^BOOL { return app.results.count == 2; }, 1) && app.scanning, @"B2 聚合列表 2 项且探测继续");
+    // 第二个网址带回一个重复（同 dedupKey）+ 一个新资源
+    session.resultHandler(UFResult(@[@"https://cdn.invalid/a-1.mp4", @"https://cdn.invalid/b-1.mp4"], nil));
+    Check(Wait(^BOOL { return session.startedURLs.count == 3; }, 3), @"B2 第二个完成自动驱动第三个");
+    Check([session.startedURLs.lastObject.host isEqualToString:@"c.invalid"], @"B2 第三个启动的是 c");
+    Check(Wait(^BOOL { return app.results.count == 3; }, 1),
+          [NSString stringWithFormat:@"B2 跨网址去重后聚合 3 项（实际 %lu）", (unsigned long)app.results.count]);
+    // 第三个网址失败：收尾文案含网址数与失败数
+    session.resultHandler(UFResult(@[], [NSError errorWithDomain:@"test" code:1 userInfo:@{NSLocalizedDescriptionKey:@"连接失败"}]));
+    Check(Wait(^BOOL { return !app.scanning; }, 3), @"B2 队列耗尽后批量收尾");
+    Check([app.statusNote.stringValue containsString:@"3 个网址"] && [app.statusNote.stringValue containsString:@"1 个失败"],
+          [NSString stringWithFormat:@"B2 完成文案带网址数与失败数（实际：%@）", app.statusNote.stringValue]);
+    Check(app.results.count == 3, @"B2 失败网址不冲掉已聚合结果");
+}
+
+// B3 单网址零回归：batchActive 不激活
+static void B3_SingleURLNotBatch(void) {
+    UFTestBatchSession *session;
+    ResourceDetectorAppDelegate *app = UFMakeBatchApp(&session);
+    app.urlField.stringValue = @"https://solo.invalid/watch";
+    [app scan:nil];
+    Check(!app.batchActive && session.startedURLs.count == 1, @"B3 单网址走既有单网址路径");
+}
+
+// B4 批量取消：清空队列、保留已聚合结果、文案带进度
+static void B4_CancelBatch(void) {
+    UFTestBatchSession *session;
+    ResourceDetectorAppDelegate *app = UFMakeBatchApp(&session);
+    app.urlField.stringValue = @"https://a.invalid/1\nhttps://b.invalid/2\nhttps://c.invalid/3";
+    [app scan:nil];
+    session.resultHandler(UFResult(@[@"https://cdn.invalid/a-1.mp4"], nil));
+    Wait(^BOOL { return session.startedURLs.count == 2; }, 3);
+    [app cancelScan:nil];
+    Check(!app.batchActive && app.batchPendingURLs.count == 0 && !app.scanning, @"B4 取消清空批量队列");
+    Check([app.statusNote.stringValue containsString:@"已取消批量"] && [app.statusNote.stringValue containsString:@"2/3"],
+          [NSString stringWithFormat:@"B4 取消文案带进度（实际：%@）", app.statusNote.stringValue]);
+    Check(Wait(^BOOL { return app.results.count == 1; }, 1), @"B4 已聚合结果保留显示");
+}
+
 int main(int argc, const char **argv) { @autoreleasepool {
     (void)argc; (void)argv;
     NSLog(@"== 用户反馈专项：重复行 + 详情读取 ==");
@@ -1117,6 +1240,10 @@ int main(int argc, const char **argv) { @autoreleasepool {
     D17_RepeatedIdenticalDeclarationNoDuplicateOption();
     D18_WidthHeightOnDuplicateMemberCollected();
     D19_BothTiersSelectableAndEnqueueMatches();
+    B1_ParseBatchURLs();
+    B2_BatchDriveAndAggregate();
+    B3_SingleURLNotBatch();
+    B4_CancelBatch();
     C1_PartialSuccessFieldsSurviveFailure();
     C2_AppReselectRestoresThumbnailWithoutRepeatRequests();
     C3_CanonicalURLFormsShareCacheAndNoCrossHit();

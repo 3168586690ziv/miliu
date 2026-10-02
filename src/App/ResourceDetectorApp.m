@@ -243,6 +243,15 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 @property NSTextField *statusNote;
 @property NSTableView *table;
 @property NSMutableArray<DetectedMedia *> *results;
+// 批量探测（2026-10-02 第17轮）：输入框按行/空白含 ≥2 个网址时自动排队——
+// 串行逐个探测、结果按 dedupKey 聚合到同一列表；Esc 取消整批。
+@property (nonatomic, copy) NSArray<NSURL *> *batchPendingURLs;
+@property (nonatomic, assign) NSInteger batchTotal;
+@property (nonatomic, assign) NSInteger batchIndex;
+@property (nonatomic, strong) NSMutableArray<DetectedMedia *> *batchAggregated;
+@property (nonatomic, strong) NSMutableArray<NSError *> *batchErrors;
+@property (nonatomic, assign) NSInteger batchSucceeded;
+@property (nonatomic, assign) BOOL batchActive;
 // 分栏布局：左列表 / 右详情（手动布局，3:7 恒定）
 @property NSView *leftPane;
 @property NSView *detailPane;
@@ -1363,15 +1372,20 @@ static NSString *RDFormatForMediaURL(NSString *urlString) {
 // 可能不同（动态腿的成员在合并结果里靠前），按下标保留会让 ⌘D 下载到"错行"
 // 资源；详情面板显示同一资源时继续保留，不重复订阅。
 - (void)applyDiscoveryResult:(ZZResourceDiscoveryResult *)result final:(BOOL)isFinal {
+    [self applyMediaList:result.allMedia ?: @[] final:isFinal];
+}
+
+// applyDiscoveryResult 的数组形态（批量聚合刷新走这里，不依赖 result 对象）。
+- (void)applyMediaList:(NSArray<DetectedMedia *> *)media final:(BOOL)isFinal {
     NSArray<DetectedMedia *> *before = self.visibleMedia;
     NSInteger selectedRow = self.table.selectedRow;
     DetectedMedia *selected = (selectedRow >= 0 && selectedRow < (NSInteger)before.count)
         ? before[(NSUInteger)selectedRow] : nil;
 
     [self.results removeAllObjects];
-    [self.results addObjectsFromArray:result.allMedia ?: @[]];
+    [self.results addObjectsFromArray:media];
     // Probe response lengths are unverified; metadata service validates file totals.
-    for (DetectedMedia *media in self.results) media.sizeBytes = 0;
+    for (DetectedMedia *m in self.results) m.sizeBytes = 0;
     if (isFinal) { self.scanning = NO; self.previewShown = NO; }
 
     self.restoringSelectionAfterReload = YES;
@@ -2638,7 +2652,11 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
         dispatch_async(dispatch_get_main_queue(), ^{
             typeof(self) sself = weakSelf; if (!sself || sself.scanGeneration != generation) return;
             if (!sself.scanning) return;
-            sself.statusNote.stringValue = [sself displayStatusForDiscoveryStatus:s];
+            // 批量进行中保留 N/M 进度前缀，不让逐页状态文案把它冲掉
+            sself.statusNote.stringValue = sself.batchActive
+                ? [NSString stringWithFormat:@"批量 %ld/%ld · %@", (long)sself.batchIndex, (long)sself.batchTotal,
+                   [sself displayStatusForDiscoveryStatus:s]]
+                : [sself displayStatusForDiscoveryStatus:s];
         });
     };
     self.session.progressHandler = ^(double p){
@@ -2651,6 +2669,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     self.session.resultHandler = ^(ZZResourceDiscoveryResult *r){
         dispatch_async(dispatch_get_main_queue(), ^{
             typeof(self) sself = weakSelf; if (!sself || sself.scanGeneration != generation) return;
+            if (sself.batchActive) { [sself batchConsumeFinalResult:r]; return; }
             [sself applyDiscoveryResult:r final:YES];
             [sself finishScanWithResult:r];
         });
@@ -2661,6 +2680,9 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
         dispatch_async(dispatch_get_main_queue(), ^{
             typeof(self) sself = weakSelf;
             if (!sself || sself.scanGeneration != generation || !sself.scanning) return;
+            // 批量模式跳过 interim：替换式呈现只含当前网址的临时媒体，
+            // 会把之前网址已聚合显示的结果闪掉。
+            if (sself.batchActive) return;
             [sself applyDiscoveryResult:r final:NO];
             NSUInteger count = sself.visibleMedia.count;
             if (count > 0) {
@@ -2675,8 +2697,18 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     self.sessionClearGeneration += 1;   // 新的探测意图作废在途的"清除会话"完成回调
     if (self.scanning) { self.statusNote.stringValue = @"正在探测中，按 Esc 取消后再试"; return; }
     NSString *s = [self.urlField.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    NSURL *u = [NSURL URLWithString:s];
-    if (!u || !u.host.length) { self.statusNote.stringValue = @"请输入有效的网页地址"; return; }
+    NSArray<NSURL *> *urls = [self parseBatchURLsFromString:s];
+    if (urls.count == 0) { self.statusNote.stringValue = @"请输入有效的网页地址"; return; }
+    NSURL *u = urls.firstObject;
+    // ≥2 个网址进批量模式：串行排队、聚合呈现；单个网址与既有行为完全一致。
+    BOOL batch = urls.count > 1;
+    self.batchActive = batch;
+    self.batchTotal = urls.count;
+    self.batchIndex = 1;
+    self.batchSucceeded = 0;
+    self.batchPendingURLs = batch ? [urls subarrayWithRange:NSMakeRange(1, urls.count - 1)] : @[];
+    self.batchAggregated = batch ? [NSMutableArray array] : nil;
+    self.batchErrors = batch ? [NSMutableArray array] : nil;
     // 新扫描开始即作废旧预取与旧详情订阅：上一轮的在途请求不允许继续消耗
     // 连接，更不允许迟到的快照写进这一轮的结果。统一呈现状态一并重置，
     // 新探测绝不继承上一轮的加载状态。
@@ -2687,10 +2719,13 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     self.lastScanSeedURL = u;
     self.pendingCompletionStatus = nil;
     // 严格统一呈现：新探索开始就抑制列表呈现，探索完成才一次性出现。
-    self.explorationResultsSuppressed = YES;
+    // 批量模式不走统一呈现（逐网址聚合刷新），取消抑制。
+    self.explorationResultsSuppressed = !batch;
     self.scanGeneration += 1;   // 作废上一轮探次的全部在途回调
     [self installSessionHandlersForGeneration:self.scanGeneration];
-    self.statusNote.stringValue = @"准备读取网址…";
+    self.statusNote.stringValue = batch
+        ? [NSString stringWithFormat:@"批量探测 1/%ld：%@…", (long)self.batchTotal, u.host ?: @""]
+        : @"准备读取网址…";
     [self.metadataToken cancel];
     [self.durationCache removeAllObjects]; // 旧 URL 的"获取中…"残留不得带入新结果
     [self.selectedTierRowDisplay removeAllObjects]; // 旧 URL 的档位摘要同理
@@ -2702,12 +2737,84 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     self.scanning = YES;
     self.settingsProbeModeControl.enabled = NO;
     self.checkLabel.hidden = YES;
-    self.statusNote.stringValue = @"正在读取网址…";
+    if (!batch) self.statusNote.stringValue = @"正在读取网址…";
     if (self.mode == ZZResourceDiscoveryModeSite) {
         [self.session startSiteBatchWithURL:u listingPageCount:self.sitePages];
     } else {
         [self.session startWithURL:u mode:self.mode];
     }
+}
+
+// 批量输入解析：按换行/空白拆段（网址不含空格），只收 http(s) 且 host 非空者，
+// 保持输入顺序去重；上限 20 个防呆（再多状态行没法看，且串行耗时过长）。
+- (NSArray<NSURL *> *)parseBatchURLsFromString:(NSString *)text {
+    if (text.length == 0) return @[];
+    NSMutableArray<NSURL *> *out = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    for (NSString *piece in [text componentsSeparatedByCharactersInSet:
+            [NSCharacterSet whitespaceAndNewlineCharacterSet]]) {
+        if (piece.length == 0) continue;
+        NSURL *url = [NSURL URLWithString:piece];
+        NSString *scheme = url.scheme.lowercaseString;
+        if (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"]) continue;
+        if (url.host.length == 0) continue;
+        if ([seen containsObject:url.absoluteString]) continue;
+        [seen addObject:url.absoluteString];
+        [out addObject:url];
+        if (out.count >= 20) break;
+    }
+    return [out copy];
+}
+
+// 批量模式：消费一个网址的最终结果 —— 聚合（dedupKey 去重）→ 刷新列表 →
+// 驱动下一个网址或收尾。注意不调用 applyDiscoveryResult:final:YES（替换式
+// 呈现会把之前网址的聚合结果闪掉，且会提前把 scanning 置 NO）。
+- (void)batchConsumeFinalResult:(ZZResourceDiscoveryResult *)r {
+    if (r.cancelled) return;   // 取消路径由 cancelScan: 统一收尾，迟到回调直接丢弃
+    for (DetectedMedia *m in r.allMedia ?: @[]) {
+        NSString *key = [DetectedMedia dedupKeyForURL:m.mediaURL];
+        BOOL dup = NO;
+        for (DetectedMedia *existing in self.batchAggregated) {
+            if ([[DetectedMedia dedupKeyForURL:existing.mediaURL] isEqualToString:key]) { dup = YES; break; }
+        }
+        if (!dup) [self.batchAggregated addObject:m];
+    }
+    if (r.error) [self.batchErrors addObject:r.error];
+    else self.batchSucceeded++;
+    [self applyMediaList:self.batchAggregated final:NO];
+    if (self.batchPendingURLs.count > 0) {
+        NSURL *next = self.batchPendingURLs.firstObject;
+        NSMutableArray *rest = [self.batchPendingURLs mutableCopy];
+        [rest removeObjectAtIndex:0];
+        self.batchPendingURLs = [rest copy];
+        self.batchIndex++;
+        self.statusNote.stringValue = [NSString stringWithFormat:@"批量探测 %ld/%ld：%@…",
+                                       (long)self.batchIndex, (long)self.batchTotal, next.host ?: @""];
+        // session.startWithURL 每次自增内代次、可重入；App 层 handler 按本批
+        // scanGeneration 过滤，装一次即可继续接收后续网址的回调。
+        if (self.mode == ZZResourceDiscoveryModeSite) {
+            [self.session startSiteBatchWithURL:next listingPageCount:self.sitePages];
+        } else {
+            [self.session startWithURL:next mode:self.mode];
+        }
+    } else {
+        [self batchFinish];
+    }
+}
+
+- (void)batchFinish {
+    self.batchActive = NO;
+    self.scanning = NO;
+    self.settingsProbeModeControl.enabled = YES;
+    NSUInteger count = self.visibleMedia.count;
+    NSMutableString *text = [NSMutableString stringWithFormat:@"批量探测完成 · %ld 个网址发现 %lu 个资源",
+                             (long)self.batchTotal, (unsigned long)count];
+    if (self.batchErrors.count) {
+        [text appendFormat:@" · %lu 个失败：%@", (unsigned long)self.batchErrors.count,
+            self.batchErrors.firstObject.localizedDescription];
+    }
+    self.statusNote.stringValue = text;
+    self.checkLabel.hidden = (count == 0);
 }
 
 - (void)cancelScan:(id)sender {
@@ -2717,6 +2824,11 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     [self cancelPresentationPreparation];
     self.pendingCompletionStatus = nil;
     self.explorationResultsSuppressed = NO;   // 取消后立即按既有行为显示已应用的结果
+    // 批量取消：清空剩余队列，文案带进度；已聚合的结果保持显示。
+    BOOL wasBatch = self.batchActive;
+    NSInteger doneIndex = self.batchIndex;
+    self.batchPendingURLs = @[];
+    self.batchActive = NO;
     if (self.scanning) [self.session cancel];
     // 取消后旧详情订阅必须立即失效：迟到的缩略图/详情不得再写回界面。
     [self.metadataToken cancel];
@@ -2725,7 +2837,9 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     self.scanning = NO;
     self.settingsProbeModeControl.enabled = YES;
     self.scanGeneration += 1;   // 作废本次探次的迟到回调，避免覆盖"已取消探测"
-    self.statusNote.stringValue = @"已取消探测";
+    self.statusNote.stringValue = wasBatch
+        ? [NSString stringWithFormat:@"已取消批量探测（完成 %ld/%ld，已发现结果保留）", (long)doneIndex, (long)self.batchTotal]
+        : @"已取消探测";
     [self cleanupManualVerification];
 }
 
