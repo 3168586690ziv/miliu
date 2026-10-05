@@ -128,7 +128,8 @@ static NSSet<NSString *> *SHPVideoExtensions(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         set = [NSSet setWithArray:@[@"mp4",@"m4v",@"mov",@"webm",@"mkv",@"avi",
-                                    @"ts",@"m2ts",@"flv",@"ogv"]];
+                                    @"ts",@"m2ts",@"flv",@"ogv",@"3gp",
+                                    @"mp3",@"m4a",@"aac",@"flac",@"opus",@"ogg",@"wav"]];
     });
     return set;
 }

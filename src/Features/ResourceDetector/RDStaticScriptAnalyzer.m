@@ -108,6 +108,38 @@ static void RDCollectJSONStrings(id value, NSMutableArray<NSString *> *out) {
     }
     return decoded;
 }
++ (NSArray<NSString *> *)mediaURLStringsInJSONText:(NSString *)text {
+    if (!text.length) return @[];
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
+    id json = data.length ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    if (json) {
+        NSMutableArray<NSString *> *strings = [NSMutableArray array];
+        RDCollectJSONStrings(json, strings);
+        for (NSString *raw in strings) {
+            if (![raw isKindOfClass:NSString.class] || raw.length < 8) continue;
+            NSString *lower = raw.lowercaseString;
+            // 只收 URL 形状的值；og 缩略图/页面链接不在这里过滤——由调用方的
+            // formatFromURL 白名单再筛一遍。
+            if (![lower hasPrefix:@"http"] && ![lower hasPrefix:@"/"]) continue;
+            if (![seen containsObject:raw]) { [seen addObject:raw]; [out addObject:raw]; }
+        }
+    }
+    // JSON 解析失败（拼接模板/尾逗号等非严格 JSON）时退回正则兜底：只匹配
+    // 带视频/清单扩展名的完整 URL，宁少勿滥。
+    if (!out.count) {
+        NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:
+            @"https?://[^\\\"'\\s,}<>]+?\\.(?:m3u8|mpd|mp4|webm|mov|mkv|flv|ts)(?:\\?[^\\\"'\\s,}<>]*)?"
+            options:NSRegularExpressionCaseInsensitive error:nil];
+        for (NSTextCheckingResult *m in [re matchesInString:text options:0 range:NSMakeRange(0, text.length)]) {
+            NSString *raw = [text substringWithRange:m.range];
+            if (![seen containsObject:raw]) { [seen addObject:raw]; [out addObject:raw]; }
+        }
+    }
+    return out;
+}
+
 + (NSArray<DetectedMedia *> *)mediaInScript:(NSString *)script scriptURL:(NSURL *)url sourcePage:(NSURL *)page {
     return [self mediaInScript:script scriptURL:url sourcePage:page documentBaseURL:url];
 }

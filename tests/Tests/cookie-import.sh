@@ -6,7 +6,7 @@ OUT="$REPO/build/cookie-import-tests"
 export RD_LOG_PATH="$OUT/test-ResourceDetector.log"
 mkdir -p "$OUT"
 SRC=("$REPO/tests/Tests/CookieImportTests.m" "$REPO/src/Features/ResourceDetector/RDBrowserCookieImporter.m")
-for f in RDManualVerification URLPolicy DetectedMedia RDQualityTier RDResourceDisplayMetadata WebProbe; do SRC+=("$REPO/src/Features/ResourceDetector/$f.m"); done
+for f in RDManualVerification URLPolicy DetectedMedia RDQualityTier RDResourceDisplayMetadata WebProbe RDStaticScriptAnalyzer; do SRC+=("$REPO/src/Features/ResourceDetector/$f.m"); done
 for f in AppError DNSResolver IPAddressPolicy HTTPPrivacyPolicy HTTPRequest HTTPResult HTTPClient RDLog; do SRC+=("$REPO/src/Shared/Infrastructure/$f.m"); done
 SRC+=("$REPO/src/Shared/Infrastructure/Async/RequestGeneration.m")
 xcrun clang -fobjc-arc -O1 -framework Foundation -framework AppKit -framework WebKit -framework Security -lsqlite3 \

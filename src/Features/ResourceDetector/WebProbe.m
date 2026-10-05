@@ -2,6 +2,7 @@
 //  WebProbe.m — 模块 17｜网页探测核心实现
 //
 #import "WebProbe.h"
+#import "RDStaticScriptAnalyzer.h"
 #import "RDLog.h"
 #import "RDManualVerification.h"   // 共享会话存储（探测 WebView 与验证窗口同一实例）
 #import "RDURLUtilities.h"
@@ -68,12 +69,32 @@ static BOOL RDIsHTTPURL(NSString *value) { NSURL *url=[NSURL URLWithString:value
     if ([ext isEqualToString:@"webm"]) return @"webm";
     if ([ext isEqualToString:@"m3u8"]) return @"hls";
     if ([ext isEqualToString:@"mpd"]) return @"dash";
+    // 抓取能力升级（第 29 轮）：mkv/ts/flv/ogv/3gp 与常见音频扩展名直接保留
+    // 为 format——此前一律归 unknown，导致静态腿的格式白名单把它们全部丢弃。
+    if ([ext isEqualToString:@"mov"] || [ext isEqualToString:@"mkv"] || [ext isEqualToString:@"avi"] ||
+        [ext isEqualToString:@"ts"] || [ext isEqualToString:@"m2ts"] || [ext isEqualToString:@"flv"] ||
+        [ext isEqualToString:@"ogv"] || [ext isEqualToString:@"3gp"]) return ext;
+    if ([ext isEqualToString:@"m4a"] || [ext isEqualToString:@"mp3"] || [ext isEqualToString:@"aac"] ||
+        [ext isEqualToString:@"flac"] || [ext isEqualToString:@"opus"] || [ext isEqualToString:@"ogg"] ||
+        [ext isEqualToString:@"wav"]) return ext;
     if ([ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"]) return @"jpg";
     if ([ext isEqualToString:@"png"]) return @"png";
     if ([ext isEqualToString:@"gif"]) return @"gif";
     if ([ext isEqualToString:@"webp"]) return @"webp";
-    if ([ext isEqualToString:@"avif"]) return @"avif";
+    if ([ext isEqualToString:@"avif"] || [ext isEqualToString:@"heic"] || [ext isEqualToString:@"heif"]) return ext;
     return @"unknown";
+}
+
+/// 可下载媒体格式白名单（视频/清单/音频统一）。静态腿的懒加载、srcset、
+/// preload、og:video、JSON-LD 与全文兜底共用这一份判据，不再各写各的。
++ (BOOL)isDownloadableMediaFormat:(NSString *)format {
+    static NSSet<NSString *> *ok;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        ok = [NSSet setWithArray:@[@"mp4",@"webm",@"hls",@"dash",@"mov",@"mkv",@"avi",@"ts",@"m2ts",@"flv",@"ogv",@"3gp",
+                                   @"m4a",@"mp3",@"aac",@"flac",@"opus",@"ogg",@"wav"]];
+    });
+    return format.length && [ok containsObject:format];
 }
 
 + (NSString *)absoluteURLString:(NSString *)raw baseURL:(NSURL *)baseURL {
@@ -329,7 +350,7 @@ static BOOL RDIsHTTPURL(NSString *value) { NSURL *url=[NSURL URLWithString:value
         NSString *u = absolute.absoluteString;
         if (!u.length || !RDIsHTTPURL(u)) continue;
         NSString *format = [self formatFromURL:u];
-        if (![@[@"mp4",@"webm",@"hls",@"dash"] containsObject:format]) continue;
+        if (![self isDownloadableMediaFormat:format]) continue;
         DetectedMedia *dm = [DetectedMedia new]; dm.mediaURL = u;
         dm.resourceKind = ([format isEqualToString:@"hls"] || [format isEqualToString:@"dash"]) ? RDResourceKindManifest : RDResourceKindVideo;
         dm.isManifest = (dm.resourceKind == RDResourceKindManifest);
@@ -358,7 +379,7 @@ static BOOL RDIsHTTPURL(NSString *value) { NSURL *url=[NSURL URLWithString:value
             NSString *u = absolute.absoluteString;
             if (!u.length || !RDIsHTTPURL(u)) continue;
             NSString *format = [self formatFromURL:u];
-            if (![@[@"mp4",@"webm",@"hls",@"dash"] containsObject:format]) continue;
+            if (![self isDownloadableMediaFormat:format]) continue;
             DetectedMedia *dm = [DetectedMedia new]; dm.mediaURL = u;
             dm.resourceKind = ([format isEqualToString:@"hls"] || [format isEqualToString:@"dash"]) ? RDResourceKindManifest : RDResourceKindVideo;
             dm.isManifest = (dm.resourceKind == RDResourceKindManifest);
@@ -385,12 +406,75 @@ static BOOL RDIsHTTPURL(NSString *value) { NSURL *url=[NSURL URLWithString:value
         NSURL *absolute = [NSURL URLWithString:[self absoluteURLString:raw baseURL:baseURL] ?: @""];
         NSString *u = absolute.absoluteString;
         NSString *format = [self formatFromURL:u];
-        if (!u.length || ![@[@"mp4",@"webm",@"hls",@"dash"] containsObject:format] || !RDIsHTTPURL(u)) continue;
+        if (!u.length || ![self isDownloadableMediaFormat:format] || !RDIsHTTPURL(u)) continue;
         DetectedMedia *dm = [DetectedMedia new]; dm.mediaURL = u; dm.title = r.pageTitle.length ? r.pageTitle : u.lastPathComponent;
         dm.resourceKind = ([format isEqualToString:@"hls"] || [format isEqualToString:@"dash"]) ? RDResourceKindManifest : RDResourceKindVideo;
         dm.isManifest = (dm.resourceKind == RDResourceKindManifest);
         dm.discoverySource = @"static-video-preload";
         dm.format = format; dm.drmType = drm; dm.thumbnailStatus = RDThumbnailNone; [found addObject:dm];
+    }
+
+    // ── 抓取能力升级（第 29 轮）：社交/结构化声明的视频地址 ──
+    // og:video / og:video:secure_url / twitter:player:stream 是分享页、嵌入页、
+    // 新闻页最常用的「页面唯一视频声明」方式；此前只读 og:title/og:image，
+    // 这类页面会被判为「无资源」。
+    for (NSTextCheckingResult *mt in [metaTagRe matchesInString:html options:0 range:NSMakeRange(0, html.length)]) {
+        NSString *tag = [html substringWithRange:mt.range];
+        NSString *property = [metaAttr(tag, @"property") ?: metaAttr(tag, @"name") ?: metaAttr(tag, @"itemprop") lowercaseString];
+        if (!property.length) continue;
+        BOOL isVideoMeta = [property isEqualToString:@"og:video"] ||
+                           [property isEqualToString:@"og:video:secure_url"] ||
+                           [property isEqualToString:@"og:video:url"] ||
+                           [property isEqualToString:@"twitter:player:stream"] ||
+                           [property hasPrefix:@"og:video:secure"] ||
+                           ([property hasPrefix:@"og:video"] && [property containsString:@"url"]);
+        if (!isVideoMeta) continue;
+        // og:video:type 等非地址声明不带 http；secure_url 多一个 0/1 值的属性形态也跳过
+        if ([property hasSuffix:@":width"] || [property hasSuffix:@":height"] || [property hasSuffix:@":type"] ||
+            [property hasSuffix:@":duration"] || [property hasSuffix:@":secure"]) continue;
+        NSString *content = metaAttr(tag, @"content");
+        if (!content.length) continue;
+        NSString *absolute = [self absoluteURLString:content baseURL:baseURL];
+        if (!absolute.length) continue;
+        NSString *format = [self formatFromURL:absolute];
+        if (![self isDownloadableMediaFormat:format]) continue;
+        DetectedMedia *dm = [DetectedMedia new];
+        dm.mediaURL = absolute;
+        dm.resourceKind = ([format isEqualToString:@"hls"] || [format isEqualToString:@"dash"]) ? RDResourceKindManifest : RDResourceKindVideo;
+        dm.isManifest = (dm.resourceKind == RDResourceKindManifest);
+        dm.discoverySource = @"meta-video";
+        dm.title = r.ogTitle.length ? r.ogTitle : (r.pageTitle.length ? r.pageTitle : absolute.lastPathComponent);
+        dm.format = format; dm.drmType = drm; dm.thumbnailStatus = RDThumbnailNone;
+        dm.poster = r.ogImageURL.length ? r.ogImageURL : nil;
+        [found addObject:dm];
+    }
+
+    // ── 抓取能力升级（第 29 轮）：JSON-LD 结构化数据中的媒体地址 ──
+    // VideoObject schema（application/ld+json）常含 contentUrl / embedUrl，
+    // 大量新闻与 CMS 站点只在这里声明真实视频地址。
+    NSRegularExpression *jsonldRe = [NSRegularExpression
+        regularExpressionWithPattern:@"<script\\b[^>]*type\\s*=\\s*[\"']?application/ld\\+json[\"']?[^>]*>(.*?)</script>"
+                             options:NSRegularExpressionCaseInsensitive | NSRegularExpressionDotMatchesLineSeparators
+                               error:nil];
+    for (NSTextCheckingResult *jm in [jsonldRe matchesInString:html options:0 range:NSMakeRange(0, html.length)]) {
+        if (jm.numberOfRanges < 2) continue;
+        NSString *body = [html substringWithRange:[jm rangeAtIndex:1]];
+        NSArray *urls = [RDStaticScriptAnalyzer mediaURLStringsInJSONText:body];
+        for (NSString *raw in urls) {
+            NSString *absolute = [self absoluteURLString:raw baseURL:baseURL];
+            if (!absolute.length) continue;
+            NSString *format = [self formatFromURL:absolute];
+            if (![self isDownloadableMediaFormat:format]) continue;
+            DetectedMedia *dm = [DetectedMedia new];
+            dm.mediaURL = absolute;
+            dm.resourceKind = ([format isEqualToString:@"hls"] || [format isEqualToString:@"dash"]) ? RDResourceKindManifest : RDResourceKindVideo;
+            dm.isManifest = (dm.resourceKind == RDResourceKindManifest);
+            dm.discoverySource = @"jsonld-video";
+            dm.title = r.ogTitle.length ? r.ogTitle : (r.pageTitle.length ? r.pageTitle : absolute.lastPathComponent);
+            dm.format = format; dm.drmType = drm; dm.thumbnailStatus = RDThumbnailNone;
+            dm.poster = r.ogImageURL.length ? r.ogImageURL : nil;
+            [found addObject:dm];
+        }
     }
 
     // 图片来源：img/source srcset、懒加载属性以及社交元数据。所有候选先绝对化，
@@ -430,6 +514,37 @@ static BOOL RDIsHTTPURL(NSString *value) { NSURL *url=[NSURL URLWithString:value
         if ([[self attributeValue:tag name:@"rel"].lowercaseString containsString:@"image_src"]) {
             NSString *absolute = [self absoluteURLString:[self attributeValue:tag name:@"href"] baseURL:baseURL];
             if (absolute.length) [found addObject:[self imageMediaForURL:absolute result:r source:@"link-image"]];
+        }
+    }
+
+    // ── 抓取能力升级（第 29 轮）：HTML 全文直链兜底 ──
+    // 语义：兜底=「结构化路径全部未命中时」的最后手段（自定义播放器配置、
+    // 混淆 script、srcdoc 内联等）。此前 BUG-005 的教训：图片元素的
+    // data-srcset 里可能藏着带 .mp4 扩展的懒加载候选，结构化路径已按语义
+    // 正确处理（不当视频）；全文正则若无条件开扫会把它们按字面捞成视频。
+    // 因此仅在 found 为空（视频与图片结构化路径全部零命中）时启用——
+    // 兜底位于全部结构化扫描之后，图片语义先于字面正则成立。
+    if (found.count == 0) {
+        NSRegularExpression *plainRe = [NSRegularExpression
+            regularExpressionWithPattern:@"https?://[^\\s\"'<>\\\\)]+?\\.(?:m3u8|mpd|mp4|webm|mov|mkv|ts|flv|m4v)(?:\\?[^\\s\"'<>\\\\)]*)?"
+                                     options:NSRegularExpressionCaseInsensitive error:nil];
+        NSUInteger plainBudget = 200;   // 全文兜底上限：防止巨型聚合页灌入数千条
+        for (NSTextCheckingResult *pm in [plainRe matchesInString:html options:0 range:NSMakeRange(0, html.length)]) {
+            if (plainBudget == 0) break;
+            NSString *raw = [html substringWithRange:pm.range];
+            NSString *absolute = [self absoluteURLString:raw baseURL:baseURL];
+            if (!absolute.length) continue;
+            NSString *format = [self formatFromURL:absolute];
+            if (![self isDownloadableMediaFormat:format]) continue;
+            DetectedMedia *dm = [DetectedMedia new];
+            dm.mediaURL = absolute;
+            dm.resourceKind = ([format isEqualToString:@"hls"] || [format isEqualToString:@"dash"]) ? RDResourceKindManifest : RDResourceKindVideo;
+            dm.isManifest = (dm.resourceKind == RDResourceKindManifest);
+            dm.discoverySource = @"plain-text";
+            dm.title = r.pageTitle.length ? r.pageTitle : absolute.lastPathComponent;
+            dm.format = format; dm.drmType = drm; dm.thumbnailStatus = RDThumbnailNone;
+            [found addObject:dm];
+            plainBudget--;
         }
     }
 
@@ -734,7 +849,7 @@ static BOOL RDIsHTTPURL(NSString *value) { NSURL *url=[NSURL URLWithString:value
 static NSString * const RDProbeBridgeName = @"rdBridge";
 
 static NSString *RDProbeRequestCaptureScript(void) {
-    NSString *script = @"(function(){if(window.__zzRDRequestInstalled)return;window.__zzRDRequestInstalled=true;var seen=new Set(),maxSeen=4000;function post(u,kind,source,extra){try{u=new URL(u,location.href).href;}catch(e){return;}if(!/^https?:/i.test(u)||seen.size>=maxSeen||seen.has(kind+'|'+u))return;seen.add(kind+'|'+u);try{var p={action:'resource',url:u,kind:kind,source:source||'dynamic-request'};if(extra)Object.keys(extra).forEach(function(k){p[k]=extra[k];});window.webkit.messageHandlers.rdBridge.postMessage(p);}catch(e){}}function classify(u,ct){ct=(ct||'').toLowerCase();if(ct.indexOf('mpegurl')>=0||ct.indexOf('dash')>=0||/\\.(m3u8|mpd)(?:[?#]|$)/i.test(u))return 'manifest';if(ct.indexOf('video/')===0||/\\.(mp4|mov|m4v|webm|avi)(?:[?#]|$)/i.test(u))return 'video';if(ct.indexOf('image/')===0||/\\.(jpg|jpeg|png|webp|gif|avif|heic|heif)(?:[?#]|$)/i.test(u))return 'image';return '';};function meta(res,source){var h=res&&res.headers,ct=h&&h.get?h.get('content-type'):'';var k=classify(res.url,ct);if(k)post(res.url,k,source,{mimeType:ct||'',contentLength:h&&h.get?h.get('content-length')||'': '',contentRange:h&&h.get?h.get('content-range')||'':''});}function scanText(t,source){try{if(!t||t.length>3145728)return;var re=/https?:\\/\\/[^\\s\"'<>\\\\]+?\\.(?:m3u8|mpd|mp4|webm|mov|m4v)(?:\\?[^\\s\"'<>\\\\]*)?/gi;var m;while((m=re.exec(t))){var k=classify(m[0],'');if(k)post(m[0],k,source);}}catch(e){}}function bodyScan(res,source){try{var h=res&&res.headers,ct=h&&h.get?(h.get('content-type')||''):'';if(!/json|text|javascript/i.test(ct))return;var cl=h&&h.get?h.get('content-length'):null;if(cl&&parseInt(cl,10)>3145728)return;if(!res.clone)return;res.clone().text().then(function(t){scanText(t,source+'_body');}).catch(function(e){});}catch(e){}}var of=window.fetch;if(of)window.fetch=function(){var a=arguments;return of.apply(this,a).then(function(res){meta(res,'fetch');bodyScan(res,'fetch');return res;});};var O=XMLHttpRequest.prototype.open,S=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.open=function(m,u){this.__zzURL=u;return O.apply(this,arguments);};XMLHttpRequest.prototype.send=function(){this.addEventListener('load',function(){var u=this.responseURL||this.__zzURL,ct=this.getResponseHeader&&this.getResponseHeader('content-type')||'',k=classify(u,ct);if(k)post(u,k,'xhr',{mimeType:ct||'',contentLength:this.getResponseHeader&&this.getResponseHeader('content-length')||'',contentRange:this.getResponseHeader&&this.getResponseHeader('content-range')||'',status:String(this.status||'')});var rt=this.responseType;if((rt===''||rt==='text')&&/json|text|javascript/i.test(ct||''))scanText(this.responseText||'','xhr_body');});return S.apply(this,arguments);};function perf(){try{performance.getEntriesByType('resource').forEach(function(e){var k=classify(e.name,'');if(k)post(e.name,k,'performance');});}catch(e){}}try{if(window.PerformanceObserver){new PerformanceObserver(function(list){list.getEntries().forEach(function(e){var k=classify(e.name,'');if(k)post(e.name,k,'performance');});}).observe({type:'resource',buffered:true});}}catch(e){}perf();function clue(message){try{window.webkit.messageHandlers.rdBridge.postMessage({action:'clue',kind:'blob',source:'media-source',message:message||'blob/media-source 无法还原原始 URL'});}catch(e){}}try{var cu=URL.createObjectURL;URL.createObjectURL=function(o){var u=cu.apply(this,arguments);if(o&&((window.MediaSource&&o instanceof MediaSource)||String(o).indexOf('MediaSource')>=0))clue('MediaSource/Blob 播放线索已发现，但无法还原原始媒体 URL');return u;};}catch(e){}try{if(window.MediaSource&&MediaSource.prototype.addSourceBuffer){var asb=MediaSource.prototype.addSourceBuffer;MediaSource.prototype.addSourceBuffer=function(m){clue('MediaSource sourceBuffer MIME: '+String(m||''));return asb.apply(this,arguments);};}}catch(e){}function pidOf(v){try{return v&&v.dataset?v.dataset.rdPid||'':'';}catch(e){return '';}}function postP(u,lbl,v){var ex={};if(lbl)ex.size=String(lbl).slice(0,32);var pid=pidOf(v);if(pid)ex.player=pid;post(u,'video','player',ex);}function scanPlayers(){try{if(window.videojs&&window.videojs.players){Object.keys(window.videojs.players).forEach(function(id){try{var p=window.videojs.players[id];if(!p)return;var v=p.el?p.el():null;if(v&&v.tagName&&v.tagName.toLowerCase()!=='video')v=null;var ss=p.currentSources?p.currentSources():null;(ss||[]).forEach(function(s){if(s&&s.src)postP(s.src,s.label,v);});if(v&&v.currentSrc)postP(v.currentSrc,null,v);}catch(e){}});}if(window.jwplayer){try{var jp=window.jwplayer();if(jp&&jp.getPlaylistItem){var it=jp.getPlaylistItem();var c=jp.getContainer?jp.getContainer():null;var v2=c&&c.querySelector?c.querySelector('video'):null;(it&&it.sources||[]).forEach(function(s){if(s&&s.file)postP(s.file,s.label,v2);});}}catch(e){}}var list=[];if(window.Plyr)list.push(window.Plyr);if(window.dplayer)list.push(window.dplayer);if(window.art)list.push(window.art);list.forEach(function(p){var v=p&&p.el?p.el():p&&p.video?p.video:p&&p.media?p.media:p;if(v&&v.currentSrc)postP(v.currentSrc,null,v);if(v&&v.src)postP(v.src,null,v);});}catch(e){}}scanPlayers();['click','scroll','play'].forEach(function(ev){document.addEventListener(ev,function(){setTimeout(function(){perf();scanPlayers();},0);},true);});function scanRoot(root){try{root.querySelectorAll&&root.querySelectorAll('img,video,source').forEach(function(e){var u=e.currentSrc||e.getAttribute('src')||e.getAttribute('data-src');if(u){var k=classify(u,e.type);if(k)post(u,k,'shadow-dom');}});}catch(e){}}var aa=Element.prototype.attachShadow;if(aa)Element.prototype.attachShadow=function(o){var r=aa.call(this,o);scanRoot(r);try{new MutationObserver(function(){scanRoot(r);}).observe(r,{subtree:true,childList:true,attributes:true,attributeFilter:['src','srcset','data-src','data-lazy-src','data-original']});}catch(e){}return r;};document.addEventListener('load',function(e){var f=e.target;if(f&&f.tagName==='IFRAME'){try{var d=f.contentDocument;if(d)scanRoot(d);}catch(x){}}},true);})();";
+    NSString *script = @"(function(){if(window.__zzRDRequestInstalled)return;window.__zzRDRequestInstalled=true;var seen=new Set(),maxSeen=4000;function post(u,kind,source,extra){try{u=new URL(u,location.href).href;}catch(e){return;}if(!/^https?:/i.test(u)||seen.size>=maxSeen||seen.has(kind+'|'+u))return;seen.add(kind+'|'+u);try{var p={action:'resource',url:u,kind:kind,source:source||'dynamic-request'};if(extra)Object.keys(extra).forEach(function(k){p[k]=extra[k];});window.webkit.messageHandlers.rdBridge.postMessage(p);}catch(e){}}function classify(u,ct){ct=(ct||'').toLowerCase();if(ct.indexOf('mpegurl')>=0||ct.indexOf('dash')>=0||/\\.(m3u8|mpd)(?:[?#]|$)/i.test(u))return 'manifest';if(ct.indexOf('video/')===0||/\\.(mp4|mov|m4v|webm|avi|mkv|ts|m2ts|flv|ogv|3gp)(?:[?#]|$)/i.test(u))return 'video';if(ct.indexOf('audio/')===0||/\\.(mp3|m4a|aac|flac|opus|ogg|wav)(?:[?#]|$)/i.test(u))return 'video';if(ct.indexOf('image/')===0||/\\.(jpg|jpeg|png|webp|gif|avif|heic|heif)(?:[?#]|$)/i.test(u))return 'image';return '';};function meta(res,source){var h=res&&res.headers,ct=h&&h.get?h.get('content-type'):'';var k=classify(res.url,ct);if(k)post(res.url,k,source,{mimeType:ct||'',contentLength:h&&h.get?h.get('content-length')||'': '',contentRange:h&&h.get?h.get('content-range')||'':''});}function scanText(t,source){try{if(!t||t.length>3145728)return;var re=/https?:\\/\\/[^\\s\"'<>\\\\]+?\\.(?:m3u8|mpd|mp4|webm|mov|m4v|mkv|ts|flv)(?:\\?[^\\s\"'<>\\\\]*)?/gi;var m;while((m=re.exec(t))){var k=classify(m[0],'');if(k)post(m[0],k,source);}}catch(e){}}function bodyScan(res,source){try{var h=res&&res.headers,ct=h&&h.get?(h.get('content-type')||''):'';if(!/json|text|javascript/i.test(ct))return;var cl=h&&h.get?h.get('content-length'):null;if(cl&&parseInt(cl,10)>3145728)return;if(!res.clone)return;res.clone().text().then(function(t){scanText(t,source+'_body');}).catch(function(e){});}catch(e){}}var of=window.fetch;if(of)window.fetch=function(){var a=arguments;return of.apply(this,a).then(function(res){meta(res,'fetch');bodyScan(res,'fetch');return res;});};var O=XMLHttpRequest.prototype.open,S=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.open=function(m,u){this.__zzURL=u;return O.apply(this,arguments);};XMLHttpRequest.prototype.send=function(){this.addEventListener('load',function(){var u=this.responseURL||this.__zzURL,ct=this.getResponseHeader&&this.getResponseHeader('content-type')||'',k=classify(u,ct);if(k)post(u,k,'xhr',{mimeType:ct||'',contentLength:this.getResponseHeader&&this.getResponseHeader('content-length')||'',contentRange:this.getResponseHeader&&this.getResponseHeader('content-range')||'',status:String(this.status||'')});var rt=this.responseType;if((rt===''||rt==='text')&&/json|text|javascript/i.test(ct||''))scanText(this.responseText||'','xhr_body');});return S.apply(this,arguments);};function perf(){try{performance.getEntriesByType('resource').forEach(function(e){var k=classify(e.name,'');if(k)post(e.name,k,'performance');});}catch(e){}}try{if(window.PerformanceObserver){new PerformanceObserver(function(list){list.getEntries().forEach(function(e){var k=classify(e.name,'');if(k)post(e.name,k,'performance');});}).observe({type:'resource',buffered:true});}}catch(e){}perf();function clue(message){try{window.webkit.messageHandlers.rdBridge.postMessage({action:'clue',kind:'blob',source:'media-source',message:message||'blob/media-source 无法还原原始 URL'});}catch(e){}}try{var cu=URL.createObjectURL;URL.createObjectURL=function(o){var u=cu.apply(this,arguments);if(o&&((window.MediaSource&&o instanceof MediaSource)||String(o).indexOf('MediaSource')>=0))clue('MediaSource/Blob 播放线索已发现，但无法还原原始媒体 URL');return u;};}catch(e){}try{if(window.MediaSource&&MediaSource.prototype.addSourceBuffer){var asb=MediaSource.prototype.addSourceBuffer;MediaSource.prototype.addSourceBuffer=function(m){clue('MediaSource sourceBuffer MIME: '+String(m||''));return asb.apply(this,arguments);};}}catch(e){}function pidOf(v){try{return v&&v.dataset?v.dataset.rdPid||'':'';}catch(e){return '';}}function postP(u,lbl,v){var ex={};if(lbl)ex.size=String(lbl).slice(0,32);var pid=pidOf(v);if(pid)ex.player=pid;post(u,'video','player',ex);}function scanPlayers(){try{if(window.videojs&&window.videojs.players){Object.keys(window.videojs.players).forEach(function(id){try{var p=window.videojs.players[id];if(!p)return;var v=p.el?p.el():null;if(v&&v.tagName&&v.tagName.toLowerCase()!=='video')v=null;var ss=p.currentSources?p.currentSources():null;(ss||[]).forEach(function(s){if(s&&s.src)postP(s.src,s.label,v);});if(v&&v.currentSrc)postP(v.currentSrc,null,v);}catch(e){}});}if(window.jwplayer){try{var jp=window.jwplayer();if(jp&&jp.getPlaylistItem){var it=jp.getPlaylistItem();var c=jp.getContainer?jp.getContainer():null;var v2=c&&c.querySelector?c.querySelector('video'):null;(it&&it.sources||[]).forEach(function(s){if(s&&s.file)postP(s.file,s.label,v2);});}}catch(e){}}var list=[];if(window.Plyr)list.push(window.Plyr);if(window.dplayer)list.push(window.dplayer);if(window.art)list.push(window.art);list.forEach(function(p){var v=p&&p.el?p.el():p&&p.video?p.video:p&&p.media?p.media:p;if(v&&v.currentSrc)postP(v.currentSrc,null,v);if(v&&v.src)postP(v.src,null,v);});}catch(e){}}scanPlayers();['click','scroll','play'].forEach(function(ev){document.addEventListener(ev,function(){setTimeout(function(){perf();scanPlayers();},0);},true);});document.addEventListener('loadeddata',function(e){try{var v=e.target;if(v&&v.tagName==='VIDEO'){if(v.currentSrc)postP(v.currentSrc,null,v);perf();scanPlayers();}}catch(x){}},true);document.addEventListener('canplay',function(e){try{var v=e.target;if(v&&v.tagName==='VIDEO'&&v.currentSrc)postP(v.currentSrc,null,v);}catch(x){}},true);function rdKick(){try{var vs=document.querySelectorAll?document.querySelectorAll('video'):[];for(var i=0;i<vs.length&&i<8;i++)(function(v){try{if(v.readyState>=1)return;var pm=v.muted;v.muted=true;var p=v.play();if(p&&p.then)p.then(function(){setTimeout(function(){try{v.pause();v.muted=pm;}catch(x){}},3000);},function(){});}catch(x){}})(vs[i]);}catch(x){}}setTimeout(rdKick,1500);setTimeout(rdKick,4000);function scanRoot(root){try{root.querySelectorAll&&root.querySelectorAll('img,video,source').forEach(function(e){var u=e.currentSrc||e.getAttribute('src')||e.getAttribute('data-src');if(u){var k=classify(u,e.type);if(k)post(u,k,'shadow-dom');}});}catch(e){}}var aa=Element.prototype.attachShadow;if(aa)Element.prototype.attachShadow=function(o){var r=aa.call(this,o);scanRoot(r);try{new MutationObserver(function(){scanRoot(r);}).observe(r,{subtree:true,childList:true,attributes:true,attributeFilter:['src','srcset','data-src','data-lazy-src','data-original']});}catch(e){}return r;};document.addEventListener('load',function(e){var f=e.target;if(f&&f.tagName==='IFRAME'){try{var d=f.contentDocument;if(d)scanRoot(d);}catch(x){}}},true);})();";
     return script;
 }
 

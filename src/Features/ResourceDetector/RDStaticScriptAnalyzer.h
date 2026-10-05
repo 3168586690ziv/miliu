@@ -12,4 +12,7 @@
                                   scriptURL:(NSURL *)url
                                 sourcePage:(NSURL *)page
                           documentBaseURL:(NSURL *)documentBaseURL;
+/// JSON-LD（application/ld+json）正文里的媒体地址字符串提取：只做 JSON 解析与
+/// URL 形状过滤，不执行任何脚本。用于 VideoObject 的 contentUrl/embedUrl。
++ (NSArray<NSString *> *)mediaURLStringsInJSONText:(NSString *)text;
 @end
