@@ -10,9 +10,9 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
-APP="$REPO/build/觅流.app"
+APP="$REPO/build/Miliu.app"
 BIN="$APP/Contents/MacOS/SevenZZResourceDetector"
-PROCESS_NAME="觅流"
+PROCESS_NAME="Miliu"
 
 if [ "${RD_SKIP_AX:-0}" = "1" ]; then
   echo "SKIP: RD_SKIP_AX=1，跳过辅助功能自动化检查"
@@ -48,7 +48,7 @@ for _ in $(seq 1 40); do
 done
 
 RESULT="$(osascript <<'APPLESCRIPT' 2>&1
-tell application "System Events" to tell process "觅流"
+tell application "System Events" to tell process "Miliu"
   tell window 1
     click (first button whose name contains "下载列表")
     delay 1.2

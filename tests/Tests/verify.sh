@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"; ROOT="$REPO/src"; BUILD="$REPO/build"; RES="$REPO/resources/Resources"
-APP="$BUILD/觅流.app"
+APP="$BUILD/Miliu.app"
 BIN="$APP/Contents/MacOS/SevenZZResourceDetector"
 
 if ! command -v rg >/dev/null 2>&1; then
@@ -85,7 +85,7 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$APP/Contents/Info
 test -s "$APP/Contents/Resources/AppIcon.icns"
 cmp -s "$APP/Contents/Resources/AppIcon.icns" "$RES/AppIcon.icns"
 sips -g pixelWidth -g pixelHeight "$APP/Contents/Resources/AppIcon.icns" >/dev/null
-test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Contents/Info.plist")" = "觅流"
+test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Contents/Info.plist")" = "Miliu"
 codesign --verify --deep --strict "$APP"
 
 # 机器独立性：不允许再引用 SevenZZ 主 App 的偏好套件
@@ -211,7 +211,7 @@ rg -q 'clearSiteSessionHint.stringValue = @"已清除' "$ROOT/App/ResourceDetect
 # ── 追更 v1（WATCH-V1-CONTRACT §1/§3.1/§3.2/§3.4）：助手 bundle 产物与双端接线（只增不改） ──
 # 1) 助手 bundle 产物存在、可执行就位、其中 Info.plist LSUIElement=true（契约 §3.2：
 #    LSUIElement 后台进程），且内嵌 LaunchAgent plist（契约 §3.2 固定路径，SMAppService.agent 注册用）。
-HELPER_APP="$APP/Contents/Helpers/觅流追更助手.app"
+HELPER_APP="$APP/Contents/Helpers/Miliu追更助手.app"
 if ! test -d "$HELPER_APP"; then
   echo "FAIL: helper bundle missing: $HELPER_APP" >&2
   exit 1

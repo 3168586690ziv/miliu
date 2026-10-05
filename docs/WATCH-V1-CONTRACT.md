@@ -32,7 +32,7 @@
 - 分布式通知名：`com.sevenzz.miliu.openAndScan`
 - userInfo：`{ @"pageURL": <规范化地址字符串> }`
 - 助手发送时机：用户点通知「查看」或点菜单未读条目后；发送顺序＝先
-  `NSWorkspace` 打开觅流主 App，再 post 本通知。
+  `NSWorkspace` 打开Miliu主 App，再 post 本通知。
 - App 接收（A 实现）：`applicationDidFinishLaunching` 注册观察者；回调在主线程、
   仅当 `!self.scanning && !self.presentationPreparing` 时生效：置 `urlField` 并调
   `scan:`；generation 保护照旧，迟到/乱序通知不得打断进行中的探测。
@@ -41,7 +41,7 @@
 - 可执行名：`SevenZZWatchAgent`；bundle id：`com.sevenzz.resource-detector.watchlist`
 - Helper-Info.plist：`LSUIElement=true`、`LSMinimumSystemVersion=13.0`、
   `NSPrincipalClass=NSApplication`
-- 最终布局（C 组装）：`觅流.app/Contents/Helpers/觅流追更助手.app/`
+- 最终布局（C 组装）：`Miliu.app/Contents/Helpers/Miliu追更助手.app/`
 - LaunchAgent plist：label `com.sevenzz.resource-detector.watchlist`、`RunAtLoad=true`；放在助手 bundle 的
   `Contents/Library/LaunchAgents/` 内，由助手用 `SMAppService.agent` 注册/注销。
 - 静音时段解析（B）：偏好字符串 `HH:mm-HH:mm`（跨零点合法，如 `00:00-08:00`）；

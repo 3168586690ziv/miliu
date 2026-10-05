@@ -1,5 +1,5 @@
 //
-//  RDWatchAgentMain.m — 「觅流追更助手」进程入口
+//  RDWatchAgentMain.m — 「Miliu追更助手」进程入口
 //
 //  只做 NSApplication 的 accessory 装配（LSUIElement、无 Dock 图标）：
 //    · 设激活策略为 Accessory（配合 Helper-Info.plist 的 LSUIElement=true）

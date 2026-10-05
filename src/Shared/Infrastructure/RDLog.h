@@ -58,7 +58,7 @@ NSString *RDLogFilePath(void);
 /// 启动时调用：超过阈值（默认 8MB）则轮转（ResourceDetector.log → ResourceDetector.log.1）。
 void RDLogRotateIfNeeded(void);
 
-/// 把日志与关键状态打包到桌面「资源探测诊断-时间戳/」目录，返回目录路径；失败返回 nil。
+/// 把日志与关键状态打包到桌面「Miliu诊断-时间戳/」目录，返回目录路径；失败返回 nil。
 /// 导出前会先排空日志队列，保证最近的日志一定在包里。
 /// appVersion 由调用方传入（构建期生成的显示版本）。
 NSString * _Nullable RDLogExportDiagnostics(NSString *appVersion, NSError * _Nullable *error);

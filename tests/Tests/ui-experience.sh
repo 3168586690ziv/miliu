@@ -22,6 +22,7 @@ for dir in "$ROOT" "$ROOT/App" "$ROOT/Features/ResourceDetector" "$ROOT/Features
 xcrun clang -fobjc-arc -g -O1 -fsanitize=address -mmacosx-version-min=13.0 \
   -framework Cocoa -framework WebKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
   -framework QuartzCore -framework ImageIO -framework UniformTypeIdentifiers -framework Security \
+  -lsqlite3 \
   "${INCLUDES[@]}" "${SRC[@]}" -o "$BUILD/UIExperienceTests" >"$BUILD/compile.log" 2>&1
 if grep -E "error:" "$BUILD/compile.log" >/dev/null; then cat "$BUILD/compile.log"; exit 1; fi
 ASAN_OPTIONS=detect_leaks=0 "$BUILD/UIExperienceTests" "$@"

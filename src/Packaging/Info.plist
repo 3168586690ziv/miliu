@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>zh_CN</string>
 	<key>CFBundleDisplayName</key>
-	<string>觅流</string>
+	<string>Miliu</string>
 	<key>CFBundleExecutable</key>
 	<string>SevenZZResourceDetector</string>
 	<key>CFBundleIconFile</key>
@@ -15,13 +15,13 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>觅流</string>
+	<string>Miliu</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>v29913.27</string>
+	<string>v29913.28</string>
 	<key>CFBundleVersion</key>
-	<string>v29913.27</string>
+	<string>v29913.28</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>LSMinimumSystemVersion</key>

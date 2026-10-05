@@ -28,7 +28,7 @@ for arg in "$@"; do
     *) [ -z "$OUT" ] || { echo "FAIL: 多余参数：$arg" >&2; exit 2; }; OUT="$arg" ;;
   esac
 done
-OUT="${OUT:-$ROOT/build/觅流.app}"; BIN="$OUT/Contents/MacOS/SevenZZResourceDetector"
+OUT="${OUT:-$ROOT/build/Miliu.app}"; BIN="$OUT/Contents/MacOS/SevenZZResourceDetector"
 
 [ -f "$VERSION_JSON" ] || { echo "FAIL: 缺少 $VERSION_JSON（修复轮数唯一来源）" >&2; exit 1; }
 
@@ -111,7 +111,7 @@ for HELPER_FILE in "$HELPER_SRC_DIR/RDWatchAgentMain.m" "$HELPER_SRC_DIR/RDWatch
                    "$HELPER_SRC_DIR/LaunchAgent/com.sevenzz.resource-detector.watchlist.plist"; do
   [ -f "$HELPER_FILE" ] || { echo "FAIL: 缺少追更助手源文件 $HELPER_FILE（契约 §2：助手侧产物未就位）" >&2; exit 1; }
 done
-HELPER_OUT="$OUT/Contents/Helpers/觅流追更助手.app"
+HELPER_OUT="$OUT/Contents/Helpers/Miliu追更助手.app"
 HELPER_BIN="$HELPER_OUT/Contents/MacOS/SevenZZWatchAgent"
 mkdir -p "$HELPER_OUT/Contents/MacOS" "$HELPER_OUT/Contents/Resources" "$HELPER_OUT/Contents/Library/LaunchAgents"
 # 编译清单：助手入口/控制器 + 探测引擎。探测引擎按契约 §2 参照主 bundle 的 find 写法把

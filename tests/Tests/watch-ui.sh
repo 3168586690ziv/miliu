@@ -221,6 +221,7 @@ for dir in "$ROOT" "$ROOT/App" "$ROOT/Features/ResourceDetector" "$ROOT/Features
 xcrun clang -fobjc-arc -g -O1 -fsanitize=address -mmacosx-version-min=13.0 \
   -framework Cocoa -framework WebKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
   -framework QuartzCore -framework ImageIO -framework UniformTypeIdentifiers -framework Security \
+  -lsqlite3 \
   "${INCLUDES[@]}" "${SRC[@]}" -o "$OUT/WatchUIProbe" >"$OUT/compile.log" 2>&1 \
   || { cat "$OUT/compile.log"; echo "FAIL: 探针编译失败"; exit 1; }
 ASAN_OPTIONS=detect_leaks=0 "$OUT/WatchUIProbe"

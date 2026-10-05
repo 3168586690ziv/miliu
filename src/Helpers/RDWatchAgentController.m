@@ -1,10 +1,10 @@
 //
-//  RDWatchAgentController.m — 「觅流追更助手」全部运行逻辑
+//  RDWatchAgentController.m — 「Miliu追更助手」全部运行逻辑
 //
 //  契约依据：Docs/WATCH-V1-CONTRACT.md
 //    §1  fetchedKeys 口径：结果媒体中 resourceKind 为视频或清单（不含图片）的
 //        [DetectedMedia dedupKeyForURL:mediaURL]，去重、保持发现顺序。
-//    §3.1 唤起顺序：先 NSWorkspace 打开觅流主 App，再 post 分布式通知
+//    §3.1 唤起顺序：先 NSWorkspace 打开Miliu主 App，再 post 分布式通知
 //        com.sevenzz.miliu.openAndScan，userInfo { @"pageURL": ... }（原样传递）。
 //    §3.2 bundle id com.sevenzz.resource-detector.watchlist；可执行名
 //        SevenZZWatchAgent；静音时段 "HH:mm-HH:mm"（跨零点合法）/ "off"，
@@ -20,7 +20,7 @@
 //  新增>0 且通知开且非静音 → UN 通知（identifier=条目 identifier，防重复弹）。
 //
 //  通知点按语义（二选一，已选前者并在交回说明）：didReceive 收到点按的瞬间先
-//  markPendingRead，再按 §3.1 顺序唤起觅流；菜单未读区每次打开都从 store 重建，
+//  markPendingRead，再按 §3.1 顺序唤起Miliu；菜单未读区每次打开都从 store 重建，
 //  与该选择保持一致。
 //
 //  偏好读取：主 App 的 PreferencesStore.shared 用其自身 standardUserDefaults
@@ -187,7 +187,7 @@ static NSArray<NSString *> *RDFetchedKeysFromMedia(NSArray<DetectedMedia *> *med
 - (void)setUpStatusItem {
     self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
     self.statusItem.button.title = @"追更";
-    self.statusItem.button.toolTip = @"觅流追更助手";
+    self.statusItem.button.toolTip = @"Miliu追更助手";
     NSMenu *menu = [[NSMenu alloc] init];
     menu.delegate = self;          // 每次打开前 menuNeedsUpdate 重建，未读区/状态行总与 store 一致
     menu.autoenablesItems = NO;
@@ -223,7 +223,7 @@ static NSArray<NSString *> *RDFetchedKeysFromMedia(NSArray<DetectedMedia *> *med
 
     [self.menu addItem:NSMenuItem.separatorItem];
 
-    // ── 未读条目区：条目标题 + 新增 N 个资源；点按 = 标已读 + 唤起觅流（§3.1）──
+    // ── 未读条目区：条目标题 + 新增 N 个资源；点按 = 标已读 + 唤起Miliu（§3.1）──
     NSInteger unreadShown = 0;
     for (RDWatchlistEntry *entry in entries) {
         NSUInteger count = entry.pendingNewKeys.count;
@@ -255,7 +255,7 @@ static NSArray<NSString *> *RDFetchedKeysFromMedia(NSArray<DetectedMedia *> *med
     NSMenuItem *pause = [self.menu addItemWithTitle:pauseTitle action:@selector(togglePaused:) keyEquivalent:@""];
     pause.target = self;
 
-    // ── 管理观察列表…（唤起觅流）──
+    // ── 管理观察列表…（唤起Miliu）──
     NSMenuItem *manage = [self.menu addItemWithTitle:@"管理观察列表…" action:@selector(openManagerInMainApp:) keyEquivalent:@""];
     manage.target = self;
 
@@ -474,13 +474,13 @@ static NSArray<NSString *> *RDFetchedKeysFromMedia(NSArray<DetectedMedia *> *med
     [[NSApplication sharedApplication] terminate:nil];
 }
 
-#pragma mark - 唤起觅流（契约 §3.1：先打开主 App，再 post openAndScan）
+#pragma mark - 唤起Miliu（契约 §3.1：先打开主 App，再 post openAndScan）
 
 - (nullable NSURL *)mainApplicationURL {
-    // 首选：助手嵌在 觅流.app/Contents/Helpers/觅流追更助手.app 内，向上三级即主 App
+    // 首选：助手嵌在 Miliu.app/Contents/Helpers/Miliu追更助手.app 内，向上三级即主 App
     NSURL *mainURL = [[[NSBundle mainBundle] bundleURL] URLByDeletingLastPathComponent]; // Helpers/
     mainURL = [mainURL URLByDeletingLastPathComponent];  // Contents/
-    mainURL = [mainURL URLByDeletingLastPathComponent];  // 觅流.app
+    mainURL = [mainURL URLByDeletingLastPathComponent];  // Miliu.app
     BOOL isDirectory = NO;
     if ([mainURL.pathExtension isEqualToString:@"app"] &&
         [[NSFileManager defaultManager] fileExistsAtPath:mainURL.path isDirectory:&isDirectory] && isDirectory) {
@@ -494,7 +494,7 @@ static NSArray<NSString *> *RDFetchedKeysFromMedia(NSArray<DetectedMedia *> *med
 - (void)launchMainAppThenPostOpenAndScanWithURLString:(nullable NSString *)pageURLString {
     NSURL *appURL = [self mainApplicationURL];
     if (!appURL) {
-        RDLogWriteLevel(RDLogLevelError, @"app", @"追更助手：找不到觅流主 App，无法唤起（%@）", pageURLString ?: @"-");
+        RDLogWriteLevel(RDLogLevelError, @"app", @"追更助手：找不到Miliu主 App，无法唤起（%@）", pageURLString ?: @"-");
         return;
     }
     NSWorkspaceOpenConfiguration *configuration = [NSWorkspaceOpenConfiguration configuration];
@@ -587,7 +587,7 @@ static NSArray<NSString *> *RDFetchedKeysFromMedia(NSArray<DetectedMedia *> *med
 // "plist content is invalid"（最小 plist 亦然；其为顶层主 App 设计）。
 // 改用经典机制：助手运行时把 LaunchAgent plist 写到用户域，Program 指向自身
 // 可执行的绝对路径，launchctl bootstrap/bootout 启停。App 固定安装于
-// /Applications/觅流.app，路径稳定；重装同路径无需重写。
+// /Applications/Miliu.app，路径稳定；重装同路径无需重写。
 - (NSURL *)userAgentPlistURL {
     NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:
         @"Library/LaunchAgents/com.sevenzz.resource-detector.watchlist.plist"];
@@ -763,7 +763,7 @@ static NSArray<NSString *> *RDFetchedKeysFromMedia(NSArray<DetectedMedia *> *med
     NSString *identifier = response.notification.request.identifier;
     dispatch_async(dispatch_get_main_queue(), ^{
         // 已选语义：点按瞬间先标已读（菜单未读区随 store 重建，保持一致），再按
-        // §3.1 顺序唤起觅流：先打开主 App，再 post openAndScan（pageURL 原样）。
+        // §3.1 顺序唤起Miliu：先打开主 App，再 post openAndScan（pageURL 原样）。
         RDWatchlistEntry *entry = [self entryWithIdentifier:identifier];
         if (entry) [self openEntryInMainApp:entry markRead:YES];
         completionHandler();

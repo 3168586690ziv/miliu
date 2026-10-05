@@ -1,8 +1,8 @@
 //
 //  RDWatchlistStore.h — 追更观察库（App 与常驻助手共享的唯一数据契约）
 //
-//  v1（2026-10-03 小肥鱼地基）：纯 Foundation、无 UI 依赖 —— 觅流主程序与
-//  「觅流追更助手」（嵌入主 bundle 的 LSUIElement 后台进程）都链接本文件，
+//  v1（2026-10-03 小肥鱼地基）：纯 Foundation、无 UI 依赖 —— Miliu主程序与
+//  「Miliu追更助手」（嵌入主 bundle 的 LSUIElement 后台进程）都链接本文件，
 //  通过同一份 watchlist.json 交换观察列表 / 资源快照 / 未读计数。
 //  禁止任何一侧另建第二套存储或字段名。
 //

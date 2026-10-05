@@ -16,7 +16,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 // ── 跨进程契约常量（字面值定死于契约，勿改）──
-/// 助手 → App：唤醒觅流并自动探测目标页（userInfo {pageURL: 地址}）。App 侧在
+/// 助手 → App：唤醒Miliu并自动探测目标页（userInfo {pageURL: 地址}）。App 侧在
 /// applicationDidFinishLaunching 注册观察者（接收端在 ResourceDetectorApp.m）。
 extern NSString *const RDWatchNotificationOpenAndScan;
 /// App → 助手：立即全部重探（工具栏「全部重探」与行内「立即重探」都发它，助手监听同名通知）。

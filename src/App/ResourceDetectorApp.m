@@ -482,7 +482,7 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
                                          CGEventMaskBit(kCGEventKeyDown),
                                          RDSpaceTapCallback, (__bridge void *)self);
     if (!tap) {
-        NSLog(@"[hotkey] ⌘空格 事件口创建失败：需要在 系统设置→隐私与安全性→辅助功能 中允许「觅流」");
+        NSLog(@"[hotkey] ⌘空格 事件口创建失败：需要在 系统设置→隐私与安全性→辅助功能 中允许「Miliu」");
         // 只在用户明确想要 ⌘空格 时才引导（应用内 ⌘P 无需任何权限）。
         // 弹过一次或用户点过"以后再说"就永久记住，绝不在每次启动时打扰。
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -492,7 +492,7 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
             alert.messageText = @"⌘空格 暂停下载需要一次系统授权";
             alert.informativeText = @"APP 内直接按 ⌘P 即可暂停/继续下载，无需任何权限。"
                                      "若你更想用 ⌘空格（系统级），请在「系统设置 → 隐私与安全性 → 辅助功能」"
-                                     "中打开「觅流」并重启 APP；不想授权就忽略本提示，下次不再出现。";
+                                     "中打开「Miliu」并重启 APP；不想授权就忽略本提示，下次不再出现。";
             [alert addButtonWithTitle:@"打开设置"];
             [alert addButtonWithTitle:@"用 ⌘P 就好"];
             if ([alert runModal] == NSAlertFirstButtonReturn) {
@@ -554,10 +554,10 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     NSMenuItem *appItem = [[NSMenuItem alloc] init];
     [mainMenu addItem:appItem];
     NSMenu *appMenu = [[NSMenu alloc] init];
-    [appMenu addItemWithTitle:@"关于 觅流" action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+    [appMenu addItemWithTitle:@"关于 Miliu" action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
     [appMenu addItem:[NSMenuItem separatorItem]];
-    [appMenu addItemWithTitle:@"隐藏 觅流" action:@selector(hide:) keyEquivalent:@"h"];
-    [appMenu addItemWithTitle:@"退出 觅流" action:@selector(terminate:) keyEquivalent:@"q"];
+    [appMenu addItemWithTitle:@"隐藏 Miliu" action:@selector(hide:) keyEquivalent:@"h"];
+    [appMenu addItemWithTitle:@"退出 Miliu" action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = appMenu;
 
     NSMenuItem *editItem = [[NSMenuItem alloc] initWithTitle:@"编辑" action:nil keyEquivalent:@""];
@@ -612,7 +612,7 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
 
     NSRect frame = NSMakeRect(0, 0, 980, 700);
     self.window = [[RDSlashWindow alloc] initWithContentRect:frame styleMask:(NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskResizable) backing:NSBackingStoreBuffered defer:NO];
-    self.window.title = @"觅流";
+    self.window.title = @"Miliu";
     // 暖纸背景 #FAF8F4：纸感浅色，眩光低于纯白，纯黑斜杠如墨水落于纸上
     NSColor *paperColor = [NSColor colorWithSRGBRed:0.980 green:0.973 blue:0.957 alpha:1.0];
     self.window.backgroundColor = paperColor;
@@ -793,7 +793,7 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
 
     [self installSpaceHotkeyTap]; // ⌘空格 暂停/继续（前台接管，需辅助功能授权）
 
-    // ── 追更 v1（契约 WATCH-V1 §3.1）：助手唤醒 → 打开觅流并自动探测目标页 ──
+    // ── 追更 v1（契约 WATCH-V1 §3.1）：助手唤醒 → 打开Miliu并自动探测目标页 ──
     // 回调在主线程、仅当空闲（!scanning && !presentationPreparing）时生效；
     // generation 保护照旧：scan: 内部自增 scanGeneration 作废旧回调，
     // 迟到/乱序通知不会打断进行中的探测，进行中的探测也不被本通知打断。

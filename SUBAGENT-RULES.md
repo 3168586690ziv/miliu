@@ -1,4 +1,4 @@
-# SUBAGENT-RULES.md — 资源探测：子智能体委派规则（强制）
+# SUBAGENT-RULES.md — Miliu：子智能体委派规则（强制）
 
 > 本文件属于**项目本身**，与根目录 `AGENTS.md` 同等效力，是强制规则而非建议。
 > 任何 AI（无论何种模型、任务、上下文）在**派发子智能体之前**，必须先读完本文件并遵守。
@@ -80,7 +80,7 @@
    见 `AGENTS.md` 第 2 节；任何 AI 都无权递增。
 3. **不得改 `AGENTS.md` 与 `SUBAGENT-RULES.md`**（需用户明确同意）。
 4. **不得动 `resources/Resources/AppIcon.icns`**（用户的 Z 字图标，有 SHA-256 基线）。
-5. **不得安装或改动 `/Applications/资源探测.app`**，不得强制终止用户正在运行的实例，
+5. **不得安装或改动 `/Applications/Miliu.app`**，不得强制终止用户正在运行的实例，
    不得删除下载记录、不得修改用户图标。
 6. **不得执行 git 写操作**：`commit` / `push` / `checkout` / `branch` / `reset` / `tag`
    一律禁止；工作树保持未提交状态，由用户处理版本管理。

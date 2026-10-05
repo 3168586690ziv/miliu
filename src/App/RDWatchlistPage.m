@@ -2,7 +2,7 @@
 //  RDWatchlistPage.m — 追更页实现（App 侧；数据层 RDWatchlistStore 禁改，直接使用）
 //
 //  结构基准＝已定稿预览稿 ③（1:1）：工具栏（＋添加当前页 / ↻全部重探 / 摘要）+
-//  列表头 + 行高 58 的观察列表 + 底部设置卡四行。配色沿用觅流暖纸浅色主题
+//  列表头 + 行高 58 的观察列表 + 底部设置卡四行。配色沿用Miliu暖纸浅色主题
 // （App 在 applicationDidFinishLaunching 固定 Aqua 外观）。
 //
 //  跨进程交互（契约 WATCH-V1 §3.1/§3.2/§3.5，字面值勿改）：
@@ -645,7 +645,7 @@ static NSRelativeDateTimeFormatter *RDWatchRelativeFormatter(void) {
     self.autoLaunchSwitch.identifier = @"RDWatchAutoLaunchSwitch";
     self.autoLaunchSwitch.target = self;
     self.autoLaunchSwitch.action = @selector(watchAutoLaunchChanged:);
-    [self.settingsCard addRowWithTitle:@"开机自启助手" hint:@"登录时后台常驻，无需打开觅流" control:self.autoLaunchSwitch];
+    [self.settingsCard addRowWithTitle:@"开机自启助手" hint:@"登录时后台常驻，无需打开Miliu" control:self.autoLaunchSwitch];
 
     self.notifySwitch = [[NSSwitch alloc] initWithFrame:NSMakeRect(0, 0, 40, 24)];
     self.notifySwitch.identifier = @"RDWatchNotifySwitch";
@@ -841,7 +841,7 @@ static NSRelativeDateTimeFormatter *RDWatchRelativeFormatter(void) {
 // 拉起内嵌助手（同 bundle 内相对定位；失败时按 bundle id 兜底）
 - (void)launchWatchAgent {
     NSURL *helperURL = [[[NSBundle mainBundle] bundleURL]
-        URLByAppendingPathComponent:@"Contents/Helpers/觅流追更助手.app"];
+        URLByAppendingPathComponent:@"Contents/Helpers/Miliu追更助手.app"];
     BOOL dir = NO;
     if (![[NSFileManager defaultManager] fileExistsAtPath:helperURL.path isDirectory:&dir] || !dir) {
         helperURL = [[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:RDWatchAgentBundleIdentifier];

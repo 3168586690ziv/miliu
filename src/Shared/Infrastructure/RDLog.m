@@ -661,7 +661,7 @@ NSString * _Nullable RDLogExportDiagnostics(NSString *appVersion, NSError * _Nul
         exportRoot = [NSHomeDirectory() stringByAppendingPathComponent:@"Desktop"];
     }
     NSString *dir = [exportRoot stringByAppendingPathComponent:
-                     [NSString stringWithFormat:@"资源探测诊断-%@", stamp]];
+                     [NSString stringWithFormat:@"Miliu诊断-%@", stamp]];
     NSError *mkErr = nil;
     if (![[NSFileManager defaultManager] createDirectoryAtPath:dir
                                    withIntermediateDirectories:YES attributes:nil error:&mkErr]) {

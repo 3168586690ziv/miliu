@@ -61,6 +61,7 @@ for dir in "$ROOT" "$ROOT/App" "$ROOT/Features/ResourceDetector" "$ROOT/Features
 xcrun clang -fobjc-arc -O1 -mmacosx-version-min=13.0 \
   -framework Cocoa -framework WebKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
   -framework QuartzCore -framework ImageIO -framework UniformTypeIdentifiers -framework Security \
+  -lsqlite3 \
   "${INCLUDES[@]}" "${SRC[@]}" -o "$OUT/DownloadE2ETests"
 
 # ---------- 3. 行级时间轴 ----------

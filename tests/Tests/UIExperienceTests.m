@@ -181,6 +181,17 @@ static NSTextField *RatioLabelIn(NSView *page, NSString *title) {
     return nil;
 }
 
+// 说明文字为动态内容时按前缀定位（第 15 轮起「下载位置」行说明显示实际生效路径，
+// 不再是固定文案「选择资源下载后保存的文件夹」）。
+static NSTextField *RatioLabelWithPrefix(NSView *page, NSString *prefix) {
+    for (NSView *v in page.subviews) {
+        if ([v isKindOfClass:[NSTextField class]] && [[(NSTextField *)v stringValue] hasPrefix:prefix]) return (NSTextField *)v;
+        NSTextField *nested = RatioLabelWithPrefix(v, prefix);
+        if (nested) return nested;
+    }
+    return nil;
+}
+
 static void TestSettingsPageStable(void) {
     ResourceDetectorAppDelegate *app = MakeLaunchedApp();
     NSView *page = app.settingsPage;
@@ -211,7 +222,7 @@ static void TestSettingsPageStable(void) {
     NSTextField *ratioLabel = RatioLabelIn(page, @"左右栏比例");
     NSTextField *ratioHint = RatioLabelIn(page, @"调整资源列表与详情区域的宽度比例");
     NSTextField *locLabel = RatioLabelIn(page, @"下载位置");
-    NSTextField *locHint = RatioLabelIn(page, @"选择资源下载后保存的文件夹");
+    NSTextField *locHint = RatioLabelWithPrefix(page, @"当前下载位置：");
     Check(ratioLabel && locLabel && ratioHint && locHint, @"UIX-5 比例行与下载位置行控件齐备");
     if (ratioLabel && locLabel && ratioHint && locHint) {
         Check(!RectsOverlap(ratioLabel.frame, locLabel.frame), @"UIX-6 比例标题与下载位置标题不重叠");

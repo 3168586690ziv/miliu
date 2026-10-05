@@ -1,10 +1,10 @@
 #!/bin/bash
-# build/ui-probe/accept_all.sh — 黑盒验收 ③④⑤⑥⑦ 一体化（用 build.sh 产出的 build/觅流.app）
+# build/ui-probe/accept_all.sh — 黑盒验收 ③④⑤⑥⑦ 一体化（用 build.sh 产出的 build/Miliu.app）
 # 用法：bash build/ui-probe/accept_all.sh            # 全部
 #       bash build/ui-probe/accept_all.sh 4         # 只跑某一项
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-APP="$ROOT/build/觅流.app"
+APP="$ROOT/build/Miliu.app"
 AX="$ROOT/build/ui-probe/AXProbe"
 TYPE="$ROOT/build/ui-probe/UIType"
 DRIVE="$ROOT/build/ui-probe/UIDrive"

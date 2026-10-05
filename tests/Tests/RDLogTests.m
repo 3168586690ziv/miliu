@@ -372,7 +372,7 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
                           @{@"RD_LOG_PATH": logPath, @"RD_LOG_EXPORT_DIR": exportDir});
         NSString *dirName = nil;
         for (NSString *e in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:exportDir error:nil]) {
-            if ([e hasPrefix:@"资源探测诊断-"]) dirName = e;
+            if ([e hasPrefix:@"Miliu诊断-"]) dirName = e;
         }
         NSUInteger sourceLines = Lines(logPath).count;
         NSUInteger exportedLines = 0;
@@ -414,10 +414,10 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
                             @"TZ": @"Asia/Bangkok", @"LANG": @"th_TH.UTF-8"});
         NSString *dirName = nil;
         for (NSString *e in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:exportDir error:nil]) {
-            if ([e hasPrefix:@"资源探测诊断-"]) dirName = e;
+            if ([e hasPrefix:@"Miliu诊断-"]) dirName = e;
         }
         NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:
-                                   @"^资源探测诊断-[0-9]{8}-[0-9]{6}$" options:0 error:nil];
+                                   @"^Miliu诊断-[0-9]{8}-[0-9]{6}$" options:0 error:nil];
         BOOL nameOK = dirName && [re numberOfMatchesInString:dirName options:0
                                                        range:NSMakeRange(0, dirName.length)] == 1;
         Check(rc == 0 && nameOK,

@@ -2,7 +2,7 @@
 # build/ui-probe/accept56.sh — ⑤ 长标题详情文本比对 + ⑥ 下载提交状态（黑盒，真实 App）
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-APP="$ROOT/build/觅流.app"
+APP="$ROOT/build/Miliu.app"
 AX="$ROOT/build/ui-probe/AXProbe"
 DRIVE="$ROOT/build/ui-probe/UIDrive"
 AUD="python3 $ROOT/build/ui-probe/ui_audit.py"
