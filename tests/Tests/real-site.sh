@@ -62,7 +62,7 @@ for dir in "$ROOT" "$ROOT/App" "$ROOT/Features/ResourceDetector" "$ROOT/Features
 
 xcrun clang -fobjc-arc -g -O1 -mmacosx-version-min=13.0 \
   -framework Cocoa -framework WebKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
-  -framework QuartzCore -framework ImageIO -framework UniformTypeIdentifiers -framework Security \
+  -framework QuartzCore -framework ImageIO -framework UniformTypeIdentifiers -framework Security -lsqlite3 \
   "${INCLUDES[@]}" "${SRC[@]}" -o "$OUT/RealSiteProbe" >"$OUT/compile.log" 2>&1
 if grep -E "error:" "$OUT/compile.log" >/dev/null; then cat "$OUT/compile.log"; exit 1; fi
 BAD=$(grep -E "warning:" "$OUT/compile.log" | grep -v "nullability" | grep -v "arc-retain-cycles" || true)

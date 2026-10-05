@@ -45,6 +45,14 @@ typedef NSInteger (^RDCurlHopRunnerBlock)(NSArray<NSString *> *argv,
                                           NSString *headerFile,
                                           NSString *bodyFile);
 
+/// 系统代理 → curl 参数（纯函数，供测试）。proxySettings 为 CFNetworkCopySystemProxySettings()
+/// 同构字典：按目标协议优先取 HTTP/HTTPS 代理，未配置时回退系统 SOCKS（socks5h，域名解析
+/// 交代理执行，避免本机解析被污染）；目标 host 命中系统例外列表或简单主机名排除时不代理。
+/// 测试逃生口与下载主会话同一环境变量：RD_SESSION_PROXY_OVERRIDE=direct 强制返回空。
+/// PAC 代理不处理（与旧行为一致，不加参数）。
+NSArray<NSString *> *RDCurlProxyArgumentsForURL(NSURL *url,
+                                                NSDictionary<NSString *, id> *proxySettings);
+
 @interface RDCurlHopper : NSObject
 
 @property (nonatomic, copy) NSString *curlPath;          ///< 默认 /usr/bin/curl

@@ -6,12 +6,88 @@
 #import "DNSResolver.h"
 #import "RDLog.h"
 #import "URLPolicy.h"
+#import <CFNetwork/CFNetwork.h>
 
 NSString * const RDCurlHopErrorDomain = @"RDCurlHop";
 
 // 跳数上限与原生传输一致（RDMetadataTransfer 的 ++_redirects > 5）。
 static const NSUInteger kRDCurlHopMaxHops = 5;
 static const NSTimeInterval kRDCurlHopMinHopTimeout = 1.0;
+
+// 系统代理例外列表（kCFNetworkProxiesExceptionsList）简版匹配：精确 host、
+// ".foo.com" 后缀（含裸域 foo.com）、单星号全排除。仅用于决定是否传 --proxy，
+// 不改变 URLPolicy 安全校验。
+static BOOL RDHostMatchesProxyException(NSString *host, NSArray *exceptions) {
+    if (host.length == 0 || exceptions.count == 0) return NO;
+    NSString *h = host.lowercaseString;
+    for (id raw in exceptions) {
+        if (![raw isKindOfClass:[NSString class]]) continue;
+        NSString *p = [((NSString *)raw).lowercaseString
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (p.length == 0) continue;
+        if ([p isEqualToString:@"*"]) return YES;
+        if ([p hasPrefix:@"*."]) {
+            NSString *suffix = [p substringFromIndex:1];          // ".foo.com"
+            NSString *bare = [p substringFromIndex:2];            // "foo.com"
+            if ((h.length > suffix.length && [h hasSuffix:suffix]) || [h isEqualToString:bare]) return YES;
+            continue;
+        }
+        if ([p isEqualToString:h]) return YES;
+    }
+    return NO;
+}
+
+NSArray<NSString *> *RDCurlProxyArgumentsForURL(NSURL *url, NSDictionary<NSString *, id> *proxySettings) {
+    // 与下载主会话同一测试逃生口：直连覆盖时 curl 也不加代理（对端校验才能对齐）。
+    if ([NSProcessInfo.processInfo.environment[@"RD_SESSION_PROXY_OVERRIDE"] isEqualToString:@"direct"]) return @[];
+    NSString *scheme = url.scheme.lowercaseString;
+    if (![scheme isEqualToString:@"https"] && ![scheme isEqualToString:@"http"]) return @[];
+    NSString *host = url.host;
+    if (host.length == 0 || proxySettings.count == 0) return @[];
+
+    if ([proxySettings[(__bridge NSString *)kCFNetworkProxiesExcludeSimpleHostnames] boolValue]
+        && ![host containsString:@"."]) return @[];
+    id exceptions = proxySettings[(__bridge NSString *)kCFNetworkProxiesExceptionsList];
+    if ([exceptions isKindOfClass:[NSArray class]] && RDHostMatchesProxyException(host, exceptions)) return @[];
+
+    BOOL isHTTPS = [scheme isEqualToString:@"https"];
+    NSString *proxyHost = nil;
+    NSString *proxyScheme = nil;
+    NSInteger proxyPort = 0;
+    NSString *enabledKey = isHTTPS ? (__bridge NSString *)kCFNetworkProxiesHTTPSEnable
+                                   : (__bridge NSString *)kCFNetworkProxiesHTTPEnable;
+    NSString *hostKey = isHTTPS ? (__bridge NSString *)kCFNetworkProxiesHTTPSProxy
+                                : (__bridge NSString *)kCFNetworkProxiesHTTPProxy;
+    NSString *portKey = isHTTPS ? (__bridge NSString *)kCFNetworkProxiesHTTPSPort
+                                : (__bridge NSString *)kCFNetworkProxiesHTTPPort;
+    id enabled = proxySettings[enabledKey];
+    if ([enabled respondsToSelector:@selector(boolValue)] && [enabled boolValue]) {
+        id h = proxySettings[hostKey];
+        id p = proxySettings[portKey];
+        if ([h isKindOfClass:[NSString class]] && ((NSString *)h).length > 0
+            && [p respondsToSelector:@selector(integerValue)]) {
+            proxyHost = h;
+            proxyPort = [p integerValue];
+            proxyScheme = @"http";   // HTTP 代理对 https 目标自动 CONNECT，对 http 目标直接转发
+        }
+    }
+    if (proxyHost == nil) {
+        // 回退系统级 SOCKS：socks5h 让代理解析域名，本机 DNS 被污染/无路由时仍可达。
+        id socksEnabled = proxySettings[(__bridge NSString *)kCFNetworkProxiesSOCKSEnable];
+        if ([socksEnabled respondsToSelector:@selector(boolValue)] && [socksEnabled boolValue]) {
+            id h = proxySettings[(__bridge NSString *)kCFNetworkProxiesSOCKSProxy];
+            id p = proxySettings[(__bridge NSString *)kCFNetworkProxiesSOCKSPort];
+            if ([h isKindOfClass:[NSString class]] && ((NSString *)h).length > 0
+                && [p respondsToSelector:@selector(integerValue)]) {
+                proxyHost = h;
+                proxyPort = [p integerValue];
+                proxyScheme = @"socks5h";
+            }
+        }
+    }
+    if (proxyHost.length == 0 || proxyPort <= 0 || proxyPort > 65535) return @[];
+    return @[@"--proxy", [NSString stringWithFormat:@"%@://%@:%ld", proxyScheme, proxyHost, (long)proxyPort]];
+}
 
 static NSError *RDCurlHopMakeError(RDCurlHopError code) {
     return [NSError errorWithDomain:RDCurlHopErrorDomain code:code userInfo:nil];
@@ -89,6 +165,9 @@ static NSError *RDCurlHopMakeError(RDCurlHopError code) {
         [argv addObjectsFromArray:@[@"--max-filesize", [NSString stringWithFormat:@"%lu", (unsigned long)budget]]];
     }
     if ([method isEqual:@"HEAD"]) [argv addObject:@"-I"];
+    // curl 不读 macOS 系统代理设置：代理网络环境下这条回退路径必须显式传 --proxy，
+    // 否则被墙目标在本回退永远不可达（原生 NSURLSession 路径默认跟随系统代理）。
+    [argv addObjectsFromArray:RDCurlProxyArgumentsForURL(url, CFBridgingRelease(CFNetworkCopySystemProxySettings()))];
     for (NSString *key in headers) {
         NSString *value = headers[key];
         if (![value isKindOfClass:[NSString class]] || !value.length) continue;

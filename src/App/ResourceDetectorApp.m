@@ -11,6 +11,9 @@
 #import "PreferencesStore.h"
 #import "PerformancePolicy.h"
 #import "ResourceResultRowView.h"
+#import "RDInAppBrowserWindow.h"
+#import "RDBrowserCookieImporter.h"
+#import "RDCdpCookieImporter.h"
 #import "../Shared/UI/RDByteCountFormatting.h"
 #import "RDMetadataService.h"
 #import "RDQualityTier.h"
@@ -230,6 +233,16 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 @property NSSegmentedControl *settingsProbeModeControl;
 @property NSButton *clearDownloadRecordsButton;
 @property NSButton *clearSiteSessionButton;   // 设置页「清除网站会话」（第 13 轮新增）
+@property NSButton *openInAppBrowserButton;   // 设置页「应用内浏览器」：与探测共用登录态的网页窗口（第 21 轮新增）
+// 该行说明文字兼作会话状态显示：进设置页/关浏览器窗口/清除会话后就地刷新，
+// 列出存有 Cookie 的站点**域名**（不读取、不显示任何 Cookie 值）（第 23 轮新增）。
+@property (nonatomic, weak) NSTextField *inAppBrowserHint;
+// 「导入浏览器登录态」行（第 25 轮）：弹出列表选来源（浏览器+profile），点「导入」
+// 才触发 Keychain 读取（系统授权框由用户决定）；Cookie 明文只在内存，不落日志。
+@property NSPopUpButton *importSourcePopup;
+@property NSButton *importBrowserCookieButton;
+@property (nonatomic, weak) NSTextField *importBrowserCookieHint;
+@property (nonatomic, copy) NSArray<RDCdpCookieSource *> *importSources;
 // 清除结果就地反馈（2026-09-19 用户反馈：设置页里点「清除」后看不到任何反馈，不知道是否成功）。
 // 两行各自的说明文字兼作结果反馈：进行中 / 已清除都写在这里，设置页内直接可见。
 @property (nonatomic, weak) NSTextField *clearDownloadRecordsHint;
@@ -2134,7 +2147,52 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     self.settingsProbeModeControl.selectedSegment = (self.mode == ZZResourceDiscoveryModeSite) ? 1 : 0;
     // 下载位置的实际生效目录可能变化（U 盘插拔、自定义目录被删）：每次进设置页都刷新
     [self refreshDownloadLocationHint];
+    // 应用内浏览器行的会话站点显示：进页刷新；设置页可见期间关浏览器窗口也实时刷新
+    [self refreshInAppBrowserSessionHint];
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:RDInAppBrowserWindowDidCloseNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(refreshInAppBrowserSessionHint)
+                                                 name:RDInAppBrowserWindowDidCloseNotification
+                                               object:nil];
     [self.window makeFirstResponder:nil];
+}
+
+// 应用内浏览器行的会话状态显示（第 23 轮）：用 Apple 公开 API 枚举 Cookie 数据记录
+// 的**站点域名**（WKWebsiteDataRecord.displayName），让主人知道哪些站点已有登录态；
+// 只显示域名，不读取、不显示、不导出任何 Cookie 值或页面内容（隐私铁律不变）。
+// 异步回调在后台队列，UI 更新回主线程；hint 是弱引用，页面/行可能已重建需判空。
+- (void)refreshInAppBrowserSessionHint {
+    NSTextField *hint = self.inAppBrowserHint;
+    if (!hint) return;
+    WKWebsiteDataStore *store = [RDManualVerificationController sharedSessionDataStore];
+    [store fetchDataRecordsOfTypes:[NSSet setWithObject:WKWebsiteDataTypeCookies]
+                 completionHandler:^(NSArray<WKWebsiteDataRecord *> *records) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSTextField *h = self.inAppBrowserHint;
+            if (!h) return;
+            if (records.count == 0) {
+                h.stringValue = @"尚未有 Cookie 登录态；打开窗口登录后，探测自动携带（重启 App 不丢）";
+                h.textColor = [[NSColor labelColor] colorWithAlphaComponent:0.60];
+                return;
+            }
+            NSMutableArray<NSString *> *names = [NSMutableArray array];
+            for (WKWebsiteDataRecord *r in records) {
+                if (r.displayName.length) [names addObject:r.displayName];
+            }
+            [names sortUsingSelector:@selector(compare:)];
+            NSString *shown;
+            if (names.count > 4) {
+                shown = [NSString stringWithFormat:@"%@ 等 %lu 个站点",
+                         [[names subarrayWithRange:NSMakeRange(0, 4)] componentsJoinedByString:@"、"],
+                         (unsigned long)names.count];
+            } else {
+                shown = [names componentsJoinedByString:@"、"];
+            }
+            h.stringValue = [NSString stringWithFormat:@"已存 Cookie 登录态（%lu 个站点）：%@ — 登录后探测自动携带，重启 App 不丢",
+                             (unsigned long)names.count, shown];
+            h.textColor = [NSColor systemGreenColor];
+        });
+    }];
 }
 
 - (void)switchBackToHome:(id)sender {
@@ -2445,6 +2503,49 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     addRow(@"清除网站会话", @"清除本 App 保存的 Cookie / 缓存 / 本地存储（不影响 Safari）", @[self.clearSiteSessionButton]);
     if ([rowHints.lastObject isKindOfClass:[NSTextField class]]) self.clearSiteSessionHint = rowHints.lastObject;
 
+    // 第 21 轮新增：应用内浏览器（登录用）。与探测 WebView 共用同一持久会话存储
+    // （WKWebsiteDataStore.defaultDataStore），用户手动登录需要账号的站点后，
+    // 探测自动携带登录态；「清除网站会话」仍然只清 App 容器内存储，不触碰 Safari。
+    self.openInAppBrowserButton = [NSButton buttonWithTitle:@"打开" target:self action:@selector(openInAppBrowser:)];
+    self.openInAppBrowserButton.bordered = NO;
+    self.openInAppBrowserButton.font = [NSFont systemFontOfSize:12];
+    self.openInAppBrowserButton.identifier = @"RDOpenInAppBrowserButton";
+    [self.openInAppBrowserButton sizeToFit];
+    addRow(@"应用内浏览器", @"打开与探测共用登录的网页窗口；先登录需要账号的站点，再回探测页粘贴链接", @[self.openInAppBrowserButton]);
+    if ([rowHints.lastObject isKindOfClass:[NSTextField class]]) self.inAppBrowserHint = rowHints.lastObject;
+
+    // 第 27 轮：一键导入改走 CDP 自动化（第 25-26 轮实测钥匙串解密已被 app-bound 封死）。
+    // 浏览器以 headless + 调试端口拉起自己解密，经官方 DevTools 协议导出——无授权框、
+    // 不碰加密数据；临时 profile 副本（仅 Local State + Cookies）用完即删。
+    self.importSources = [RDCdpCookieImporter availableSources];
+    self.importSourcePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 210, 26) pullsDown:NO];
+    self.importSourcePopup.identifier = @"RDImportSourcePopup";
+    self.importSourcePopup.font = [NSFont systemFontOfSize:11.5];
+    [self.importSourcePopup removeAllItems];
+    if (self.importSources.count == 0) {
+        [self.importSourcePopup addItemWithTitle:@"未发现可导入的浏览器"];
+        self.importSourcePopup.enabled = NO;
+    } else {
+        for (RDCdpCookieSource *s in self.importSources) {
+            [self.importSourcePopup addItemWithTitle:
+                [NSString stringWithFormat:@"%@（%lu 条）", s.browserName, (unsigned long)s.cookieCount]];
+        }
+        self.importSourcePopup.enabled = YES;
+    }
+    [self.importSourcePopup sizeToFit];
+    self.importBrowserCookieButton = [NSButton buttonWithTitle:@"导入" target:self action:@selector(importBrowserCookies:)];
+    self.importBrowserCookieButton.bordered = NO;
+    self.importBrowserCookieButton.font = [NSFont systemFontOfSize:12];
+    self.importBrowserCookieButton.identifier = @"RDImportBrowserCookieButton";
+    self.importBrowserCookieButton.attributedTitle =
+        [[NSAttributedString alloc] initWithString:@"导入"
+                                        attributes:@{NSFontAttributeName: self.importBrowserCookieButton.font,
+                                                     NSForegroundColorAttributeName: [NSColor controlAccentColor]}];
+    [self.importBrowserCookieButton sizeToFit];
+    self.importBrowserCookieButton.enabled = self.importSources.count > 0;
+    addRow(@"导入浏览器登录态", @"从 Chromium 系浏览器自动导出已登录 Cookie（官方调试协议，无需授权框；约需 10 秒）", @[self.importSourcePopup, self.importBrowserCookieButton]);
+    if ([rowHints.lastObject isKindOfClass:[NSTextField class]]) self.importBrowserCookieHint = rowHints.lastObject;
+
     // 卡片 4：日志 —— 独立成组（2026-09-17 定案），把原来飘在页面顶部中间的
     // 「打开日志 / 导出诊断」收成与其它行同构的一行。
     // 第 12 轮起表单区可滚动，最小窗口下「日志」会被滚出可视区，但仍在文档视图内可达。
@@ -2583,8 +2684,49 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
             sself2.statusNote.stringValue = @"网站会话已清除（仅本 App 的 Cookie/缓存/本地存储）";
             sself2.clearSiteSessionHint.stringValue = @"已清除（仅本 App；Safari 不受影响）";
             sself2.clearSiteSessionHint.textColor = [NSColor systemGreenColor];
+            [sself2 refreshInAppBrowserSessionHint];   // 会话已清空，应用内浏览器行的站点显示同步归零
             RDLogWrite(@"app", @"已清除本 App 的网站会话数据（不读取、不打印任何 Cookie 内容）");
         }];
+    }];
+}
+
+// 第 21 轮新增：应用内浏览器（登录用）。不预置任何站点——地址由用户输入，
+// 保持工具对目标站点的通用性；会话存储与探测共用（见 RDInAppBrowserWindow）。
+- (void)openInAppBrowser:(id)sender {
+    [RDInAppBrowserWindow openWithAbsoluteURLString:nil];
+    RDLogWrite(@"app", @"已打开应用内浏览器窗口（与探测共用网站会话）");
+}
+
+// 第 27 轮：CDP 自动化导入。浏览器 headless 自解密 + DevTools 协议导出，
+// 无钥匙串授权框；Cookie 值只在内存，日志只记计数。
+- (void)importBrowserCookies:(id)sender {
+    if (self.importSources.count == 0) return;
+    NSInteger idx = self.importSourcePopup.indexOfSelectedItem;
+    if (idx < 0 || idx >= (NSInteger)self.importSources.count) return;
+    RDCdpCookieSource *source = self.importSources[(NSUInteger)idx];
+    self.importBrowserCookieButton.enabled = NO;
+    self.importBrowserCookieHint.stringValue = @"正在导出…（浏览器以无窗口模式运行约 10 秒，请勿手动退出它）";
+    self.importBrowserCookieHint.textColor = [[NSColor labelColor] colorWithAlphaComponent:0.60];
+    __weak typeof(self) weakSelf = self;
+    NSString *browser = source.browserName;
+    [RDCdpCookieImporter importFromSource:source
+                               completion:^(NSUInteger imported, NSUInteger failed, NSError *error) {
+        typeof(self) sself = weakSelf;
+        if (!sself) return;
+        sself.importBrowserCookieButton.enabled = YES;
+        if (error) {
+            sself.importBrowserCookieHint.stringValue = [NSString stringWithFormat:@"导入失败：%@", error.localizedDescription];
+            sself.importBrowserCookieHint.textColor = [NSColor systemRedColor];
+            RDLogWrite(@"app", @"浏览器 Cookie CDP 导入失败（%@）", browser);
+            return;
+        }
+        sself.importBrowserCookieHint.stringValue = [NSString stringWithFormat:
+            @"已导入 %lu 条（%lu 条跳过，来自 %@）— 上方会话站点显示已更新",
+            (unsigned long)imported, (unsigned long)failed, browser];
+        sself.importBrowserCookieHint.textColor = [NSColor systemGreenColor];
+        [sself refreshInAppBrowserSessionHint];
+        RDLogWrite(@"app", @"浏览器 Cookie CDP 导入完成：成功 %lu 条 / 跳过 %lu 条（来源 %@，仅计数不记录内容）",
+                   (unsigned long)imported, (unsigned long)failed, browser);
     }];
 }
 
