@@ -19,6 +19,7 @@
 // 都到齐后再合并（旧实现串行等待，白等一整条腿的时间）。
 @property BOOL staticDone;
 @property BOOL dynamicDone;
+@property BOOL staticConverged;   // 静态腿丰收提前收敛标志（见 startContext 注释）
 // 静态腿结果是否已经先发布过一次（避免重复提前发布）。
 @property BOOL publishedStatic;
 @property (strong) RDProbeResult *dynamicResult;
@@ -78,6 +79,17 @@
                 ctx.publishedStatic=YES;
                 RDLogWrite(@"probe", @"静态腿先出结果 media=%lu（动态腿未回，先上临时结果）", (unsigned long)ctx.staticMedia.count);
                 [self publish:ctx media:[self mergedMediaForContext:ctx] error:nil final:NO];
+            }
+            // ── 静态腿丰收提前收敛（2026-10-06 语料实测驱动）──
+            // 图片/素材聚合页的媒体全部在静态 HTML 里（pexels 338 条、stocksnap 51 条
+            // 均在 14s 内由静态腿拿满），但动态 WebKit 腿仍会跑满 45s 硬超时，用户
+            // 白等半分钟且探针整体被判超时。静态腿已达丰收阈值时不再等动态腿：
+            // 立即按最终结果收敛。阈值取 60（远高于常规视频页的 1–10 条，不会
+            // 让"静态腿只抓到零星图片、真视频在动态腿"的页面提前收工）。
+            if(!ctx.dynamicDone && ctx.staticMedia.count >= 60 && !ctx.staticConverged){
+                ctx.staticConverged=YES;
+                ctx.dynamicDone=YES;          // 让 finishIfBothLegsDone 直接收敛
+                RDLogWrite(@"probe", @"静态腿丰收 media=%lu（≥60），提前收敛不再等动态腿", (unsigned long)ctx.staticMedia.count);
             }
             [self finishIfBothLegsDone:ctx];
         }];

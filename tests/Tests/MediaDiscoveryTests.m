@@ -152,6 +152,25 @@ int main(int argc, const char *argv[]) {
             Check(plainCount <= 200, [NSString stringWithFormat:@"全文兜底遵守 200 条预算（实际 %lu）", (unsigned long)plainCount]);
         }
 
+        // ── 9. 音频扩展名路径（2026-10-06 语料实测缺口回归）──
+        {
+            // formatFromURL 必须认识常见音频扩展名，否则懒加载/直链路径全漏
+            Check([[RDProbeAnalyzer formatFromURL:@"https://cdn.example.com/a/song.mp3"] isEqualToString:@"mp3"],
+                  @"formatFromURL 认识 .mp3");
+            Check([[RDProbeAnalyzer formatFromURL:@"https://cdn.example.com/a/song.m4a"] isEqualToString:@"m4a"],
+                  @"formatFromURL 认识 .m4a");
+            Check([[RDProbeAnalyzer formatFromURL:@"https://cdn.example.com/a/song.flac"] isEqualToString:@"flac"],
+                  @"formatFromURL 认识 .flac");
+            Check([RDProbeAnalyzer isDownloadableMediaFormat:@"mp3"], @"mp3 在可下载白名单");
+            Check([RDProbeAnalyzer isDownloadableMediaFormat:@"flac"], @"flac 在可下载白名单");
+            // 音频属性写法也必须被静态腿接住
+            NSString *html = @"<html><body>"
+                @"<audio src=\"https://cdn.example.com/audio/track.mp3\"></audio>"
+                @"</body></html>";
+            RDProbeResult *r = [RDProbeAnalyzer analyzeHTML:html baseURL:[NSURL URLWithString:@"https://example.com/"]];
+            Check(ContainsURL(r, @"https://cdn.example.com/audio/track.mp3"), @"<audio src> 的 mp3 被发现");
+        }
+
         if (gFailed == 0) NSLog(@"GRAB-UPGRADE-PASSED checks=%d", gPassed);
         else NSLog(@"GRAB-UPGRADE-FAILED passed=%d failed=%d", gPassed, gFailed);
         return gFailed == 0 ? 0 : 1;

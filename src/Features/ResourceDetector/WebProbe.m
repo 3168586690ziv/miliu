@@ -235,8 +235,10 @@ static BOOL RDIsHTTPURL(NSString *value) { NSURL *url=[NSURL URLWithString:value
 
     // 视频源：<video>/<source> 的 src
     NSMutableArray<DetectedMedia *> *found = [NSMutableArray array];
+    // <audio> 与 <video> 同语义：都是媒体容器，其 src 走同一条发现路径
+    //（2026-10-06 语料实测：纯音频页此前完全不识别，见 media-discovery 用例）。
     NSRegularExpression *srcRe = [NSRegularExpression
-        regularExpressionWithPattern:@"(?:<(?:video|source)\\b[^>]*?[\\s\"']src\\s*=\\s*(?:[\"']([^\"']+)[\"']|([^\\s\"'=<>`]+)))"
+        regularExpressionWithPattern:@"(?:<(?:video|audio|source)\\b[^>]*?[\\s\"']src\\s*=\\s*(?:[\"']([^\"']+)[\"']|([^\\s\"'=<>`]+)))"
                              options:NSRegularExpressionCaseInsensitive
                                error:nil];
     NSArray<NSTextCheckingResult *> *ms = [srcRe matchesInString:html options:0 range:NSMakeRange(0, html.length)];
@@ -1366,6 +1368,15 @@ static AppError *RDWebProbeErrorFromNavigationError(NSError *error) {
 }
 
 // 供应期失败（DNS 失败、连接被拒、TLS 错误）：立即进入终态。
+- (BOOL)isPluginHandledLoadError:(NSError *)error {
+    // WebKit 对「浏览器内核自己接管了资源」的响应（音频/视频/PDF 被内建播放器或
+    // 插件接手）会回 WebKitErrorPlugInHandled（domain=WebKitErrorDomain, code=204）。
+    // 这不是加载失败：页面本来就没有 HTML 可解析，媒体本身是有效的。此前被当作
+    // 硬失败上报（2026-10-06 语料实测：.mp3 直链 6/6 全挂，文案「Plug-in handled load」），
+    // 正确语义是「无 HTML、但目标可下载」——由静态腿的 MIME 分流给出资源条目。
+    return [error.domain isEqualToString:@"WebKitErrorDomain"] && error.code == 204;
+}
+
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation
       withError:(NSError *)error {
     RDWebProbeSession *sess = self.session;
@@ -1373,6 +1384,12 @@ static AppError *RDWebProbeErrorFromNavigationError(NSError *error) {
     // 主动取消不是失败：策略拒绝与会话作废都会取消导航，必须静默丢弃，
     // 否则会污染既有取消语义与双腿收尾行为。
     if ([error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled) return;
+    // 插件接管（音频/视频直链）：无 HTML 是预期结果，不是失败；交空 HTML 让
+    // 静态腿的 MIME 分流按媒体处理，避免整站被判「页面读取失败」。
+    if ([self isPluginHandledLoadError:error]) {
+        [sess deliverCompletionWithHTML:@"" error:nil];
+        return;
+    }
     [sess deliverCompletionWithHTML:nil error:RDWebProbeErrorFromNavigationError(error)];
 }
 
@@ -1383,6 +1400,11 @@ static AppError *RDWebProbeErrorFromNavigationError(NSError *error) {
     RDWebProbeSession *sess = self.session;
     if (!sess || sess.cancelled || sess.completionDelivered || sess.webView != (id<RDProbeWebView>)webView) return;
     if ([error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled) return;
+    // 与 didFailProvisionalNavigation 同一语义：插件接管不算失败（见上方注释）。
+    if ([self isPluginHandledLoadError:error]) {
+        [sess deliverCompletionWithHTML:@"" error:nil];
+        return;
+    }
     [sess deliverCompletionWithHTML:nil error:RDWebProbeErrorFromNavigationError(error)];
 }
 

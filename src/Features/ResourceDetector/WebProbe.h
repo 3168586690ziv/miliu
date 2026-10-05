@@ -44,6 +44,10 @@ NS_ASSUME_NONNULL_BEGIN
 @interface RDProbeAnalyzer : NSObject
 // 纯函数：分析 HTML 与 baseURL，返回结构化结果。html 为空/解析失败 → isBadPage=YES。
 + (RDProbeResult *)analyzeHTML:(NSString * _Nullable)html baseURL:(NSURL * _Nullable)baseURL;
+// 纯函数：URL → 归一化格式名（mp4/webm/hls/dash/mkv/ts/mp3/flac/…；不认识返回 unknown）。
++ (NSString *)formatFromURL:(NSString *)url;
+// 纯函数：该格式是否属于可下载媒体（视频/清单/音频统一白名单）。静态腿各路径共用。
++ (BOOL)isDownloadableMediaFormat:(NSString *)format;
 @end
 
 #pragma mark - 取页协议

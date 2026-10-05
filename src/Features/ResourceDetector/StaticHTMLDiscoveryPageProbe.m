@@ -166,7 +166,12 @@ static DetectedMedia *SHPDetectedMediaForDirectResponse(NSHTTPURLResponse *http,
     BOOL manifest = [mime containsString:@"mpegurl"]
                  || [mime isEqualToString:@"application/dash+xml"]
                  || (mimeGeneric && [SHPManifestExtensions() containsObject:ext]);
-    BOOL video = [mime hasPrefix:@"video/"] || (mimeGeneric && [SHPVideoExtensions() containsObject:ext]);
+    // audio/* 也要接：浏览器内核把音频交给内建播放器时 WKWebView 会报
+    // "Plug-in handled load"，动态腿拿不到页面；此前只有 video/* 与视频扩展
+    // 名能走通，.mp3 这类音频直链被整体判失败（2026-10-06 语料实测 6/6 全挂）。
+    // 音频与视频走同一条下载管线（离线导出、可播放性校验一致），故并入 video 判据。
+    BOOL video = [mime hasPrefix:@"video/"] || [mime hasPrefix:@"audio/"]
+              || (mimeGeneric && [SHPVideoExtensions() containsObject:ext]);
     if (!manifest && !video) return nil;
 
     DetectedMedia *m = [DetectedMedia new];
