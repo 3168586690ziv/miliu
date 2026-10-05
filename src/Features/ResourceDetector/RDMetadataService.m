@@ -1078,6 +1078,15 @@ static BOOL RDSnapshotEquals(RDMetadataSnapshot *a, RDMetadataSnapshot *b) {
                          ?: [[NSString alloc] initWithData:r.data encoding:NSISOLatin1StringEncoding];
         NSDictionary *parsed = [RDManifestParser parseManifest:text baseURL:r.response.URL];
         if (![parsed[@"isValid"] boolValue]) { w.snapshot.duration = Field(RDMetadataFailed,nil,@"manifest parser"); done(); return; }
+        // 加密/DRM 诊断（第 30 轮）：清单自述的加密方式写回任务工作区，
+        // 由资源条目在列表与详情里呈现——让用户在点击下载前就知道
+        // 「AES-128 可以下」还是「DRM 下不了」，而不是等失败后猜原因。
+        if ([parsed[@"isEncrypted"] boolValue]) {
+            w.snapshot.encryptionMethod = parsed[@"encryptionMethod"];
+            w.snapshot.encryptionKeyFormat = parsed[@"encryptionKeyFormat"];
+            w.snapshot.softwareDecryptable = [parsed[@"isSoftwareDecryptable"] boolValue];
+            w.snapshot.drmProtected = [parsed[@"isDrmProtected"] boolValue];
+        }
         if ([parsed[@"isMaster"] boolValue] && !w.snapshot.variants.count) w.snapshot.variants = parsed[@"variants"];
         // 多 Representation：维度来源优先取声明了分辨率的视频轨中分辨率最高的一档
         // （最佳画质），绝不盲目取 firstObject——那通常是最低码率档；音频轨/无

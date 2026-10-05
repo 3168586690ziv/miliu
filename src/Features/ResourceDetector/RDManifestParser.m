@@ -102,7 +102,8 @@ static NSMutableDictionary *RDHLSAttributes(NSString *text) {
     }
     NSMutableDictionary *out = [@{ @"kind": isHLS ? @"hls" : @"dash", @"isValid": @YES,
                                    @"variants": @[], @"audioTracks": @[], @"subtitleTracks": @[],
-                                   @"isLive": @NO, @"isEncrypted": @NO } mutableCopy];
+                                   @"isLive": @NO, @"isEncrypted": @NO,
+                                   @"isSoftwareDecryptable": @YES, @"isDrmProtected": @NO } mutableCopy];
     NSMutableArray *variants = [NSMutableArray array], *audio = [NSMutableArray array], *subs = [NSMutableArray array];
     if (isHLS) {
         NSArray *lines = [trim componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet];
@@ -127,7 +128,30 @@ static NSMutableDictionary *RDHLSAttributes(NSString *text) {
                 if ([type.lowercaseString isEqualToString:@"audio"]) [audio addObject:v];
                 if ([type.lowercaseString isEqualToString:@"subtitles"]) [subs addObject:v];
             } else if ([line hasPrefix:@"#EXT-X-ENDLIST"]) out[@"isLive"] = @NO;
-            else if ([line hasPrefix:@"#EXT-X-KEY:"] || [line hasPrefix:@"#EXT-X-SESSION-KEY:"]) out[@"isEncrypted"] = @YES;
+            else if ([line hasPrefix:@"#EXT-X-KEY:"] || [line hasPrefix:@"#EXT-X-SESSION-KEY:"]) {
+                // 加密详情：区分「软件层可解」与「DRM」——用户可见诊断依赖这个判定。
+                // AES-128 + KEYFORMAT=identity（或未声明）＝ ffmpeg 可本地解密；
+                // SAMPLE-AES 或非 identity KEYFORMAT（FairPlay/Widevine/PlayReady）
+                // ＝ 需要 DRM 授权，普通离线导出做不到。
+                NSString *keyLine = [line hasPrefix:@"#EXT-X-KEY:"] ? [line substringFromIndex:11] : [line substringFromIndex:19];
+                NSDictionary *keyAttrs = RDHLSAttributes(keyLine);
+                NSString *method = [keyAttrs[@"method"] uppercaseString] ?: @"";
+                NSString *keyFormat = keyAttrs[@"keyformat"] ?: @"";
+                out[@"isEncrypted"] = @YES;
+                out[@"encryptionMethod"] = method;
+                if (keyFormat.length) out[@"encryptionKeyFormat"] = keyFormat;
+                BOOL identityFormat = !keyFormat.length || [keyFormat.lowercaseString isEqualToString:@"identity"];
+                if ([method isEqualToString:@"NONE"]) {
+                    // METHOD=NONE 是 HLS 标准的「明确声明不加密」（常用于从加密切回明文），
+                    // 不是 DRM；早前版本把它一并标成受保护，属误报。
+                    out[@"isEncrypted"] = @NO;
+                    out[@"encryptionMethod"] = @"NONE";
+                } else {
+                    BOOL softwareDecryptable = [method isEqualToString:@"AES-128"] && identityFormat;
+                    out[@"isSoftwareDecryptable"] = @(softwareDecryptable);
+                    if (!softwareDecryptable) out[@"isDrmProtected"] = @YES;
+                }
+            }
         }
         BOOL master = [trim containsString:@"#EXT-X-STREAM-INF:"];
         out[@"isMaster"] = @(master);
@@ -173,7 +197,9 @@ static NSMutableDictionary *RDHLSAttributes(NSString *text) {
             if (hasValue && isfinite(seconds) && ![out[@"isLive"] boolValue]) out[@"durationSeconds"] = @(seconds);
         }
         out[@"segments"] = @[];
-        out[@"isEncrypted"] = @([trim rangeOfString:@"ContentProtection" options:NSCaseInsensitiveSearch].location != NSNotFound);
+        BOOL dashProtected = [trim rangeOfString:@"ContentProtection" options:NSCaseInsensitiveSearch].location != NSNotFound;
+        out[@"isEncrypted"] = @(dashProtected);
+        if (dashProtected) { out[@"isDrmProtected"] = @YES; out[@"isSoftwareDecryptable"] = @NO; out[@"encryptionMethod"] = @"DASH ContentProtection"; }
         // 多 Representation 的 MPD 就是 master：不置位 isMaster，档位列表永远
         // 不会发布给快照/UI（与 HLS master 的 #EXT-X-STREAM-INF 语义对齐）。
         out[@"isMaster"] = @(variants.count > 0);

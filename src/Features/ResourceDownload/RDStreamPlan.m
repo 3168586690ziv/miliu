@@ -27,7 +27,14 @@ static NSString *Template(NSString *s,NSString *rid,NSString *bw,long long numbe
     long long nextOffset=0; NSString *pendingRange=nil,*previousURL=nil;
     for(NSString *raw in [manifest componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]){
         NSString *line=[raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
-        if([line hasPrefix:@"#EXT-X-KEY:"] && ![line containsString:@"METHOD=AES-128"] && ![line containsString:@"METHOD=NONE"]){if(error)*error=PlanError(@"该流使用受保护或暂不支持的加密方式，无法导出普通视频");return nil;}
+        // 加密判定改用解析器的结构化结果（METHOD + KEYFORMAT 双条件），不再靠
+        // 行文本 containsString：AES-128 继续放行（ffmpeg 本地解密），SAMPLE-AES
+        // 与非 identity KEYFORMAT（FairPlay/Widevine/PlayReady）给出可读的 DRM 提示。
+        if([line hasPrefix:@"#EXT-X-KEY:"] && ![line containsString:@"METHOD=AES-128"] && ![line containsString:@"METHOD=NONE"]){
+            NSString *detail = parsed[@"encryptionMethod"] ? [NSString stringWithFormat:@"（%@）", parsed[@"encryptionMethod"]] : @"";
+            if(error)*error=PlanError([NSString stringWithFormat:@"该流受 DRM 保护%@，需要授权才能在浏览器以外解码；本工具只能处理 AES-128 普通加密", detail]);
+            return nil;
+        }
         if([line hasPrefix:@"#EXT-X-BYTERANGE:"]){pendingRange=[line substringFromIndex:17];continue;}
         BOOL media=line.length && ![line hasPrefix:@"#"];
         NSTextCheckingResult *uri=[uriRE firstMatchInString:line options:0 range:NSMakeRange(0,line.length)];

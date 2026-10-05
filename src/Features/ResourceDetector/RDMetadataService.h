@@ -16,6 +16,11 @@ typedef NS_ENUM(NSInteger, RDMetadataState) { RDMetadataKnown, RDMetadataUnknown
 @property RDMetadataField *dimensions; // NSValue size, display orientation
 @property RDMetadataField *size; // NSNumber bytes; manifests always unknown
 @property RDMetadataField *preview; // NSImage, at most 1024 px per side
+// 加密/DRM 诊断（第 30 轮）：来自清单自述，用于在下载前把能力边界告诉用户。
+@property NSString * _Nullable encryptionMethod;     // AES-128 / SAMPLE-AES / DASH ContentProtection
+@property NSString * _Nullable encryptionKeyFormat;  // identity / com.apple.streamingkeydelivery / ...
+@property BOOL softwareDecryptable;                  // YES = 本地可解（AES-128 + identity）
+@property BOOL drmProtected;                         // YES = 需 DRM 授权，普通导出做不到
 @end
 
 // Main queue API. One token per subscriber. Last cancellation cancels all underlying work.
