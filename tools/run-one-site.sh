@@ -58,13 +58,19 @@ else status="FAIL($rc)"; fi
 # 验收自检结论独立列
 check="${verdict:-none}"
 
+# 归因升级（2026-10-06 修正）：原版只看探针第一跳状态码，把 301/307
+# 重定向站点误报成 404。现在按「确定拒绝 / 可达但无媒体 / 未完成」三层判定，
+# 且重定向类单独标注，不再冤枉产品也不再掩盖真实原因。
 cause="-"
-if grep -qE 'HTTP 40[13]|403 Forbidden|401 Unauthorized' "$log"; then cause="反爬(403/401)"
-elif grep -qE 'HTTP 404' "$log"; then cause="404"
-elif grep -qE '超时|timed out|timedout' "$log"; then cause="超时"
-elif grep -qE '降级|downgrade' "$log"; then cause="安全策略拦截"
+if grep -qE '降级|downgrade' "$log"; then cause="安全策略拦截"
 elif grep -qE 'DRM|Widevine|FairPlay' "$log"; then cause="DRM"
-elif [ "$status" = "ZERO" ]; then cause="页面无资源/需登录"
+elif grep -qE 'HTTP 40[13]|403 Forbidden|401 Unauthorized' "$log"; then cause="反爬(403/401)"
+elif grep -qE 'HTTP 404' "$log"; then cause="404(URL已失效)"
+elif grep -qE '页面定稿 media=0' "$log" && grep -qE '\[probe\] WebKit 会话开始' "$log"; then
+  # 页面确实加载过、但零媒体：多数是登录墙/JS 壳页/纯导航页，不是被拒绝
+  cause="可达但无媒体(登录墙/壳页)"
+elif grep -qE '超时|timed out|timedout' "$log"; then cause="超时"
+elif [ "$status" = "ZERO" ]; then cause="可达但无媒体(登录墙/壳页)"
 fi
 
 cat=$(python3 - "$CORPUS" "$url" <<'PY'
