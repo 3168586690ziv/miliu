@@ -8,6 +8,7 @@
 #     --timeout S  单站超时秒数（默认 70）
 #     --mode M     探测模式：app（默认，生产全链）/ hybrid / static / dynamic
 #     --out DIR    结果目录（默认 build/corpus-run-<时间戳>）
+#     --resume     续跑：跳过 results.tsv 里已完成的 URL（万站规模必需）
 #
 # 输出：
 #   results.tsv   每站一行：状态 耗时秒 资源数 视频数 图片数 详情 分类 URL
@@ -24,6 +25,7 @@ JOBS=6
 TIMEOUT=70
 MODE="app"
 OUT=""
+RESUME=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -31,6 +33,7 @@ while [ $# -gt 0 ]; do
     --timeout) TIMEOUT="$2"; shift 2 ;;
     --mode) MODE="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
+    --resume) RESUME=1; shift ;;
     -*) echo "未知参数：$1" >&2; exit 2 ;;
     *) CORPUS="$1"; shift ;;
   esac
@@ -46,7 +49,16 @@ RESULTS="$OUT/results.tsv"
 : > "$RESULTS"
 
 # 提取有效 URL（去掉注释、空行）
-grep -vE '^\s*(#|$)' "$CORPUS" | sed 's/[[:space:]]*$//' > "$OUT/urls.txt"
+grep -vE '^\s*(#|$)' "$CORPUS" | sed 's/[[:space:]]*$//' > "$OUT/urls.full.txt"
+# 续跑：剔除已完成（results.tsv 里出现过的 URL）
+if [ "$RESUME" = "1" ] && [ -f "$RESULTS" ]; then
+  cut -f10 "$RESULTS" 2>/dev/null | sort -u > "$OUT/done.txt"
+  grep -vxF -f "$OUT/done.txt" "$OUT/urls.full.txt" > "$OUT/urls.txt" || true
+  SKIPPED=$(( $(wc -l < "$OUT/urls.full.txt") - $(wc -l < "$OUT/urls.txt") ))
+  echo "  续跑模式：跳过已完成 ${SKIPPED} 站"
+else
+  cp "$OUT/urls.full.txt" "$OUT/urls.txt"
+fi
 TOTAL=$(wc -l < "$OUT/urls.txt" | tr -d ' ')
 echo "== Miliu 语料跑器 =="
 echo "  语料：${CORPUS}（${TOTAL} 站）"
@@ -71,7 +83,7 @@ echo "  探针就绪：$PROBE_BIN"
 # 并行调度：作业池（简单可靠，不用 xargs 的嵌套引号）
 export REPO MODE TIMEOUT OUT CORPUS PROBE_BIN
 
-idx=0
+idx=$(wc -l < "$RESULTS" | tr -d ' ')
 while IFS= read -r url; do
   idx=$((idx+1))
   bash "$REPO/tools/run-one-site.sh" "$idx" "$url" &

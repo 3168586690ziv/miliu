@@ -8,7 +8,9 @@ idx="$1"; url="$2"
 log="$OUT/logs/$idx.log"
 start=$(python3 -c 'import time;print(time.time())')
 
-# 直接用预编译探针（run-corpus.sh 已确保二进制就绪），跳过每站重复编译。
+# 直接调预编译探针（run-corpus.sh 已确保二进制就绪），跳过每站重复编译。
+# 模式差异（实测）：static≈3.6s / hybrid≈4s / app≈20s——app 模式含完整 UI 自检，
+# 万站规模下用 static 或 hybrid 更合适（探测语义不变，只是不做界面断言）。
 # 超时控制用 python（macOS 无 GNU timeout）：SIGTERM → 2s → SIGKILL。
 RD_LOG_PATH="$OUT/logs/$idx-rdlog.log" python3 - "$TIMEOUT" "$PROBE_BIN" "$MODE" "$url" "$log" <<'PYEOF'
 import os, subprocess, sys, signal
@@ -34,7 +36,12 @@ end=$(python3 -c 'import time;print(time.time())')
 dur=$(python3 -c "print(f'{$end-$start:.1f}')")
 
 # 从探针输出取结构化结论（兼容多种输出形态）
-media=$(grep -oE 'RS-MEDIA[^=]*=[0-9]+' "$log" | tail -1 | grep -oE '[0-9]+$')
+# 媒体数解析（兼容各模式输出）：
+#   app 模式      → RS-APP media=N
+#   hybrid 模式   → RS-HYBRID media=N
+#   static 模式   → RS-STATIC media=N / RS-MEDIA=N
+media=$(grep -oE 'RS-(APP|HYBRID|STATIC) media=[0-9]+' "$log" | tail -1 | grep -oE '[0-9]+$')
+[ -n "${media:-}" ] || media=$(grep -oE 'RS-MEDIA[^=]*=[0-9]+' "$log" | tail -1 | grep -oE '[0-9]+$')
 video=$(grep -oE 'RS-VIDEO[^=]*=[0-9]+' "$log" | tail -1 | grep -oE '[0-9]+$')
 image=$(grep -oE 'RS-IMAGE[^=]*=[0-9]+' "$log" | tail -1 | grep -oE '[0-9]+$')
 detail=$(grep -oE 'RS-DETAIL[^=]*=[^[:space:]]+' "$log" | tail -1 | cut -d= -f2-)
