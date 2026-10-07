@@ -512,6 +512,9 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
 // 站点劣化时（实测 TCP 建连 20–86s、TTFB 21s）必然超时；超时是瞬态故障，
 // 必须有限重试，绝不能像确定性答复（403/404、非媒体响应）那样永久降级为单连接。
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *capabilityProbeAttempts;
+// 正在合流（ffmpeg 本地合成）的任务：这些任务不产生下载进度回调，
+// 看门狗据此放宽（2026-10-07 审计修复）。由 RDStreamDownloadTask 显式置位。
+@property (nonatomic, strong) NSMutableSet<NSString *> *muxingJobs;
 @property (nonatomic, strong) AdaptiveTransferScheduler *transferScheduler;
 // 本实例已认领的临时目录：目录路径 → 持有的 flock 文件描述符。持有期内该目录
 // 对**任何**实例（含本进程内的其他 DownloadManager）都是“活的”，清理必须跳过。
@@ -595,6 +598,7 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
         _capabilityProbePending = [NSMutableSet set];
         _capabilityProbeCompleted = [NSMutableSet set];
         _capabilityProbeAttempts = [NSMutableDictionary dictionary];
+        _muxingJobs = [NSMutableSet set];
         _transferScheduler = [[AdaptiveTransferScheduler alloc] initWithInitialWindow:[PerformancePolicy downloadConnections]
                                                                   maximumWindow:[PerformancePolicy downloadConnections]];
         _batchEnqueueDepth = 0;
@@ -1009,7 +1013,29 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
             }
             // A fast click can arrive before the card-level metadata probe.
             // Do not silently commit the job to a slow single connection.
-            BOOL nativeBackend = [NSStringFromClass([self.backend class]) isEqualToString:@"SessionDownloadBackend"];
+            //
+            // 2026-10-07 审计修复：此前用类名严格比较（isEqualToString:@"SessionDownloadBackend"），
+            // 但生产环境的 backend 被 RDCurlFallbackBackend 包装（用于 Cloudflare 系站点换栈重试），
+            // 类名不等于 SessionDownloadBackend ⇒ 判定恒为 NO ⇒ **「标准（分段提速）」在生产
+            // 从未生效**（测试套件不链接包装类，走原生分支故测试全绿，掩盖了生产差异）。
+            // 改为沿包装链查找原生后端：包装类暴露 nativeBackend 时递归内层，
+            // 任一层的类名或协议能力表明具备分段下载能力即视为 native。
+            BOOL nativeBackend = NO;
+            id probe = self.backend;
+            for (NSUInteger depth = 0; probe && depth < 4; depth++) {
+                NSString *cn = NSStringFromClass([probe class]);
+                if ([cn isEqualToString:@"SessionDownloadBackend"]) { nativeBackend = YES; break; }
+                // 包装类（如 RDCurlFallbackBackend）暴露内层原生后端时继续向内看
+                SEL innerSel = NSSelectorFromString(@"nativeBackend");
+                if ([probe respondsToSelector:innerSel]) {
+                    // 用 IMP 调用（避免 performSelector 的 ARC 泄漏警告）
+                    IMP imp = [probe methodForSelector:innerSel];
+                    id (*fn)(id, SEL) = (id (*)(id, SEL))imp;
+                    id inner = fn ? fn(probe, innerSel) : nil;
+                    if (inner && inner != probe) { probe = inner; continue; }
+                }
+                break;
+            }
             if (nativeBackend && job.resourceKind != DownloadResourceManifest && [PerformancePolicy allowsSegmentedDownload] &&
                 (job.expectedContentLength <= 0 || !job.acceptRanges) &&
                 ![self.capabilityProbePending containsObject:identifier] &&
@@ -1148,6 +1174,13 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
     if (job.resourceKind==DownloadResourceManifest) {
         NSURL *muxer=self.rd_streamMuxerURL ?: [[NSBundle mainBundle] URLForResource:@"ffmpeg" withExtension:nil subdirectory:@"MediaTools"];
         RDStreamDownloadTask *stream=[[RDStreamDownloadTask alloc]initWithBackend:self.backend request:request output:singleTemp muxer:muxer progress:progress completion:completion];
+        // 合流阶段标记（审计修复）：任务级看门狗据此放宽预算。
+        __weak typeof(self) weakSelfMux = self;
+        NSString *muxID = job.identifier;
+        stream.willBeginMuxing = ^{
+            __strong typeof(weakSelfMux) sSelf = weakSelfMux;
+            if (sSelf && muxID.length) [sSelf.muxingJobs addObject:muxID];
+        };
         // 界面选中具体 HLS 档位时：入口用主清单（解析分离音轨），并固定
         // 选中 sourceURL 对应的变体；普通清单任务两个字段保持 nil。
         if (job.streamMasterURL.length) {
@@ -1403,6 +1436,7 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
     DownloadJob *job = self.jobs[identifier];
     if (!job || job.state != DownloadJobStateRunning) {
         [timer invalidate];
+        [self.muxingJobs removeObject:identifier];   // 审计修复：任务终态时清除合流标记
         [self.progressWatchdogs removeObjectForKey:identifier];
         [self.segmentProgressAt removeObjectForKey:identifier];
         [self.segmentTokens removeObjectForKey:identifier];
@@ -1415,7 +1449,17 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
     }
     NSDate *last = self.lastProgressAt[identifier] ?: [NSDate date];
     if ([[NSDate date] timeIntervalSinceDate:last] >= 45.0) {
-        [self failJob:job reason:@"连接超过 45 秒没有收到数据，已停止本次下载"];
+        // 2026-10-07 审计修复：合并（ffmpeg 合流）阶段不产生下载进度回调，慢磁盘上
+        // 单次合并可超过 45 秒（审计员实测 <90MB/s 磁盘会触发），此前会把「分片已
+        // 100% 下完、正在合流」的任务判失败并删除临时文件。
+        // 修法：**只在真正处于合流阶段时**放宽（由 RDStreamDownloadTask 显式置位
+        // muxingJobs），下载阶段仍然是 45 秒硬约束——T34「整池永不恢复须有限失败」
+        // 的语义保持不变（那种场景任务永远进不了合流阶段）。
+        NSTimeInterval budget = [self.muxingJobs containsObject:identifier] ? 300.0 : 45.0;
+        if ([[NSDate date] timeIntervalSinceDate:last] < budget) return;
+        [self failJob:job reason:[self.muxingJobs containsObject:identifier]
+            ? @"分片下载完成后长时间未能合成视频（磁盘繁忙或文件过大），已停止本次下载"
+            : @"连接超过 45 秒没有收到数据，已停止本次下载"];
         return;
     }
     // 单段停滞检测：其余段正常推进时，45s 全任务看门狗永远不触发，被晾住的那段
@@ -2828,11 +2872,20 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
     long double totalWeight = 0;
     for (DownloadJob *job in jobs) {
         long double weight = job.expectedContentLength > 0 ? job.expectedContentLength : estimatedUnknownBytes;
-        BOOL terminal = job.state == DownloadJobStateCompleted ||
-                        job.state == DownloadJobStateFailed ||
-                        job.state == DownloadJobStateCancelled ||
-                        job.state == DownloadJobStateInterrupted;
-        double fraction = terminal ? 1.0 : MAX(0, MIN(1, job.progress));
+        // 2026-10-07 审计修复：此前把「失败/取消/中断」也按 100% 计入——用户看到
+        // 总进度条显示满格，但实际有任务没下完（误导性极强）。现在只有「已完成」
+        // 计满；失败/取消/中断按其真实进度计入（通常是 0 或部分），其权重仍然参与
+        // 分母——即总进度如实反映「有多少内容真的拿到了」。
+        double fraction;
+        if (job.state == DownloadJobStateCompleted) {
+            fraction = 1.0;
+        } else if (job.state == DownloadJobStateFailed ||
+                   job.state == DownloadJobStateCancelled ||
+                   job.state == DownloadJobStateInterrupted) {
+            fraction = MAX(0.0, MIN(1.0, job.progress));   // 失败任务保留其已下载部分
+        } else {
+            fraction = MAX(0.0, MIN(1.0, job.progress));
+        }
         weightedProgress += weight * fraction;
         totalWeight += weight;
     }

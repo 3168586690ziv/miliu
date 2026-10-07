@@ -109,18 +109,47 @@ static NSString *RDTruncateName(NSString *name) {
     return [self.tempRootURL URLByAppendingPathComponent:@"merged.tmp"];
 }
 
+// 可播放媒体容器的魔数识别（视频 + 音频统一）。
+// 2026-10-07 审计修复：此前只认 ISO(ftyp)/EBML/AVI/MPEG 四种——而第 29 轮已把
+// mp3/flac/ogg/wav/ts/flv 等加入**探测**白名单，探测得到却在校验层必然被拒
+//（审计员逐字复刻判定函数实测：mp3 两种头、flac、ogg、wav、TS、FLV 全部失败，
+//  只有 m4a 因容器头恰好是 ISO ftyp 侥幸通过）。错误文案还甩锅给网站。
+// 现补齐常见音频与流格式，与探测白名单对齐。
 + (BOOL)isLikelyVideoFileAtURL:(NSURL *)url {
     NSFileHandle *handle = [NSFileHandle fileHandleForReadingFromURL:url error:nil];
     if (!handle) return NO;
-    NSData *data = [handle readDataOfLength:32];
+    // 192 字节：TS 的二次同步确认需要第 189 字节（b[188]）；其余格式头部都很短。
+    NSData *data = [handle readDataOfLength:192];
     [handle closeFile];
     if (data.length < 12) return NO;
     const unsigned char *b = data.bytes;
-    BOOL iso  = (b[4]=='f'&&b[5]=='t'&&b[6]=='y'&&b[7]=='p');
-    BOOL ebml = (b[0]==0x1A&&b[1]==0x45&&b[2]==0xDF&&b[3]==0xA3);
+
+    // ── 视频容器 ──
+    BOOL iso  = (b[4]=='f'&&b[5]=='t'&&b[6]=='y'&&b[7]=='p');                 // MP4/MOV/M4A/3GP
+    BOOL ebml = (b[0]==0x1A&&b[1]==0x45&&b[2]==0xDF&&b[3]==0xA3);            // WebM/MKV
     BOOL avi  = (b[0]=='R'&&b[1]=='I'&&b[2]=='F'&&b[3]=='F'&&b[8]=='A'&&b[9]=='V'&&b[10]=='I'&&b[11]==' ');
-    BOOL mpeg = (b[0]==0x00&&b[1]==0x00&&b[2]==0x01&&(b[3]==0xBA||b[3]==0xB3));
-    return iso||ebml||avi||mpeg;
+    BOOL mpeg = (b[0]==0x00&&b[1]==0x00&&b[2]==0x01&&(b[3]==0xBA||b[3]==0xB3));  // MPEG-PS/ES
+    // MPEG-TS：188 字节包，同步字节 0x47。首字节 0x47 且第 189 字节（若可读）也是
+    // 0x47 —— 单看首字节会误判（很多文件首字节恰为 0x47），故做二次确认；
+    // 若文件不足 189 字节（极短分片），退化为只查首字节 + 传输流特征位。
+    BOOL ts = (b[0] == 0x47);
+    if (ts && data.length >= 189) { ts = (b[188] == 0x47); }
+    else if (ts && data.length >= 4) { ts = ((b[1] & 0x80) != 0 || (b[3] & 0x40) != 0); }
+
+    // ── 音频容器（与探测白名单对齐：mp3/flac/ogg/wav/opus/m4a/aac）──
+    // MP3：ID3v2 标签（"ID3"）或 MPEG 帧同步（0xFF 后 3 位全 1，即 0xE0 掩码）
+    BOOL mp3 = (b[0]=='I'&&b[1]=='D'&&b[2]=='3') ||
+               (b[0]==0xFF && (b[1] & 0xE0) == 0xE0 &&
+                ((b[1] >> 3) & 0x03) != 0x01);   // layer 位不能是保留值
+    BOOL flac = (data.length >= 4 && memcmp(b, "fLaC", 4) == 0);
+    BOOL ogg  = (data.length >= 4 && memcmp(b, "OggS", 4) == 0);   // Ogg/Opus/Vorbis
+    BOOL wav  = (b[0]=='R'&&b[1]=='I'&&b[2]=='F'&&b[3]=='F'&&b[8]=='W'&&b[9]=='A'&&b[10]=='V'&&b[11]=='E');
+    BOOL aac  = (data.length >= 2 && b[0] == 0xFF && (b[1] & 0xF6) == 0xF0);  // ADTS 帧同步
+
+    // ── 专有/流媒体容器 ──
+    BOOL flv = (data.length >= 3 && b[0]=='F'&&b[1]=='L'&&b[2]=='V');          // FLV
+
+    return iso || ebml || avi || mpeg || ts || mp3 || flac || ogg || wav || aac || flv;
 }
 
 + (BOOL)isLikelyImageFileAtURL:(NSURL *)url {

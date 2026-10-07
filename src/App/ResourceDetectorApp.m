@@ -1997,7 +1997,10 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 
     // ── 文档视图内容：顶部对齐，间距恒定 ──
     NSView *doc = self.settingsDocumentView;
-    CGFloat labelW = MAX(60.0, colW - 2.0 * cardPadX - 200.0);   // 给右侧控件留位
+    // 文字区宽度基准（兼容旧的单控件行）。实际布局时按该行控件总宽动态收窄——
+    // 2026-10-07 审计修复：此前固定留 200pt，但「导入浏览器登录态」行有两个控件
+    // （来源下拉 + 导入按钮，约 300pt），文字右缘压到控件下 69.8px（探针实测）。
+    CGFloat labelW = MAX(60.0, colW - 2.0 * cardPadX - 200.0);   // 给右侧控件留位（基准值）
 
     // 文档视图高度 = MAX(内容真实高度, 滚动区高度)；内容在文档内**顶部对齐** ——
     // 垂直居中已由上面的 topOffset 统一承担（页头与表单一起下沉），
@@ -2024,16 +2027,25 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
             CGFloat rowContentH = rowTitleH + (hasHint ? (rowHintGap + rowHintH) : 0.0);
             CGFloat contentTop = slot + (rowH - rowContentH) / 2.0;
 
+            // 先算该行控件的总占用宽度（从右往左累计，含控件间距 8pt），
+            // 文字区用「列宽 − 控件占用 − 最小间隙」夹紧，避免文字压到控件下面。
+            NSArray<NSView *> *controls = self.settingsRowControls[rowCursor];
+            CGFloat controlsWidth = 0.0;
+            for (NSView *control in controls) {
+                controlsWidth += MAX(1.0, NSWidth(control.frame)) + 8.0;   // +8 与下方排布间距一致
+            }
+            CGFloat textGap = 12.0;   // 文字与最左控件之间必须留出的最小间隙
+            CGFloat rowLabelW = MIN(labelW, MAX(60.0, colW - 2.0 * cardPadX - controlsWidth - textGap));
+
             NSTextField *rowTitle = self.settingsRowTitles[rowCursor];
-            rowTitle.frame = NSMakeRect(cardPadX, contentTop, labelW, rowTitleH);
+            rowTitle.frame = NSMakeRect(cardPadX, contentTop, rowLabelW, rowTitleH);
             if (hasHint) {
                 NSTextField *hint = (NSTextField *)self.settingsRowHints[rowCursor];
-                hint.frame = NSMakeRect(cardPadX, contentTop + rowTitleH + rowHintGap, labelW, rowHintH);
+                hint.frame = NSMakeRect(cardPadX, contentTop + rowTitleH + rowHintGap, rowLabelW, rowHintH);
             }
 
             // 右侧控件：从最右往左依次排，垂直居中对齐该行槽位
             CGFloat rightEdge = colW - cardPadX;
-            NSArray<NSView *> *controls = self.settingsRowControls[rowCursor];
             for (NSView *control in controls.reverseObjectEnumerator) {
                 CGFloat cw = MAX(1.0, NSWidth(control.frame));
                 CGFloat ch = MAX(1.0, NSHeight(control.frame));

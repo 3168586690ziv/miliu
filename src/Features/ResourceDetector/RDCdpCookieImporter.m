@@ -103,6 +103,11 @@ static NSError *RDCdpError(NSInteger code, NSString *message) {
     props[NSHTTPCookieDomain] = domain;
     props[NSHTTPCookiePath] = path.length ? path : @"/";
     if ([entry[@"secure"] boolValue]) props[NSHTTPCookieSecure] = @"TRUE";
+    // 2026-10-07 审计修复：HttpOnly 此前被丢弃（代码注释误称「NSHTTPCookie 无此键」）。
+    // 实测该键存在且能完整保留（构造后 properties 回读一致）。丢 HttpOnly 会让
+    // 导入的会话 Cookie 失去 XSS 防护语义——虽不影响下载本身，但违背「如实还原
+    // 浏览器登录态」的设计意图，且可能让站点风控判定会话异常。
+    if ([entry[@"httpOnly"] boolValue]) props[@"HttpOnly"] = @"TRUE";
     // CDP expires：-1（或缺席）= 会话 Cookie；否则 Unix 秒。
     id expires = entry[@"expires"];
     if ([expires respondsToSelector:@selector(doubleValue)]) {

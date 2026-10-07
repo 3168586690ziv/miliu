@@ -24,6 +24,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (instancetype)initWithNativeBackend:(id<RDDownloadBackend>)nativeBackend;
 + (instancetype)backendWithNativeBackend:(id<RDDownloadBackend>)nativeBackend;
+// 只读访问器：供 DownloadManager 沿包装链判断内层是否具备原生（分段）能力。
+// 2026-10-07 审计修复引入——此前用类名比较，包装后判定失效导致分段提速成死代码。
+@property (nonatomic, strong, readonly) id<RDDownloadBackend> nativeBackend;
 
 /// curl 可执行文件路径，默认 /usr/bin/curl。
 @property (nonatomic, copy) NSString *curlPath;

@@ -126,6 +126,9 @@ static NSError *StreamError(NSString *text) { return [NSError errorWithDomain:@"
     }];
 }
 - (void)mux {
+    // 2026-10-07 审计修复：通知 manager 进入合流阶段（期间无下载进度回调，
+    // 看门狗据此放宽到 300s；慢磁盘上大文件合流可能超过 45s）。
+    if (self.willBeginMuxing) self.willBeginMuxing();
     [self step:^{
         NSMutableArray *args=[NSMutableArray arrayWithArray:@[@"-hide_banner",@"-nostdin",@"-loglevel",@"error",@"-y"]];
         for(NSURL *input in self.inputs){[args addObjectsFromArray:@[@"-protocol_whitelist",@"file,crypto"]];if([input.pathExtension isEqual:@"m3u8"]){

@@ -25,6 +25,9 @@ static const NSTimeInterval kRDCurlFallbackSegmentDeadline = 3600.0;
     id<RDDownloadBackend> _native;
 }
 
+// 只读访问器（审计修复）：暴露内层原生后端，供能力判定沿链查找。
+- (id<RDDownloadBackend>)nativeBackend { return _native; }
+
 - (instancetype)initWithNativeBackend:(id<RDDownloadBackend>)nativeBackend {
     if ((self = [super init])) {
         _native = nativeBackend;

@@ -194,7 +194,8 @@ static NSArray *RDBrowserCandidates(void) {
             NSData *enc = [self blobColumn:stmt index:3];
             NSString *path = [self stringColumn:stmt index:4];
             BOOL secure = sqlite3_column_int(stmt, 5) != 0;
-            (void)sqlite3_column_int(stmt, 6);   // httpOnly 列：不保留（见下方注释）
+
+            BOOL httponly = sqlite3_column_int(stmt, 6) != 0;   // is_httponly：审计修复后如实保留
             int64_t expires = sqlite3_column_int64(stmt, 7);
             if (host.length == 0 || name.length == 0) { failed++; continue; }
 
@@ -216,8 +217,10 @@ static NSArray *RDBrowserCandidates(void) {
             props[NSHTTPCookieDomain] = host;      // host_key 自带前导点（域 Cookie）
             props[NSHTTPCookiePath] = path.length ? path : @"/";
             if (secure) props[NSHTTPCookieSecure] = @"TRUE";
-            // 注：NSHTTPCookie 无 HTTPOnly 属性键；该标志只限制页面 JS 读取，
-            // 不影响探测请求携带 Cookie，故导入时不保留、功能无损。
+            // 2026-10-07 审计修复：原注释称「NSHTTPCookie 无 HTTPOnly 属性键」，
+            // 该断言经实测为**错误**——该键存在且构造后 properties 回读完整保留。
+            // 现从 sqlite 的 is_httponly 列如实还原。
+            if (httponly) props[@"HttpOnly"] = @"TRUE";
             NSDate *expiry = [self dateFromChromiumTimestamp:expires];
             if (expiry) props[NSHTTPCookieExpires] = expiry;   // 无过期 = 会话 Cookie
             NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:props];
