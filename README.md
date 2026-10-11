@@ -34,6 +34,10 @@ macOS 原生（Objective-C + AppKit）桌面应用：输入一个网址，探测
   会被一并采集。
 - **资源详情面板**：完整标题（多行显示、不省略）、时长 / 来源 / 下载直链等字段、
   缩略图及其生成进度（`RDThumbnailGenerator`）。
+- **在线预览**：详情区「预览」按钮直接流式播放所选资源（AVPlayer，不落盘）；
+  直链（mp4 / mov / m4a 等）与 HLS（含 AES-128 加密流）可播，多档位 HLS 播放所选画质
+  （改写 master 只留所选变体）；所有请求带来源页 Referer 并经 URL 安全策略事前校验；
+  DRM / DASH / WebM 等不支持的格式给出可读理由。
 - **下载管理**：多任务下载（`DownloadManager`）、断点与完整性校验（`DownloadStore`）、
   自适应传输调度（`AdaptiveTransferScheduler`）、HLS 分片流式下载（`RDStreamDownloadTask`），
   分片流由随包的 ffmpeg 合流；入队前按「本批在途总量 + 保底水位」预检目标卷剩余空间。

@@ -23,7 +23,7 @@ for dir in "$ROOT" "$ROOT/App" "$ROOT/Features/ResourceDetector" "$ROOT/Features
            "$ROOT/Shared/UI" "$ROOT/Shared/UI/DesignSystem" "$BUILD/generated"; do INCLUDES+=("-I$dir"); done
 # 编译生产代码；App main 被改名，不启动 NSApplication/窗口/浏览器。
 xcrun clang -fobjc-arc -g -O1 -fsanitize=address -mmacosx-version-min=13.0 \
-  -framework Cocoa -framework WebKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
+  -framework Cocoa -framework WebKit -framework AVKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
   -framework QuartzCore -framework ImageIO -framework UniformTypeIdentifiers -framework Security \
   -lsqlite3 \
   "${INCLUDES[@]}" "${SRC[@]}" -o "$OUT/UnifiedPresentationTests" >"$OUT/compile.log" 2>&1

@@ -36,7 +36,7 @@ for i in $(seq 1 3); do
 done
 SEED="$SEED { identifier = \"ui-cancel-1\"; state = 4; fileName = \"ui-cancel-1.mp4\"; sourceURL = \"https://cdn.example.com/ui-cancel-1.mp4\"; destinationURL = \"file:///tmp/ui-cancel-1.mp4\"; }, )"
 
-"$BIN" -FinishedDownloadJobs "$SEED" >/tmp/rd-download-list-ui-app.log 2>&1 &
+"$BIN" -FinishedDownloadJobs "$SEED" -RDTestSilentWindow YES >/tmp/rd-download-list-ui-app.log 2>&1 &
 APP_PID=$!
 trap 'kill "$APP_PID" 2>/dev/null || true' EXIT
 

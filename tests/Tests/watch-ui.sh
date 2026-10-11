@@ -219,7 +219,7 @@ for dir in "$ROOT" "$ROOT/App" "$ROOT/Features/ResourceDetector" "$ROOT/Features
            "$ROOT/Shared/Infrastructure" "$ROOT/Shared/Infrastructure/Async" "$ROOT/Shared/Infrastructure/Performance" \
            "$ROOT/Shared/UI" "$ROOT/Shared/UI/DesignSystem" "$BUILD/generated"; do INCLUDES+=("-I$dir"); done
 xcrun clang -fobjc-arc -g -O1 -fsanitize=address -mmacosx-version-min=13.0 \
-  -framework Cocoa -framework WebKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
+  -framework Cocoa -framework WebKit -framework AVKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
   -framework QuartzCore -framework ImageIO -framework UniformTypeIdentifiers -framework Security \
   -lsqlite3 \
   "${INCLUDES[@]}" "${SRC[@]}" -o "$OUT/WatchUIProbe" >"$OUT/compile.log" 2>&1 \

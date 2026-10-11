@@ -25,7 +25,7 @@ for dir in "$ROOT" "$ROOT/App" "$ROOT/Features/ResourceDetector" "$ROOT/Features
 # 编译生产代码（与 fix-chain.sh 同一基线）；App main 改名，不启动 NSApplication。
 # 只替换最底层网络 transport（固定延迟）与下载入队记录。
 xcrun clang -fobjc-arc -g -O1 -fsanitize=address -mmacosx-version-min=13.0 \
-  -framework Cocoa -framework WebKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
+  -framework Cocoa -framework WebKit -framework AVKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
   -framework QuartzCore -framework ImageIO -framework UniformTypeIdentifiers -framework Security \
   -lsqlite3 \
   "${INCLUDES[@]}" "${SRC[@]}" -o "$OUT/UserFeedbackTests" >"$OUT/compile.log" 2>&1

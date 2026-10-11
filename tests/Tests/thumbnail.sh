@@ -25,7 +25,7 @@ for dir in "$ROOT" "$ROOT/App" "$ROOT/Features/ResourceDetector" "$ROOT/Features
 # Compile production classes; renamed application main is never called. No NSApplication/window/browser.
 # ASan checks invalid release/use-after-free while images are used after callbacks return.
 xcrun clang -fobjc-arc -g -O1 -fsanitize=address -mmacosx-version-min=13.0 \
-  -framework Cocoa -framework WebKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
+  -framework Cocoa -framework WebKit -framework AVKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
   -framework QuartzCore -framework ImageIO -framework UniformTypeIdentifiers -framework Security \
   -lsqlite3 \
   "${INCLUDES[@]}" "${SRC[@]}" -o "$OUT/ThumbnailTests" >"$OUT/compile.log" 2>&1

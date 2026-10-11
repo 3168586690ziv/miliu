@@ -21,6 +21,8 @@
 #import "RDHybridPageProbe.h"
 #import "RDManualVerification.h"   // 手动验证后继续探测（第 13 轮接线）
 #import "RDWatchlistPage.h"        // 追更页（同窗口第四个页面容器；契约 WATCH-V1 §3.4/§3.5）
+#import "RDPreviewController.h"    // 预览播放编排（第 35 轮：探测命中不下载、直接预览）
+#import "RDPreviewWindow.h"        // 预览窗口关闭通知（第 35 轮）
 #import "RDGeneratedVersion.h"  // 构建期生成（scripts/generate-version.sh → build/generated/）
 
 // AppKit 的 NSProgressIndicator 即使把 frame 压到 1px，仍可能按控件尺寸
@@ -314,6 +316,7 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 @property NSTextField *linkTitleLabel;
 @property NSTextField *linkField;
 @property NSButton *linkCopyButton;
+@property NSButton *detailPreviewButton;   // 预览（第 35 轮，与下载并排）
 @property NSButton *detailDownloadButton;
 @property RDMetadataService *metadataService;
 @property RDMetadataToken *metadataToken;
@@ -386,6 +389,8 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 - (void)requirePresentationForMediaWhilePreparing:(DetectedMedia *)media;
 - (void)refreshDetailPresentation;
 - (void)downloadSelected:(id)sender;
+// 预览（第 35 轮）：详情面板「预览」按钮 → RDPreviewController
+- (void)previewSelected:(id)sender;
 // ⌘空格：暂停/继续当前下载（CGEventTap 前台接管，见实现）
 - (void)toggleDownloadPauseResume:(id)sender;
 - (void)installSpaceHotkeyTap;
@@ -578,6 +583,11 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
 - (void)applicationDidFinishLaunching:(NSNotification *)n {
 
     RDLogWrite(@"app", @"applicationDidFinishLaunching");
+    // 预览窗口被用户关掉（红绿灯）→ 回收播放器与环回服务器（第 35 轮）
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(previewWindowDidClose)
+                                                 name:RDPreviewWindowDidCloseNotification
+                                               object:nil];
     // BUG-010 option A: this UI is a deliberate warm-paper light design. Pin it
     // before windows are built so dynamic label colors stay dark in Dark Mode.
     NSApp.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
@@ -788,7 +798,16 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     [self installSessionHandlersForGeneration:self.scanGeneration];
 
     [self.window center];
-    [self.window makeKeyAndOrderFront:nil];
+    // 测试静默窗口（第 35 轮，不抢前台铁律）：套件以 -RDTestSilentWindow YES 启动 App 时，
+    // 窗口挪到屏幕外且只 orderFront（不 makeKey）——AX 仍能读到窗口树供测试断言，
+    // 但用户屏幕上不出现任何窗口、焦点不被抢占。
+    if ([NSUserDefaults.standardUserDefaults boolForKey:@"RDTestSilentWindow"]) {
+        self.window.alphaValue = 0.0;                                   // 透明（AX 树仍在）
+        self.window.frameOrigin = NSMakePoint(-20000, 20000);           // 屏外双保险
+        [self.window orderFront:nil];
+    } else {
+        [self.window makeKeyAndOrderFront:nil];
+    }
     [self.window makeFirstResponder:self.urlField];
 
     [self installSpaceHotkeyTap]; // ⌘空格 暂停/继续（前台接管，需辅助功能授权）
@@ -947,6 +966,13 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     self.linkCopyButton.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
     [self.detailPane addSubview:self.linkCopyButton];
 
+    self.detailPreviewButton = [NSButton buttonWithTitle:@"预览" target:self action:@selector(previewSelected:)];
+    self.detailPreviewButton.controlSize = NSControlSizeSmall;
+    self.detailPreviewButton.font = [NSFont systemFontOfSize:11];
+    self.detailPreviewButton.frame = NSMakeRect(0, 36, 76, 24);
+    self.detailPreviewButton.autoresizingMask = NSViewMinYMargin;  // x 由 layoutDetailContent 双按钮并排计算
+    [self.detailPane addSubview:self.detailPreviewButton];
+
     self.detailDownloadButton = [NSButton buttonWithTitle:@"下载" target:self action:@selector(downloadSelected:)];
     self.detailDownloadButton.controlSize = NSControlSizeSmall;
     self.detailDownloadButton.font = [NSFont systemFontOfSize:11];
@@ -958,7 +984,7 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
                            self.formatTitle, self.formatValue, self.sizeTitle,
                            self.sizeValue, self.dimensionTitle, self.dimensionValue, self.sourceTitle, self.sourceValue,
                            self.variantPicker, self.linkTitleLabel, self.linkField, self.linkCopyButton,
-                           self.detailDownloadButton];
+                           self.detailPreviewButton, self.detailDownloadButton];
     // 其余 caption 也要收进 detailContent —— 补齐
     for (NSView *sub in self.detailPane.subviews) {
         if (sub.tag == 0 && sub != self.emptyHint && ![self.detailContent containsObject:sub]) {
@@ -1114,6 +1140,10 @@ static NSString *RDFormatForMediaURL(NSString *urlString) {
     }
     [self configureDetailForMedia:next];
     if (cover && [current.poster isEqual:next.poster]) self.thumbView.image = cover;
+    // 预览进行中切档 → 预览跟随所选档位重启（第 35 轮：预览与下载共用 currentDownloadMedia）。
+    if ([RDPreviewController isPreviewActive]) {
+        [RDPreviewController startPreviewForMedia:self.currentDownloadMedia policy:[URLPolicy new]];
+    }
 }
 
 - (void)copyLink:(id)sender {
@@ -1905,7 +1935,15 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     CGFloat linkW = MAX(80, contentW - copyW - 6);
     if (self.linkField) self.linkField.frame = NSMakeRect(marginX, linkY, linkW, linkFieldH);
     if (self.linkCopyButton) self.linkCopyButton.frame = NSMakeRect(marginX + linkW + 6, linkY + 3, copyW, copyW);
-    if (self.detailDownloadButton) self.detailDownloadButton.frame = NSMakeRect(floor((paneW - 76) / 2.0), buttonY, 76, buttonH);
+    // 预览与下载并排居中（预览在左），间距 12pt
+    if (self.detailPreviewButton && self.detailDownloadButton) {
+        CGFloat pairW = 76 * 2 + 12;
+        CGFloat pairX = floor((paneW - pairW) / 2.0);
+        self.detailPreviewButton.frame = NSMakeRect(pairX, buttonY, 76, buttonH);
+        self.detailDownloadButton.frame = NSMakeRect(pairX + 88, buttonY, 76, buttonH);
+    } else if (self.detailDownloadButton) {
+        self.detailDownloadButton.frame = NSMakeRect(floor((paneW - 76) / 2.0), buttonY, 76, buttonH);
+    }
 
     // 隐藏的分辨率行不参与布局
     if (self.dimensionTitle) self.dimensionTitle.hidden = YES;
@@ -3779,6 +3817,18 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
     if (job.destinationURL) [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[job.destinationURL]];
 }
 
+- (void)previewSelected:(id)sender {
+    DetectedMedia *media = self.currentDownloadMedia;
+    if (!media || !media.mediaURL.length) { self.statusNote.stringValue = @"请先选择一个资源（列表中点击一行）"; return; }
+    // URLPolicy 为纯逻辑策略（探测入口每次 [URLPolicy new] 的既有用法保持一致）。
+    [RDPreviewController startPreviewForMedia:media policy:[URLPolicy new]];
+}
+
+// 预览窗口关闭（用户点红绿灯或代码 close）：停播放、回收环回（第 35 轮）
+- (void)previewWindowDidClose {
+    [RDPreviewController stopPreview];
+}
+
 - (void)downloadSelected:(id)sender {
     NSInteger row = self.table.selectedRow;
     NSArray<DetectedMedia *> *visible = self.visibleMedia;
@@ -4114,6 +4164,12 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
     RDLogRotateIfNeeded();
     RDLogWrite(@"app", @"启动 DISPLAY_VERSION=%@ CODE_LINES=%ld FIX_ROUND=%ld", RD_GENERATED_VERSION_STRING, (long)RD_GENERATED_CODE_LINES, (long)RD_GENERATED_FIX_ROUND);
     NSApplication *app = [NSApplication sharedApplication];
+    // 测试静默启动（第 35 轮，不抢前台铁律的根治版）：套件以 -RDTestSilentWindow YES
+    // 启动时，进程设为 Accessory——无 Dock 图标、无菜单栏、永不激活前台；
+    // 窗口由 delegate 挪到屏外 orderFront 供 AX 读回。对用户零视觉与焦点干扰。
+    if ([NSUserDefaults.standardUserDefaults boolForKey:@"RDTestSilentWindow"]) {
+        [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    }
     ResourceDetectorAppDelegate *delegate = [ResourceDetectorAppDelegate new];
     app.delegate = delegate;
     [app run];
