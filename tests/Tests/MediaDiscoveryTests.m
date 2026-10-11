@@ -7,6 +7,7 @@
 #import "WebProbe.h"
 #import "RDStaticScriptAnalyzer.h"
 #import "DetectedMedia.h"
+#import "RDURLUtilities.h"
 
 static int gPassed = 0, gFailed = 0;
 static void Check(BOOL ok, NSString *msg) {
@@ -169,6 +170,122 @@ int main(int argc, const char *argv[]) {
                 @"</body></html>";
             RDProbeResult *r = [RDProbeAnalyzer analyzeHTML:html baseURL:[NSURL URLWithString:@"https://example.com/"]];
             Check(ContainsURL(r, @"https://cdn.example.com/audio/track.mp3"), @"<audio src> 的 mp3 被发现");
+        }
+
+        // ── 10. 同族画质变体聚合（2026-10-10 主人实测回归）──
+        // 主人现场：X 推文的一段视频被拆成 3 份（视频内容一致、音频与码率不同）。
+        // 根因：三个 mp4 变体由接口响应体扫描得到，不带播放器身份、也不在任何
+        // <video> 块内，于是每条各占一行。这里用真实变体地址钉住行为。
+        {
+            NSArray *realVariants = @[
+                @"https://video.twimg.com/amplify_video/2106365084197081089/vid/avc1/320x568/LVeXB7POqVg1M4xm.mp4?tag=29",
+                @"https://video.twimg.com/amplify_video/2106365084197081089/vid/avc1/480x852/YCTMYGMAGuFCPErk.mp4?tag=29",
+                @"https://video.twimg.com/amplify_video/2106365084197081089/vid/avc1/720x1280/ZEvOVjJWQ42yPPF-.mp4?tag=29",
+            ];
+            NSMutableString *dyn = [NSMutableString string];
+            for (NSString *u in realVariants) {
+                [dyn appendString:[RDBridgeEventSynthesizer syntheticHTMLForEvent:
+                    @{@"action":@"resource", @"url":u, @"kind":@"video", @"source":@"fetch_body"}]];
+            }
+            RDProbeResult *r = [RDProbeAnalyzer analyzeHTML:dyn
+                                                    baseURL:[NSURL URLWithString:@"https://x.com/kng308054331091/status/2107362612174627211"]];
+            Check(r.media.count == 3, [NSString stringWithFormat:@"三个变体都被发现（实际 %lu）", (unsigned long)r.media.count]);
+            NSString *family = nil;
+            BOOL allShare = YES;
+            for (DetectedMedia *m in r.media) {
+                if (!m.videoFamilyID.length) { allShare = NO; break; }
+                if (!family) family = m.videoFamilyID;
+                else if (![family isEqualToString:m.videoFamilyID]) { allShare = NO; break; }
+            }
+            Check(allShare && family.length > 0, @"三个变体共享同一 family（同一视频一行）");
+            NSArray *labels = r.media.firstObject.declaredVariants.count
+                ? [r.media.firstObject.declaredVariants valueForKey:@"label"] : @[];
+            Check([labels containsObject:@"480p"] && [labels containsObject:@"720p"],
+                  [NSString stringWithFormat:@"档位表含 480p 与 720p（实际 %@）", [labels componentsJoinedByString:@","]]);
+            // 320x568 短边 568 距 480 偏差 88 > 48（10% 容差）→ 按既有产品规则不归档。
+            Check(labels.count == 2, [NSString stringWithFormat:@"非标准档 320x568 不伪造档位（档位数 %lu）", (unsigned long)labels.count]);
+        }
+        // 10b) 清单与直链同族（HLS master + 同片 mp4 直链 → 同一行）
+        {
+            Check(RDSameQualityVariantFamily(
+                      @"https://video.twimg.com/amplify_video/2106365084197081089/pl/0RrrnsRoDY-PUyiQ.m3u8?tag=29",
+                      @"https://video.twimg.com/amplify_video/2106365084197081089/vid/avc1/720x1280/ZEvOVjJWQ42yPPF-.mp4?tag=29"),
+                  @"同一媒体 ID 下 m3u8 与 mp4 判为同族");
+            Check(!RDSameQualityVariantFamily(
+                      @"https://cdn.example.com/a/playlist.m3u8",
+                      @"https://cdn.example.com/b/movie.mp4"),
+                  @"仅 1 段共同前缀的清单与直链不误判同族");
+        }
+        // 10c) 判据不得误合并：目录号不同 / 文件名主干不同 / 跨 host → 仍是不同视频
+        {
+            Check(!RDSameQualityVariantFamily(
+                      @"https://cdn.example.com/series/1/ep.mp4",
+                      @"https://cdn.example.com/series/2/ep.mp4"),
+                  @"目录号不同（1/ vs 2/）不误判同族");
+            Check(!RDSameQualityVariantFamily(
+                      @"https://cdn.example.com/a/ep01.mp4",
+                      @"https://cdn.example.com/a/ep02.mp4"),
+                  @"文件名主干不同（ep01 vs ep02）不误判同族");
+            Check(!RDSameQualityVariantFamily(
+                      @"https://cdn.example.com/v/movie1-480p.mp4",
+                      @"https://cdn.example.com/v/movie2-720p.mp4"),
+                  @"不同主干同档位后缀（movie1-480p vs movie2-720p）不误判同族");
+            Check(!RDSameQualityVariantFamily(
+                      @"https://cdn.example.com/720p/a.mp4",
+                      @"https://cdn.example.com/1080p/b.mp4"),
+                  @"第一段即分辨率目录（共同前缀为空）不误判同族");
+            Check(RDSameQualityVariantFamily(
+                      @"https://cdn.example.com/vid/avc1/320x568/a.mp4",
+                      @"https://cdn.example.com/vid/avc1/720x1280/b.mp4"),
+                  @"同目录仅分辨率分量不同 → 同族");
+            Check(RDSameQualityVariantFamily(
+                      @"https://cdn.example.com/v/a-480p.mp4",
+                      @"https://cdn.example.com/v/a-720p.mp4"),
+                  @"文件名主干尾部 -480p/-720p → 同族");
+            Check(!RDSameQualityVariantFamily(
+                      @"https://a.example.com/v/720x1280/a.mp4",
+                      @"https://b.example.com/v/720x1280/a.mp4"),
+                  @"跨 host 不误判同族");
+        }
+        // 10d) 无变体关系的两条媒体仍各自成行（不获得 family）
+        {
+            NSString *dyn = [NSString stringWithFormat:@"%@%@",
+                [RDBridgeEventSynthesizer syntheticHTMLForEvent:
+                    @{@"action":@"resource", @"url":@"https://cdn.example.com/a/first.mp4", @"kind":@"video", @"source":@"fetch_body"}],
+                [RDBridgeEventSynthesizer syntheticHTMLForEvent:
+                    @{@"action":@"resource", @"url":@"https://cdn.example.com/b/second.mp4", @"kind":@"video", @"source":@"fetch_body"}]];
+            RDProbeResult *r = [RDProbeAnalyzer analyzeHTML:dyn baseURL:[NSURL URLWithString:@"https://example.com/"]];
+            BOOL anyFamily = NO;
+            for (DetectedMedia *m in r.media) if (m.videoFamilyID.length) anyFamily = YES;
+            Check(!anyFamily, @"无变体关系的两条媒体不获得 family（各自成行）");
+        }
+        // 10e) 规模边界：同族聚合不得是 O(n²)（第 32 轮同类性能教训）
+        // 构造最坏形态：900 条互不同族的地址（逐对全量比较时每条都要扫完所有簇，
+        // 实测 800 条要 2.8 秒）+ 100 组三档变体。分桶实现应远低于 3 秒。
+        {
+            NSMutableArray<DetectedMedia *> *media = [NSMutableArray array];
+            for (NSUInteger i = 0; i < 900; i++) {
+                DetectedMedia *m = [DetectedMedia new];
+                m.mediaURL = [NSString stringWithFormat:@"https://agg.example.com/video/%lu/clip-%lu.mp4", (unsigned long)i, (unsigned long)i];
+                m.resourceKind = RDResourceKindVideo;
+                [media addObject:m];
+            }
+            for (NSUInteger i = 0; i < 100; i++) {
+                for (NSString *q in @[@"480x854", @"720x1280", @"1080x1920"]) {
+                    DetectedMedia *m = [DetectedMedia new];
+                    m.mediaURL = [NSString stringWithFormat:@"https://agg.example.com/t/%lu/vid/%@/part.mp4", (unsigned long)i, q];
+                    m.resourceKind = RDResourceKindVideo;
+                    [media addObject:m];
+                }
+            }
+            CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+            [RDProbeAnalyzer groupQualityVariantFamilies:media];
+            double dt = CFAbsoluteTimeGetCurrent() - t0;
+            NSUInteger groupedCount = 0;
+            for (DetectedMedia *m in media) if (m.videoFamilyID.length) groupedCount++;
+            Check(media.count == 1200, [NSString stringWithFormat:@"规模用例：1200 条全部参与（实际 %lu）", (unsigned long)media.count]);
+            Check(groupedCount == 300, [NSString stringWithFormat:@"规模用例：100 组三档各归一族（实际带族 %lu 条）", (unsigned long)groupedCount]);
+            Check(dt < 3.0, [NSString stringWithFormat:@"规模用例：1200 条聚合 %.3f 秒（须 < 3 秒，防 O(n²) 回归）", dt]);
         }
 
         if (gFailed == 0) NSLog(@"GRAB-UPGRADE-PASSED checks=%d", gPassed);

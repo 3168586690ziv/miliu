@@ -44,6 +44,11 @@ NS_ASSUME_NONNULL_BEGIN
 @interface RDProbeAnalyzer : NSObject
 // 纯函数：分析 HTML 与 baseURL，返回结构化结果。html 为空/解析失败 → isBadPage=YES。
 + (RDProbeResult *)analyzeHTML:(NSString * _Nullable)html baseURL:(NSURL * _Nullable)baseURL;
+// 同族画质变体聚合（2026-10-10）：对尚未取得分组身份的媒体，按「同 host 同
+// 扩展名、路径第一处不同分量是分辨率形态」的通用判据归族并生成档位声明；
+// 清单与直链（同媒体 ID 前缀 ≥2 段）同族。已有 videoFamilyID 的成员不动。
+// 分桶实现（O(n)），大页面不退化成 O(n²)。
++ (void)groupQualityVariantFamilies:(NSMutableArray<DetectedMedia *> *)ordered;
 // 纯函数：URL → 归一化格式名（mp4/webm/hls/dash/mkv/ts/mp3/flac/…；不认识返回 unknown）。
 + (NSString *)formatFromURL:(NSString *)url;
 // 纯函数：该格式是否属于可下载媒体（视频/清单/音频统一白名单）。静态腿各路径共用。

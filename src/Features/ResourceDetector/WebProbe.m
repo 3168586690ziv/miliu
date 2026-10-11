@@ -679,6 +679,8 @@ static BOOL RDIsHTTPURL(NSString *value) { NSURL *url=[NSURL URLWithString:value
             }
         }
     }
+    // ── 同族画质变体聚合（2026-10-10 真实网址回归）──
+    [RDProbeAnalyzer groupQualityVariantFamilies:ordered];
     // Blob/MediaSource 只能证明播放器已经产生了播放线索，不能伪造一个可下载 URL。
     // 生产桥把它编码成 meta，结果仍然可解释且不会进入下载列表。
     NSRegularExpression *clueRe = [NSRegularExpression regularExpressionWithPattern:@"<meta\\b[^>]*\\bname\\s*=\\s*[\\\"']rd-unresolved-clue[\\\"'][^>]*>"
@@ -695,6 +697,87 @@ static BOOL RDIsHTTPURL(NSString *value) { NSURL *url=[NSURL URLWithString:value
     r.media = [ordered copy];
     r.hasVideo = (r.media.count > 0) || ([lower containsString:@"<video"]);
     return r;
+}
+
+#pragma mark - 同族画质变体聚合（2026-10-10 真实网址回归）
+
+// 现场问题：X/Twitter 推文的一段视频以三个地址出现
+//（…/vid/avc1/320x568/a.mp4、…/480x852/b.mp4、…/720x1280/c.mp4），
+// 它们由接口响应体扫描（fetch_body/xhr_body）得到、不带播放器身份，
+// 也落在任何 <video> 块之外，于是三条各占一行——用户看到同一段视频被
+// 拆成三份，而不是一行三档可切。
+//
+// 判据：路径第一处不同的分量是分辨率形态（RDSameQualityVariantFamily），
+// 即「同目录同扩展名、仅分辨率分量不同」。这条判据与站点无关：任何按
+// 分辨率分目录/分文件名的站点都适用；目录号、集号、文件名主干等差异
+// 一律不成立，绝不把不同视频误并成一行。
+//
+// 性能：先按 RDQualityVariantBucketKeys 分桶（O(n)），只在同键候选之间
+// 做完整判据复核——大页面（几百条媒体）不再是逐对全量比较的 O(n²)
+//（第 32 轮同类教训：逐对比较 800 条地址实测 2.8 秒）。
+// 仅处理尚未取得 family 的非图片媒体：已有播放器身份的条目以播放器为准，
+// 播放器身份是更强的证据（同一播放器 = 同一视频）。
++ (void)groupQualityVariantFamilies:(NSMutableArray<DetectedMedia *> *)ordered {
+    if (ordered.count < 2) return;
+    NSMutableArray<DetectedMedia *> *ungrouped = [NSMutableArray array];
+    for (DetectedMedia *m in ordered) {
+        if (m.resourceKind == RDResourceKindImage) continue;
+        if (m.videoFamilyID.length) continue;
+        if (!m.mediaURL.length) continue;
+        [ungrouped addObject:m];
+    }
+    if (ungrouped.count < 2) return;
+    NSMutableDictionary<NSString *, NSMutableArray<DetectedMedia *> *> *dirBuckets = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSMutableArray<DetectedMedia *> *> *fileBuckets = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSMutableArray<DetectedMedia *> *> *kindBuckets = [NSMutableDictionary dictionary];
+    NSMutableArray<NSMutableArray<DetectedMedia *> *> *clusters = [NSMutableArray array];
+    for (DetectedMedia *m in ungrouped) {
+        NSURL *url = [NSURL URLWithString:m.mediaURL ?: @""];
+        NSString *dirKey = nil, *fileKey = nil, *ownKindKey = nil, *crossKindKey = nil;
+        RDQualityVariantBucketKeys(url, &dirKey, &fileKey, &ownKindKey, &crossKindKey);
+        NSMutableArray<DetectedMedia *> *target = nil;
+        if (dirKey.length) target = dirBuckets[dirKey];
+        if (!target && fileKey.length) target = fileBuckets[fileKey];
+        if (!target && crossKindKey.length) target = kindBuckets[crossKindKey];
+        // 键相等只是必要条件；仍要与簇代表做完整判据复核（键碰撞不误并）
+        if (target && !RDSameQualityVariantFamily(target.firstObject.mediaURL, m.mediaURL)) target = nil;
+        if (!target) { target = [NSMutableArray array]; [clusters addObject:target]; }
+        [target addObject:m];
+        if (dirKey.length && !dirBuckets[dirKey]) dirBuckets[dirKey] = target;
+        if (fileKey.length && !fileBuckets[fileKey]) fileBuckets[fileKey] = target;
+        if (ownKindKey.length && !kindBuckets[ownKindKey]) kindBuckets[ownKindKey] = target;
+    }
+    for (NSMutableArray<DetectedMedia *> *cluster in clusters) {
+        if (cluster.count < 2) continue;   // 单成员：不是变体组，保持独立行
+        // 用「最小 URL」构造确定性 family 身份：同一批地址无论探测顺序
+        // 如何都得到同一身份（测试可复现，重扫不漂移）。
+        NSArray<NSString *> *urls = [[cluster valueForKey:@"mediaURL"] sortedArrayUsingSelector:@selector(compare:)];
+        NSString *family = [@"quality:" stringByAppendingString:urls.firstObject];
+        // 画质声明：从路径分辨率分量解析。这不是「伪造档位」——分辨率是
+        // 地址本身携带的事实（…/720x1280/… 就是 720p 短边）；解析不出
+        // 标准档时不生成任何档位，与既有「非标准尺寸不产生档位」规则一致。
+        // 清单（HLS master/DASH）本身不携带分辨率：它作为同族成员归入
+        // 同一行，但不参与档位归一化——否则会凭空多出一个「未知档位」。
+        NSMutableArray<RDQualityCandidate *> *candidates = [NSMutableArray array];
+        for (DetectedMedia *m in cluster) {
+            if (m.resourceKind == RDResourceKindManifest || m.isManifest) continue;
+            double w = 0, h = 0;
+            if (!RDResolutionFromURLPath([NSURL URLWithString:m.mediaURL ?: @""], &w, &h)) continue;
+            RDQualityCandidate *c = [RDQualityCandidate new];
+            c.url = m.mediaURL;
+            if (w > 0 && h > 0) { c.pixelWidth = w; c.pixelHeight = h; }
+            else if (h > 0) c.declaredLabel = [NSString stringWithFormat:@"%ldp", (long)h];
+            c.kind = m.resourceKind;
+            c.discoverySource = m.discoverySource;
+            [candidates addObject:c];
+        }
+        NSArray<NSDictionary *> *variants = candidates.count >= 2
+            ? [RDQualityTier normalizedVariantsFromCandidates:candidates] : @[];
+        for (DetectedMedia *m in cluster) {
+            m.videoFamilyID = family;
+            if (variants.count >= 1) m.declaredVariants = variants;
+        }
+    }
 }
 
 @end
