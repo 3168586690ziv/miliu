@@ -10,7 +10,7 @@ exec > >(tee "$OUT/test.log") 2>&1
 # 构建期版本头（幂等：只重算代码行数，不改变修复轮数）
 bash "$REPO/scripts/generate-version.sh" >/dev/null
 printf 'Focused local production-class tests: %s\n' "$(date -u)"
-SRC=("$REPO/build/ui-probe/DetailProbe.m" "$ROOT/App/ResourceResultRowView.m")
+SRC=("$REPO/build/ui-probe/DetailProbe.m" "$ROOT/App/ResourceResultRowView.m" "$ROOT/App/RDWatchlistPage.m")
 while IFS= read -r f; do SRC+=("$f"); done < <(find "$ROOT/Features" -name '*.m' -print | sort)
 for f in AppError DNSResolver HTTPPrivacyPolicy IPAddressPolicy HTTPRequest HTTPResult HTTPClient PreferencesStore RDLog; do
   SRC+=("$ROOT/Shared/Infrastructure/$f.m")
@@ -27,6 +27,7 @@ for dir in "$ROOT" "$ROOT/App" "$ROOT/Features/ResourceDetector" "$ROOT/Features
 xcrun clang -fobjc-arc -g -O1 -fsanitize=address -mmacosx-version-min=13.0 \
   -framework Cocoa -framework WebKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
   -framework QuartzCore -framework ImageIO -framework UniformTypeIdentifiers -framework Security \
+  -framework AVKit \
   -lsqlite3 \
   "${INCLUDES[@]}" "${SRC[@]}" -o "$OUT/DetailProbe" >"$OUT/compile.log" 2>&1
 "$OUT/DetailProbe" "$@"

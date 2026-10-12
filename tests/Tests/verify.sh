@@ -349,15 +349,22 @@ if ! rg -q 'kRDQueueStarvationGrace' "$ROOT/Features/ResourceDownload/DownloadMa
 fi
 
 # 4f. 链接依赖纪律（2026-10-12 第 36 轮核查新增）。
-#     本项目的复发型失效：生产文件新增框架依赖后，**编译它们的套件脚本没跟着补**——
-#     套件从此编译不过，等于该套件自那一刻起再没真正跑过，而日志里还留着旧日的 PASS。
-#     已发生三次：第 28 轮缺 -lsqlite3、第 35 轮缺 -framework AVKit、第 36 轮接 TLS 容错层
-#     后 retry-after / external-scripts / preview-playback 三个套件缺 -framework Security。
-#     这里不再逐个补，而是按「生产引用关系」反推：凡编译了 RDTLSTrust 使用者的套件，
-#     必须链接 Security。请勿删除——它是这条纪律唯一的自动化看门人。
-for _suite in "$REPO"/tests/Tests/*.sh; do
+#     本项目的复发型失效：生产文件新增框架依赖后，**编译它们的脚本没跟着补**——
+#     脚本从此编译不过，等于它自那一刻起再没真正跑过，而日志里还留着旧日的 PASS。
+#     已发生四次：第 28 轮缺 -lsqlite3、第 35 轮缺 -framework AVKit（**两处几何探针**）、
+#     第 36 轮接 TLS 容错层后 retry-after / external-scripts / preview-playback 缺 Security。
+#     这里不再逐个补，而是按「生产引用关系」反推依赖，做成长效看门人。
+#
+#     2026-10-12 复核修复（本看门人自身的盲区）：首版只遍历 `tests/Tests/*.sh`，
+#     而第 35 轮 AVKit 的两个复发点都在 `build/*-probe/*.sh`（设置页几何探针 probe.sh、
+#     详情面板探针 detail-probe.sh）——**看门人全绿而探针已死**。现在扫描集合扩到两处，
+#     并补一条同族断言：凡编译 `src/Features` 全树的脚本都必须链接 AVKit
+#     （该目录含 RDPreviewWindow.m，它 import AVKit）。
+#     请勿删除——它是这条纪律唯一的自动化看门人。
+_rd_scan_scripts=$(ls "$REPO"/tests/Tests/*.sh "$REPO"/build/*-probe/*.sh 2>/dev/null)
+for _suite in $_rd_scan_scripts; do
   _b="$(basename "$_suite")"
-  [ "$_b" = "verify.sh" ] && continue    # verify 走 build.sh，生产构建自带 Security
+  [ "$_b" = "verify.sh" ] && continue    # verify 走 build.sh，生产构建自带全部框架
   _hit=""
   for _u in RDMetadataTransport DownloadManager DownloadCapabilityProbe RDPreviewController StaticHTMLDiscoveryPageProbe; do
     grep -qE "(^|[^A-Za-z])${_u}([^A-Za-z]|\$)" "$_suite" 2>/dev/null || continue
@@ -367,7 +374,13 @@ for _suite in "$REPO"/tests/Tests/*.sh; do
     fi
   done
   if [ -n "$_hit" ] && ! grep -q '\-framework Security' "$_suite"; then
-    echo "FAIL: $_b 编译了 TLS 容错层使用者($_hit) 但未链接 -framework Security（该套件编译不过）" >&2
+    echo "FAIL: $_b 编译了 TLS 容错层使用者($_hit) 但未链接 -framework Security（该脚本编译不过）" >&2
+    exit 1
+  fi
+  # 同族：编译 Features 全树 ⇒ 必然收进 RDPreviewWindow.m ⇒ 必须链接 AVKit
+  if grep -q 'find "\$ROOT/Features"' "$_suite" 2>/dev/null &&
+     ! grep -q '\-framework AVKit' "$_suite"; then
+    echo "FAIL: $_b 编译 Features 全树（含 import AVKit 的 RDPreviewWindow.m）但未链接 -framework AVKit" >&2
     exit 1
   fi
 done

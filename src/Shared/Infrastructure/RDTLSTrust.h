@@ -61,37 +61,67 @@ static inline BOOL RDTLSAllowRevokedCertificateEnabled(void) {
     return [ud boolForKey:RDTLSAllowRevokedCertificateKey];
 }
 
-/// 证书是否被吊销：判据是「**只有 leaf 一项带 error，且该 error 是吊销**」。
+/// 从系统错误里取出「出错的是链上第几张证书」。
 ///
-/// 用 `SecTrustCopyProperties` 而不是 `SecTrustCopyResult` 的 `TrustResultDetails`：
-/// 后者的每个元素是「错误码字符串 → 详情数组」的字典（key 本身就是错误码），
-/// 与前者「每证书一个 {error, title}」的形态完全不同。本机实测确认
-/// CopyProperties 的形态正好是判据需要的：
+/// **为什么必须用它**（2026-10-12 复核实测，P0）：`SecTrustCopyProperties` 的
+/// 错误**归属不可靠**——本机用本地 OCSP 注入「中间证书被吊销 + leaf 完全合法」
+/// 的链时，它同样把 error 放在数组第 0 项、`title` 写的却是 **leaf** 的名字，
+/// 于是只看 props 会把「中间 CA 被吊销」误判成「leaf 被吊销」并放行（3/3 复现）。
+/// 可靠的索引只出现在错误的 underlying 描述里，形如
+/// `Certificate 1 "Review Intermediate" has errors: …`；真实站点 hanime2.org
+/// 那轮则是 `Certificate 0 "hanime2.org" has errors: …`。
+///
+/// 取不到索引时返回 NSNotFound，调用方必须**保守拒绝**——错误格式变化绝不能
+/// 变成放行（fail-closed）。
+static NSUInteger RDTLSFailingCertificateIndexFromError(NSError *_Nullable error) {
+    if (!error) return NSNotFound;
+    NSString *text = error.localizedDescription ?: @"";
+    id underlying = error.userInfo[NSUnderlyingErrorKey];
+    if ([underlying isKindOfClass:[NSError class]]) {
+        NSString *d = ((NSError *)underlying).localizedDescription;
+        if (d.length) text = d;
+    }
+    NSRange anchor = [text rangeOfString:@"Certificate "];
+    if (anchor.location == NSNotFound) return NSNotFound;
+    NSUInteger i = anchor.location + anchor.length;
+    NSUInteger value = 0;
+    BOOL any = NO;
+    while (i < text.length) {
+        unichar c = [text characterAtIndex:i];
+        if (c < '0' || c > '9') break;
+        value = value * 10u + (NSUInteger)(c - '0');
+        any = YES;
+        if (value > 256) return NSNotFound;
+        i++;
+    }
+    return any ? value : NSNotFound;
+}
+
+/// 证书是否被吊销：判据是「**链上只有一处 error、该 error 是吊销、且出错的就是 leaf**」。
+///
+/// 用 `SecTrustCopyProperties` 读「每个证书有无 error」，但它的**错误归属不可靠**
+/// （见上），因此「出错的是哪一张」另从 `trustError` 的 underlying 描述取，两者都要过。
+///
+/// 理想形态（真实站点实测）：
 ///   ( { error = "CSSMERR_TP_CERT_REVOKED"; title = "hanime2.org"; },
 ///     { title = YE1; }, { title = "Root YE"; }, { title = "ISRG Root X2"; } )
-/// 即：只有 leaf 带 error，链上其余证书（中间证书、根、锚）全部无 error
+/// 即：只有 leaf 带 error，链上其余（中间证书、根、锚）全部无 error
 /// ⇒ 域名/有效期/信任锚/基本约束/签名全部通过，**唯一**的失败项是吊销。
 ///
-/// 任一条件不满足即返回 NO——宁可保守拒绝，也不把其他失败形态一并放松。
-static inline BOOL RDTLSTrustRevocationIsOnlyFailure(SecTrustRef _Nullable trust, NSString *_Nullable *_Nullable why) {
-    if (!trust) return NO;
-    // SecTrustCopyProperties 自 macOS 12 起标为弃用，但官方替代品
-    // SecTrustCopyResult 的 TrustResultDetails 形态完全不同（每个元素是
-    // 「错误码字符串 → 详情数组」的字典，key 即错误码），拿不到「哪一张证书
-    // 带哪个 error」这一层信息，而本判据恰好只需要这一层。
-    // 实测对比（本机、同一证书链）：
-    //   CopyProperties → ( {error=CSSMERR_TP_CERT_REVOKED; title=hanime2.org;},
-    //                      {title=YE1;}, {title="Root YE";}, {title="ISRG Root X2;} )
-    //   CopyResult.TrustResultDetails → ({CSSMERR_TP_CERT_REVOKED = (...);}, ...)
-    // 因此保留本调用，并把弃用警告在最小范围内显式收敛。
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    CFArrayRef rawProps = SecTrustCopyProperties(trust);
-#pragma clang diagnostic pop
-    if (!rawProps) return NO;
-    NSArray *props = (__bridge_transfer NSArray *)rawProps;
-    if (props.count == 0) return NO;
-
+/// 判据的**纯逻辑部分**（测试可直接调用，不需要真实 SecTrust）：
+/// `props` = `SecTrustCopyProperties` 的输出；`failingIndex` = 系统错误里给出的
+/// 出错证书索引（NSNotFound 表示取不到）。返回 YES 当且仅当：
+///   ① 整条链上**只有一处** error；
+///   ② 该 error 是吊销（REVOKED）；
+///   ③ 出错的就是链上第 0 张（leaf）—— 索引取不到时**拒绝**（fail-closed）。
+///
+/// 抽成独立函数是 2026-10-12 复核的整改：原先测试里复制了一份「等价内联版本」，
+/// 于是删掉生产判据的关键段落后套件仍 12/12 全绿（实测复现）——8/12 条断言
+/// 实际没有守卫作用。现在测试直接调本函数，改动生产逻辑必须让测试变红。
+static inline BOOL RDTLSTrustRevocationPropsIndicateLeafOnly(NSArray *_Nullable props,
+                                                             NSUInteger failingIndex,
+                                                             NSString *_Nullable *_Nullable why) {
+    if (![props isKindOfClass:[NSArray class]] || props.count == 0) return NO;
     NSUInteger withError = 0;
     NSString *soleError = nil;
     for (id entry in props) {
@@ -105,15 +135,93 @@ static inline BOOL RDTLSTrustRevocationIsOnlyFailure(SecTrustRef _Nullable trust
     // 「只有一个失败项」是硬前提：两个以上说明问题不止吊销。
     if (withError != 1 || soleError.length == 0) return NO;
     if (![soleError containsString:@"REVOKED"]) return NO;
-    // 该失败项必须落在链上**第一张**证书（leaf）上，否则是中间证书/根被吊销，
-    // 性质不同（那才是真需要警惕的中间人形态），不放行。
-    id first = props.firstObject;
-    if (![first isKindOfClass:[NSDictionary class]]) return NO;
-    id firstErr = ((NSDictionary *)first)[@"error"];
-    if (![firstErr isKindOfClass:[NSString class]] || ![((NSString *)firstErr) containsString:@"REVOKED"]) return NO;
-
+    // 出错证书必须**就是 leaf**。不能用 props[0] 判断——它的归属不可靠
+    // （中间证书被吊销时同样落在第 0 项、title 仍是 leaf 的名字），必须看
+    // 错误给出的索引；索引取不到同样拒绝（fail-closed）。
+    if (failingIndex != 0) {
+        if (why) *why = [NSString stringWithFormat:@"%@，但出错证书索引=%@（不是 leaf，拒绝）",
+                         soleError, (failingIndex == NSNotFound ? @"未知" : @(failingIndex).stringValue)];
+        return NO;
+    }
     if (why) *why = [NSString stringWithFormat:@"证书已吊销（%@，链上其余证书无任何失败项）", soleError];
     return YES;
+}
+
+/// 证书是否被吊销、且唯一失败项落在 leaf（真实 SecTrust 入口）。
+/// 任一条件不满足即返回 NO——宁可保守拒绝，也不把其他失败形态一并放松。
+static inline BOOL RDTLSTrustRevocationIsOnlyFailure(SecTrustRef _Nullable trust,
+                                                     NSError *_Nullable trustError,
+                                                     NSString *_Nullable *_Nullable why) {
+    if (!trust) return NO;
+    // SecTrustCopyProperties 自 macOS 12 起标为弃用，但官方替代品
+    // SecTrustCopyResult 的 TrustResultDetails 形态完全不同（每个元素是
+    // 「错误码字符串 → 详情数组」的字典，key 即错误码），拿不到「哪一张证书
+    // 带哪个 error」这一层信息，而本判据恰好只需要这一层。
+    // 因此保留本调用，并把弃用警告在最小范围内显式收敛。
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    CFArrayRef rawProps = SecTrustCopyProperties(trust);
+#pragma clang diagnostic pop
+    if (!rawProps) return NO;
+    NSArray *props = (__bridge_transfer NSArray *)rawProps;
+    return RDTLSTrustRevocationPropsIndicateLeafOnly(props,
+                                                     RDTLSFailingCertificateIndexFromError(trustError),
+                                                     why);
+}
+
+/// SAN 条目是否涵盖 host（**纯逻辑**，测试可直接注入 entries，无需真实证书）。
+/// entries = `SecCertificateCopyValues(kSecOIDSubjectAltName)` 的 `kSecPropertyKeyValue`。
+///
+/// 只认 **DNS Name** 条目（2026-10-12 复核修复，P0）：原实现用 `containsString:@"DNS"`
+/// 判 label，并对「值含点」的条目开了一条「兼容不同系统版本」的回退分支 —— 实测该
+/// 回退会把 `Email Address`（值为 victim.example）与 otherName（label 是 OID 如
+/// 1.2.3.4、值为 other.example）**当成 DNS 名**，于是「证书并不覆盖该 host」的结论
+/// 被翻转。端到端 PoC：一张 SAN=email:victim.example 的证书，在系统明确判
+/// name-does-not-match 的情况下，仅因它同时被吊销，本层即放行。
+/// 现在只接受 label 严格等于 "DNS Name" 的条目；不匹配即跳过，无回退。
+static inline BOOL RDTLSTrustSANEntriesCoverHost(NSArray *_Nullable entries, NSString *_Nullable host) {
+    if (![entries isKindOfClass:[NSArray class]] || !host.length) return NO;
+    NSString *lowerHost = host.lowercaseString;
+    for (id entry in entries) {
+        if (![entry isKindOfClass:[NSDictionary class]]) continue;
+        NSDictionary *item = (NSDictionary *)entry;
+        id label = item[(__bridge NSString *)kSecPropertyKeyLabel];
+        id value = item[(__bridge NSString *)kSecPropertyKeyValue];
+        NSString *name = nil;
+        if ([value isKindOfClass:[NSString class]] &&
+            [label isKindOfClass:[NSString class]] &&
+            [(NSString *)label isEqualToString:@"DNS Name"]) {
+            name = (NSString *)value;
+        }
+        if (!name.length) continue;
+        NSString *pattern = name.lowercaseString;
+        NSRange star = [pattern rangeOfString:@"*"];
+        if (star.location == NSNotFound) {
+            if ([pattern isEqualToString:lowerHost]) return YES;
+            continue;
+        }
+        // 通配形态收敛（2026-10-12 复核修复，P0）：必须严格是 `*.example.com`——
+        //   (a) `*` 唯一且位于最左标签；
+        //   (b) 其下一个字符必须是 `.`；
+        //   (c) 后缀至少两个标签（拒绝 `*.com` 这类跨公共后缀的通配）。
+        // 原实现只做 `hasSuffix:`，实测 `*.com` 能匹配 `x.com`、
+        // `*foo.example` 能匹配 `barfoo.example`（`*` 后未要求 `.`）。
+        // 裸 `*` 也会因 `hasSuffix:@""` 的未文档化行为而处于危险边缘，这里直接拒绝。
+        if (star.location != 0) continue;
+        if ([pattern rangeOfString:@"*"
+                           options:0
+                             range:NSMakeRange(1, pattern.length - 1)].location != NSNotFound) continue;
+        if (pattern.length < 4) continue;                       // `*.` 之后至少要有两个字符
+        if ([pattern characterAtIndex:1] != '.') continue;
+        NSString *suffix = [pattern substringFromIndex:1];      // ".example.com"
+        NSArray<NSString *> *labels = [suffix componentsSeparatedByString:@"."];
+        if (labels.count < 3) continue;                         // ".com" → 1 个有效标签，拒绝
+        if ([lowerHost hasSuffix:suffix]) {
+            NSString *prefix = [lowerHost substringToIndex:lowerHost.length - suffix.length];
+            if (prefix.length > 0 && ![prefix containsString:@"."]) return YES;
+        }
+    }
+    return NO;
 }
 
 /// 手工复核 SAN 是否涵盖 host（放行前的第二道闸，不依赖评估器的 hostname 判定）。
@@ -137,35 +245,7 @@ static inline BOOL RDTLSTrustHostCoveredByCertificate(SecTrustRef _Nullable trus
     NSArray *entries = san[(__bridge NSString *)kSecPropertyKeyValue];
     if (![entries isKindOfClass:[NSArray class]]) return NO;
 
-    NSString *lowerHost = host.lowercaseString;
-    for (id entry in entries) {
-        if (![entry isKindOfClass:[NSDictionary class]]) continue;
-        NSDictionary *item = (NSDictionary *)entry;
-        id label = item[(__bridge NSString *)kSecPropertyKeyLabel];
-        id value = item[(__bridge NSString *)kSecPropertyKeyValue];
-        // 只认 DNS 名条目：label 是 kSecPropertyTypeDNSName 里的 "DNS Name"
-        // （也接受裸字符串形态，兼容不同系统版本的呈现差异）。
-        NSString *name = nil;
-        if ([value isKindOfClass:[NSString class]]) {
-            NSString *text = (NSString *)value;
-            if ([label isKindOfClass:[NSString class]] && [((NSString *)label) containsString:@"DNS"]) name = text;
-            else if ([text containsString:@"."] || [text containsString:@"*"]) name = text;
-        }
-        if (!name.length) continue;
-        NSString *pattern = name.lowercaseString;
-        if (![pattern containsString:@"*"]) {
-            if ([pattern isEqualToString:lowerHost]) return YES;
-            continue;
-        }
-        // 通配只允许覆盖第一个点之前的那一段（RFC 6125 的常见收敛做法）：
-        // *.hanime2.org 匹配 www.hanime2.org，不匹配 a.b.hanime2.org。
-        NSString *suffix = [pattern substringFromIndex:1];   // ".hanime2.org"
-        if ([lowerHost hasSuffix:suffix]) {
-            NSString *prefix = [lowerHost substringToIndex:lowerHost.length - suffix.length];
-            if (prefix.length > 0 && ![prefix containsString:@"."]) return YES;
-        }
-    }
-    return NO;
+    return RDTLSTrustSANEntriesCoverHost(entries, host);
 }
 
 /// 统一评估：给 NSURLSession 的挑战处理用。返回结论并（放行时）填充理由。
@@ -177,16 +257,20 @@ static inline RDTLSTrustVerdict RDTLSEvaluateServerTrust(SecTrustRef _Nullable t
     if (!trust) return RDTLSTrustVerdictReject;
     CFErrorRef cfError = NULL;
     if (SecTrustEvaluateWithError(trust, &cfError)) {
+        if (cfError) CFRelease(cfError);
         return RDTLSTrustVerdictUseDefault;   // 系统信任：什么都不改
     }
-    NSString *failure = cfError ? [(__bridge NSError *)cfError localizedDescription] : nil;
+    // 失败原因与「出错的是哪一张证书」都要带上：判据不能只看 CopyProperties
+    // 的归属（它会把中间证书的吊销错误写到第 0 项、title 记成 leaf）。
+    NSError *trustError = cfError ? (__bridge_transfer NSError *)cfError : nil;
+    NSString *failure = trustError.localizedDescription;
     if (!RDTLSAllowRevokedCertificateEnabled()) {
         if (reason) *reason = [NSString stringWithFormat:@"严格模式：%@", failure ?: @"证书不受信任"];
         return RDTLSTrustVerdictReject;
     }
     NSString *why = nil;
-    if (!RDTLSTrustRevocationIsOnlyFailure(trust, &why)) {
-        if (reason) *reason = failure ?: @"证书不受信任（非吊销类失败）";
+    if (!RDTLSTrustRevocationIsOnlyFailure(trust, trustError, &why)) {
+        if (reason) *reason = why.length ? why : (failure ?: @"证书不受信任（非吊销类失败）");
         return RDTLSTrustVerdictReject;
     }
     // 吊销是唯一失败项：再手工复核 SAN，避免「吊销的证书恰好也不是这个域名」。
