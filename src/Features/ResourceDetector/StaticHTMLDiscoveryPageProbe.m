@@ -958,28 +958,55 @@ didCompleteWithError:(NSError *)error {
         return;
     }
     NSMutableArray<DetectedMedia *> *pending = [NSMutableArray array];
+    NSString *firstTextReject = nil;
     for (DetectedMedia *m in media) {
         NSURL *u = [NSURL URLWithString:m.mediaURL ?: @""];
-        if (u && [self.gate textDecisionForURL:u].allowed && u.host.length) {
-            [pending addObject:m];
+        BOOL ok = (u && [self.gate textDecisionForURL:u].allowed && u.host.length);
+        if (ok) [pending addObject:m];
+        else if (!firstTextReject) {
+            URLPolicyDecision *td = u ? [self.gate textDecisionForURL:u] : nil;
+            firstTextReject = [NSString stringWithFormat:@"%@ host=%@ 原因=%@",
+                               u ? @"文本阶段被拒" : @"URL 无法解析",
+                               u.host ?: @"(无host)",
+                               td.userMessage.length ? td.userMessage : @"(无说明)"];
         }
     }
+    // 这一步是「候选为何全被剔除」的唯一可观测点：此前全链路无日志，
+    // 出问题只能靠猜（2026-10-13 现场：分析器出 73 条、静态腿出 0 条却无任何线索）。
+    RDLogWrite(@"probe", @"静态腿候选校验 候选=%lu 文本通过=%lu%s%@",
+               (unsigned long)media.count, (unsigned long)pending.count,
+               firstTextReject ? " 首个文本拒绝: " : "",
+               firstTextReject ?: @"");
     if (!pending.count) {
         [self finishContext:ctx media:@[] error:nil];
         return;
     }
     NSMutableArray<DetectedMedia *> *approved = [NSMutableArray array];
     __block NSUInteger remaining = pending.count;
+    __block NSString *firstVerifyReject = nil;
     __weak typeof(self) w = self;
     for (DetectedMedia *m in pending) {
         [self.gate verifyURLAsync:[NSURL URLWithString:m.mediaURL]
                        completion:^(URLPolicyDecision *decision) {
             __strong typeof(w) s = w;
             if (!s) return;
-            if (ctx.cancelled) return;   // 校验期间被取消：finishContext 已作废
-            if (decision.allowed) [approved addObject:m];
+            // 递减必须在校消检查之前：否则被取消的那条会永久占着 remaining，
+            // 整批校验再也不会收尾（此前该缺陷只在取消路径暴露，故长期未显现）。
             remaining -= 1;
+            if (ctx.cancelled) return;   // 校验期间被取消：finishContext 已作废
+            if (decision.allowed) {
+                [approved addObject:m];
+            } else if (!firstVerifyReject) {
+                firstVerifyReject = [NSString stringWithFormat:@"host=%@ 原因=%@",
+                                     m.mediaURL.length ? ([NSURL URLWithString:m.mediaURL].host ?: @"(无host)") : @"(无URL)",
+                                     decision.userMessage.length ? decision.userMessage : @"(无说明)"];
+            }
             if (remaining == 0 && !ctx.finished) {
+                RDLogWrite(@"probe", @"静态腿候选校验完成 通过=%lu 拒绝=%lu%s%@",
+                           (unsigned long)approved.count,
+                           (unsigned long)(pending.count - approved.count),
+                           firstVerifyReject ? " 首个DNS拒绝: " : "",
+                           firstVerifyReject ?: @"");
                 [s finishContext:ctx media:[approved copy] error:nil];
             }
         }];

@@ -15,6 +15,10 @@ while IFS= read -r f; do SRC+=("$f"); done < <(find "$ROOT/Features" -name '*.m'
 for f in AppError DNSResolver HTTPPrivacyPolicy IPAddressPolicy HTTPRequest HTTPResult HTTPClient PreferencesStore RDLog; do
   SRC+=("$ROOT/Shared/Infrastructure/$f.m")
 done
+# 第 38 轮接线新增的被 App.m 直接引用的 App 层源：SettingsProbe.m `#import` 生产 App.m，
+# 漏掉它就 `Undefined symbols: _OBJC_CLASS_$_RDMetadataRecoveryCoordinator` 链接失败
+#（本机实测 rc=1，2026-10-13）。
+SRC+=("$ROOT/App/RDMetadataRecoveryCoordinator.m")
 SRC+=("$ROOT/Shared/Infrastructure/Async/RequestGeneration.m" "$ROOT/Shared/Infrastructure/Performance/PerformancePolicy.m"
       "$ROOT/Shared/UI/DesignSystem/ColorTokens.m" "$ROOT/Shared/UI/DesignSystem/TypographyTokens.m"
       "$ROOT/Shared/UI/StateView.m" "$ROOT/Shared/UI/UIThemeSupport.m")

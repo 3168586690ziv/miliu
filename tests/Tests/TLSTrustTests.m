@@ -136,6 +136,28 @@ static void FailingIndexTests(void) {
     Check(RDTLSFailingCertificateIndexFromError(eNone) == NSNotFound,
           @"索引解析：无 \"Certificate N\" → NSNotFound（调用方据此拒绝）");
     Check(RDTLSFailingCertificateIndexFromError(nil) == NSNotFound, @"索引解析：nil → NSNotFound");
+
+    // ③-2 本地化锚点（2026-10-13 真机 P0，逐字来自本机 zh_CN bundle 实测）：
+    // CFBundleDevelopmentRegion=zh_CN 的进程里，同一个「leaf 被吊销」的 underlying
+    // 描述是「证书0“hanime2.org”有错误：证书已撤销;」，英文锚点 "Certificate "
+    // 不存在 ⇒ 修复前索引取不到 ⇒ fail-closed 拒绝 ⇒ 静态腿整条探测失败。
+    // 守卫：两种本地化形态都必须解出同一索引；判据不因语言放宽（无数字+引号结构仍拒绝）。
+    NSError *eZh0 = [NSError errorWithDomain:@"NSOSStatusErrorDomain" code:-67820 userInfo:@{
+        NSLocalizedDescriptionKey: @"“hanime2.org”证书已撤销",
+        NSUnderlyingErrorKey: [NSError errorWithDomain:@"NSOSStatusErrorDomain" code:-67820 userInfo:@{
+            NSLocalizedDescriptionKey: @"证书0“hanime2.org”有错误：证书已撤销;"
+        }]}];
+    NSError *eZh1 = [NSError errorWithDomain:@"NSOSStatusErrorDomain" code:-67820 userInfo:@{
+        NSLocalizedDescriptionKey: @"“Review Intermediate”证书已撤销",
+        NSUnderlyingErrorKey: [NSError errorWithDomain:@"NSOSStatusErrorDomain" code:-67820 userInfo:@{
+            NSLocalizedDescriptionKey: @"证书1“Review Intermediate”有错误：证书已撤销;"
+        }]}];
+    Check(RDTLSFailingCertificateIndexFromError(eZh0) == 0,
+          @"索引解析（中文本地化）：证书0“hanime2.org” → 0（leaf，容错放行前提）");
+    Check(RDTLSFailingCertificateIndexFromError(eZh1) == 1,
+          @"索引解析（中文本地化）：证书1“Review Intermediate” → 1（非 leaf，仍拒绝）");
+    Check(RDTLSFailingCertificateIndexFromError(eNone) == NSNotFound,
+          @"索引解析：无「数字+引号名称」结构（如 \"certificate is not trusted\"）→ NSNotFound，fail-closed");
 }
 
 // ── ④ 开关语义 ──

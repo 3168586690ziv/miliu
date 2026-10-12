@@ -86,6 +86,14 @@ test -s "$APP/Contents/Resources/AppIcon.icns"
 cmp -s "$APP/Contents/Resources/AppIcon.icns" "$RES/AppIcon.icns"
 sips -g pixelWidth -g pixelHeight "$APP/Contents/Resources/AppIcon.icns" >/dev/null
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Contents/Info.plist")" = "Miliu"
+# 4g TLS 容错不被 ATS 架空（2026-10-13 真机 P0）：bundle 进程里 ATS 会独立于 delegate 的
+# 信任结论再做一次系统信任评估并否决（实测日志 "ATS failed system trust" → -9802 → -1200），
+# 第 36 轮的容错层因此对静态腿完全失效——站点证书被 Apple 判「已吊销」时 0 资源。
+# 裸二进制无主 bundle、不加载 ATS 策略，其它套件照不出此缺陷，故这里做成结构性断言。
+# 安全边界不变：scheme/SSRF/file:// 仍由 URLPolicy 拦截，证书信任仍由 RDTLSTrust 窄容错把关。
+test "$(/usr/libexec/PlistBuddy -c 'Print :NSAppTransportSecurity:NSAllowsArbitraryLoads' "$APP/Contents/Info.plist")" = "true"
+# 同族：源 Packaging/Info.plist 必须同步携带（build.sh 直接拷贝该文件，漏源文件则下次构建回退）
+test "$(/usr/libexec/PlistBuddy -c 'Print :NSAppTransportSecurity:NSAllowsArbitraryLoads' "$ROOT/Packaging/Info.plist")" = "true"
 codesign --verify --deep --strict "$APP"
 
 # 机器独立性：不允许再引用 SevenZZ 主 App 的偏好套件

@@ -15,6 +15,9 @@ while IFS= read -r f; do SRC+=("$f"); done < <(find "$ROOT/Features" -name '*.m'
 for f in AppError DNSResolver HTTPPrivacyPolicy IPAddressPolicy HTTPRequest HTTPResult HTTPClient PreferencesStore RDLog; do
   SRC+=("$ROOT/Shared/Infrastructure/$f.m")
 done
+# 同 probe.sh：DetailProbe.m `#import` 生产 App.m，第 38 轮新增的被 App.m 直接引用
+# 的 App 层源必须一并编译，否则链接阶段 `Undefined symbols`（本机实测 rc=1）。
+SRC+=("$ROOT/App/RDMetadataRecoveryCoordinator.m")
 SRC+=("$ROOT/Shared/Infrastructure/Async/RequestGeneration.m" "$ROOT/Shared/Infrastructure/Performance/PerformancePolicy.m"
       "$ROOT/Shared/UI/DesignSystem/ColorTokens.m" "$ROOT/Shared/UI/DesignSystem/TypographyTokens.m"
       "$ROOT/Shared/UI/StateView.m" "$ROOT/Shared/UI/UIThemeSupport.m")

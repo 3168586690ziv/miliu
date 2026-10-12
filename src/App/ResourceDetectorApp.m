@@ -1443,8 +1443,23 @@ static NSString *RDFormatForMediaURL(NSString *urlString) {
 }
 
 // 仅配置已有行视图；不 reload/select，避免选择通知重入详情请求。
+// 行数守卫（2026-10-13 真机 P0）：本方法的行号取自 self.visibleMedia，而
+// numberOfRowsInTableView: 在统一呈现抑制期（explorationResultsSuppressed）返回 0，
+// 两者可能暂时不同步。异步回填（第 38 轮标题翻译 / 封面恢复 / 详情快照）恰好在
+// 这个窗口触发时，[table viewAtColumn:row:] 会因 row ≥ numberOfRows 抛出
+// NSTableViewException（实测 "Row index 72 out of row range (numberOfRows: 0)"
+// 直接终止进程）。行没呈现就没有可刷的对象，跳过即无害——呈现完成后
+// reloadTablePreservingSelection 会用同一份模型整体重建。
+//
+// 守卫读的是**自己的数据源**（numberOfRowsInTableView:），不读 NSTableView 的
+// numberOfRows 缓存属性：抑制期真正决定「有几行可取」的就是数据源本身；同时
+// 测试套件注入的表格替身（RDChainTable/RDTestTable/UPTable/UFChainTable）只
+// 复刻 App 调用的 AppKit 子集，未实现 numberOfRows——走数据源即对替身零侵入
+//（实测：改用 .numberOfRows 后 fix-chain/thumbnail/unified-presentation/
+//  user-feedback/performance-smoke 五套件全部 unrecognized selector → SIGABRT）。
 - (void)refreshVisibleRowForMedia:(DetectedMedia *)media {
     NSArray<DetectedMedia *> *visible = self.visibleMedia;
+    if ((NSInteger)visible.count != [self numberOfRowsInTableView:self.table]) return;
     for (NSUInteger row = 0; row < visible.count; row++) {
         if (visible[row] != media) continue;
         NSView *view = [self.table viewAtColumn:0 row:(NSInteger)row makeIfNecessary:NO];

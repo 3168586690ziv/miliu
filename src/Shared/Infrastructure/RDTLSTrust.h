@@ -73,6 +73,55 @@ static inline BOOL RDTLSAllowRevokedCertificateEnabled(void) {
 ///
 /// 取不到索引时返回 NSNotFound，调用方必须**保守拒绝**——错误格式变化绝不能
 /// 变成放行（fail-closed）。
+/// 与语言无关地取出「出错证书序号」：扫第一个「数字串 + 可选空白 + 引号名称」形态。
+///
+/// 为什么需要它（2026-10-13 真机 P0，本机复现）：系统错误文案**随进程本地化**。同一个
+/// 「leaf 被吊销」，在 `CFBundleDevelopmentRegion=zh_CN` 的 .app 里是
+/// `证书0“hanime2.org”有错误：证书已撤销;`，英文锚点 `Certificate ` 根本不存在
+/// ⇒ 索引取不到 ⇒ fail-closed 拒绝 ⇒ 静态腿（探测主链最先发请求的那条腿）整条失败，
+/// 用户看到的是一句 TLS 报错、0 个资源。而**所有测试套件都是无 bundle 的裸二进制**
+/// （开发区域默认 en），所以 38 套件全绿也照不出这个缺陷。
+///
+/// 两种语言的共同结构是「序号紧跟在引号包裹的证书名之前」：
+///   英文 `Certificate 0 “hanime2.org” has errors: …`
+///   中文 `证书0“hanime2.org”有错误：…`
+/// 中间证书出错时同理（`Certificate 1 "Review Intermediate"`），所以这条锚点仍能区分
+/// leaf 与中间证书，判据未被放宽。取不到一律 NSNotFound（fail-closed）。
+static NSUInteger RDTLSCertificateIndexBeforeQuotedName(NSString *_Nullable text) {
+    if (!text.length) return NSNotFound;
+    for (NSUInteger i = 0; i < text.length; i++) {
+        unichar c = [text characterAtIndex:i];
+        if (c < '0' || c > '9') continue;
+        NSUInteger j = i;
+        NSUInteger value = 0;
+        BOOL overflow = NO;
+        while (j < text.length) {
+            unichar d = [text characterAtIndex:j];
+            if (d < '0' || d > '9') break;
+            value = value * 10u + (NSUInteger)(d - '0');
+            if (value > 256) { overflow = YES; break; }
+            j++;
+        }
+        if (overflow) return NSNotFound;
+        NSUInteger k = j;
+        while (k < text.length) {                    // 半角 / 制表 / 全角空格
+            unichar s = [text characterAtIndex:k];
+            if (s == ' ' || s == '\t' || s == 0x3000) { k++; continue; }
+            break;
+        }
+        if (k < text.length) {
+            unichar q = [text characterAtIndex:k];
+            // “ ” " ' ‘ ’ 六种引号形态；证书名在两种语言里都被引号包着。
+            if (q == 0x201C || q == 0x201D || q == 0x0022 ||
+                q == 0x0027 || q == 0x2018 || q == 0x2019) {
+                return value;
+            }
+        }
+        i = j;   // 跳过整串数字，避免逐字符重扫
+    }
+    return NSNotFound;
+}
+
 static NSUInteger RDTLSFailingCertificateIndexFromError(NSError *_Nullable error) {
     if (!error) return NSNotFound;
     NSString *text = error.localizedDescription ?: @"";
@@ -81,20 +130,24 @@ static NSUInteger RDTLSFailingCertificateIndexFromError(NSError *_Nullable error
         NSString *d = ((NSError *)underlying).localizedDescription;
         if (d.length) text = d;
     }
+    // 锚点 1：英文 `Certificate N`（历史行为逐字保留，英文环境结论零变化）。
     NSRange anchor = [text rangeOfString:@"Certificate "];
-    if (anchor.location == NSNotFound) return NSNotFound;
-    NSUInteger i = anchor.location + anchor.length;
-    NSUInteger value = 0;
-    BOOL any = NO;
-    while (i < text.length) {
-        unichar c = [text characterAtIndex:i];
-        if (c < '0' || c > '9') break;
-        value = value * 10u + (NSUInteger)(c - '0');
-        any = YES;
-        if (value > 256) return NSNotFound;
-        i++;
+    if (anchor.location != NSNotFound) {
+        NSUInteger i = anchor.location + anchor.length;
+        NSUInteger value = 0;
+        BOOL any = NO;
+        while (i < text.length) {
+            unichar c = [text characterAtIndex:i];
+            if (c < '0' || c > '9') break;
+            value = value * 10u + (NSUInteger)(c - '0');
+            any = YES;
+            if (value > 256) return NSNotFound;
+            i++;
+        }
+        return any ? value : NSNotFound;
     }
-    return any ? value : NSNotFound;
+    // 锚点 2：与语言无关的「数字 + 引号名称」形态（本地化环境）。取不到仍 fail-closed。
+    return RDTLSCertificateIndexBeforeQuotedName(text);
 }
 
 /// 证书是否被吊销：判据是「**链上只有一处 error、该 error 是吊销、且出错的就是 leaf**」。

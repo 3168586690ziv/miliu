@@ -936,6 +936,37 @@ static void V7_ResultsHiddenUntilExplorationCompletes(void) {
           @"V7 提交时列表一次性呈现全部行（实际 %ld / 应 2）", (long)[app numberOfRowsInTableView:tableProbe]);
 }
 
+// V8：**异步行刷新的崩溃守卫**（2026-10-13 真机 P0 回归）。
+// refreshVisibleRowForMedia: 会被三类异步回调触发——第 38 轮标题翻译、封面恢复、
+// 详情快照。统一呈现抑制期（explorationResultsSuppressed=YES）里数据源
+// numberOfRowsInTableView: 返回 0，而 self.visibleMedia 仍有 N 条；行号取自模型的
+// 旧实现对 viewAtColumn:row: 传 row=N-1，AppKit 直接抛 NSTableViewException
+// "Row index 72 out of row range (numberOfRows: 0)" 终止进程（真机实测）。
+// 守卫断言：抑制期触发行刷新必须**零行视图配置、零异常**；抑制解除后同一回调
+// 必须恢复正常刷新。守卫读数用 self.table（替身），行视图计数用 lastRow。
+static void V8_AsyncRowRefreshMustNotTouchSuppressedTable(void) {
+    UPStubService *service; UPTable *table;
+    ResourceDetectorAppDelegate *app = MakeHeadlessApp(&service, &table);
+    app.explorationResultsSuppressed = YES;   // 统一呈现抑制期
+    DetectedMedia *row = UPVideo(@"https://fixture.invalid/suppressed.mp4", @"https://fixture.invalid/p.jpg");
+    [app.results addObject:row];
+
+    // ① 抑制期：异步回填到达。守卫生效时模型行数(1) != 数据源行数(0) → 直接返回。
+    //    修复前的实现在这里抛 NSTableViewException（本断言因此由「能活着跑完」背书）。
+    [app refreshVisibleRowForMedia:row];
+    Check(table.lastRow == nil,
+          @"V8 抑制期行刷新不得触碰表格（lastRow=%@，应 nil）", table.lastRow);
+
+    // ② 变异判别力：守卫读的是**自己的数据源**。若把数据源行数与模型对齐后，
+    //    同一回调必须真的刷新行视图——证明跳过分支不是「无条件跳过」。
+    table.lastRow = nil;
+    app.explorationResultsSuppressed = NO;    // 提交呈现：数据源行数 1 == 模型 1
+    [app.table reloadData];
+    [app refreshVisibleRowForMedia:row];
+    Check(table.lastRow != nil,
+          @"V8 抑制解除后行刷新必须正常配置行视图（同一条回调路径）");
+}
+
 int main(void) { @autoreleasepool {
     U1_CompletionWaitsForListThumbnails();
     U2_CompletionWaitsForDetailMetadata();
@@ -955,5 +986,6 @@ int main(void) { @autoreleasepool {
     U9_PrepProgressIsDrivenByRequirements();
     U10_AllDeclaredTiersMustBeExploredBeforeCompletion();
     V7_ResultsHiddenUntilExplorationCompletes();
+    V8_AsyncRowRefreshMustNotTouchSuppressedTable();
     CheckSummary();
 } return 0; }

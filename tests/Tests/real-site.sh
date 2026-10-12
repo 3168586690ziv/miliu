@@ -52,6 +52,10 @@ while IFS= read -r f; do SRC+=("$f"); done < <(find "$ROOT/Features" -name '*.m'
 for f in AppError DNSResolver HTTPPrivacyPolicy IPAddressPolicy HTTPRequest HTTPResult HTTPClient PreferencesStore RDLog; do
   SRC+=("$ROOT/Shared/Infrastructure/$f.m")
 done
+# RealSiteProbe.m `#import` 生产 App.m（`#define main` 改名后引入）：App.m 直接引用的
+# 每个 App 层源都必须一并编译，漏一个就 `Undefined symbols` 链接失败。第 38 轮新增
+# RDMetadataRecoveryCoordinator 后本脚本即因此编译不过（本机实测 rc=1，2026-10-13）。
+SRC+=("$ROOT/App/RDMetadataRecoveryCoordinator.m")
 SRC+=("$ROOT/Shared/Infrastructure/Async/RequestGeneration.m" "$ROOT/Shared/Infrastructure/Performance/PerformancePolicy.m"
       "$ROOT/Shared/UI/DesignSystem/ColorTokens.m" "$ROOT/Shared/UI/DesignSystem/TypographyTokens.m"
       "$ROOT/Shared/UI/StateView.m" "$ROOT/Shared/UI/UIThemeSupport.m")
