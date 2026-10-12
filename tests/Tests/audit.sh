@@ -24,6 +24,7 @@ for dir in "$ROOT" "$ROOT/App" "$ROOT/Features/ResourceDetector" "$ROOT/Features
            "$ROOT/Shared/UI" "$ROOT/Shared/UI/DesignSystem" "$BUILD/generated"; do INCLUDES+=("-I$dir"); done
 # Compile production classes; renamed application main is never called. No NSApplication/window/browser.
 # ASan checks invalid release/use-after-free while images are used after callbacks return.
+SRC+=("$ROOT/App/RDMetadataRecoveryCoordinator.m")   # 第 38 轮：本套件 import 生产 App.m，需一并编译其接线源
 xcrun clang -fobjc-arc -g -O1 -fsanitize=address -mmacosx-version-min=13.0 \
   -framework Cocoa -framework WebKit -framework AVKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
   -framework QuartzCore -framework ImageIO -framework UniformTypeIdentifiers -framework Security \

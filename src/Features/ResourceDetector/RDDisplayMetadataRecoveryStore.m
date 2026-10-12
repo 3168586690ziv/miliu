@@ -32,6 +32,9 @@ static NSString * const kConfidenceKey = @"confidence";
 
     components.fragment = nil;
     components.host = components.host.lowercaseString;
+    // scheme 在 URL 里大小写不敏感（RFC 3986）：不归一化会让同一页面因
+    // "HTTPS://" 与 "https://" 之别落到两条记录上，按来源页回补就会失效。
+    if (components.scheme.length) components.scheme = components.scheme.lowercaseString;
 
     // 去掉末尾斜杠差异。
     NSString *path = components.path ?: @"";

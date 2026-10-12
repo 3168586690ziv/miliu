@@ -45,6 +45,7 @@ extern NSString *const SevenZZKeyMoodHistoryRecords;
 extern NSString *const SevenZZKeyMoodHistoryDeletedSnapshot;
 extern NSString *const SevenZZKeyMoodHistoryDeletedSnapshotDate;
 extern NSString *const SevenZZKeySchemaVersion;
+extern NSString *const SevenZZKeyDisplayMetadataHistory;   // 展示元数据历史（按来源页存标题/封面，防 token 刷新后退化；第 38 轮接线）
 
 typedef NS_ENUM(NSInteger, SevenZZPreferenceType) {
     SevenZZPreferenceTypeInteger = 0,

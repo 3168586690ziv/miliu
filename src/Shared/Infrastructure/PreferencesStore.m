@@ -41,6 +41,7 @@ NSString *const SevenZZKeyMoodHistoryRecords             = @"MoodHistoryRecords"
 NSString *const SevenZZKeyMoodHistoryDeletedSnapshot     = @"MoodHistoryDeletedSnapshot";
 NSString *const SevenZZKeyMoodHistoryDeletedSnapshotDate = @"MoodHistoryDeletedSnapshotDate";
 NSString *const SevenZZKeySchemaVersion                  = @"SevenZZSchemaVersion";
+NSString *const SevenZZKeyDisplayMetadataHistory         = @"DisplayMetadataHistory";
 
 @implementation SevenZZPreferenceKeySpec
 + (instancetype)specWithKey:(NSString *)key
@@ -241,6 +242,7 @@ NSString *const SevenZZKeySchemaVersion                  = @"SevenZZSchemaVersio
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyMoodHistoryDeletedSnapshot type:SevenZZPreferenceTypeArray defaultValue:@[] owningPage:@"mood" migrationRule:@"用于恢复"]];
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyMoodHistoryDeletedSnapshotDate type:SevenZZPreferenceTypeString defaultValue:nil owningPage:@"mood" migrationRule:@"保留"]];
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeySchemaVersion type:SevenZZPreferenceTypeInteger defaultValue:@(0) owningPage:@"system" migrationRule:@"当前schema版本"]];
+    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyDisplayMetadataHistory type:SevenZZPreferenceTypeDictionary defaultValue:nil owningPage:@"media" migrationRule:@"保留；按来源页存标题/封面"]];
     return specs;
 }
 

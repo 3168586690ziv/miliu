@@ -24,6 +24,7 @@ for dir in "$ROOT" "$ROOT/App" "$ROOT/Features/ResourceDetector" "$ROOT/Features
            "$ROOT/Shared/UI" "$ROOT/Shared/UI/DesignSystem" "$BUILD/generated"; do INCLUDES+=("-I$dir"); done
 # 编译生产代码；App main 被改名，不启动 NSApplication/窗口/浏览器。
 # 只替身外部网络投递与下载入队，App 订阅回调/visibleMedia/downloadSelected 全部为生产实现。
+SRC+=("$ROOT/App/RDMetadataRecoveryCoordinator.m")   # 第 38 轮：本套件 import 生产 App.m，需一并编译其接线源
 xcrun clang -fobjc-arc -g -O1 -fsanitize=address -mmacosx-version-min=13.0 \
   -framework Cocoa -framework WebKit -framework AVKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
   -framework QuartzCore -framework ImageIO -framework UniformTypeIdentifiers -framework Security \

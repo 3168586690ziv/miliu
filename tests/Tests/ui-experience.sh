@@ -19,6 +19,7 @@ INCLUDES=()
 for dir in "$ROOT" "$ROOT/App" "$ROOT/Features/ResourceDetector" "$ROOT/Features/ResourceDownload" "$ROOT/Shared" \
            "$ROOT/Shared/Infrastructure" "$ROOT/Shared/Infrastructure/Async" "$ROOT/Shared/Infrastructure/Performance" \
            "$ROOT/Shared/UI" "$ROOT/Shared/UI/DesignSystem" "$REPO/build/generated"; do INCLUDES+=("-I$dir"); done
+SRC+=("$ROOT/App/RDMetadataRecoveryCoordinator.m")   # 第 38 轮：本套件 import 生产 App.m，需一并编译其接线源
 xcrun clang -fobjc-arc -g -O1 -fsanitize=address -mmacosx-version-min=13.0 \
   -framework Cocoa -framework WebKit -framework AVKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
   -framework QuartzCore -framework ImageIO -framework UniformTypeIdentifiers -framework Security \

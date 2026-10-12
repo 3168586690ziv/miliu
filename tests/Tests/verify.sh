@@ -385,4 +385,30 @@ for _suite in $_rd_scan_scripts; do
   fi
 done
 
+# 同族第三例（2026-10-12 第 38 轮）：有些套件**直接 `#import` 生产 App.m**，于是
+# App.m **直接引用**的每个 App 层源都必须被它们一并编译——漏一个就
+# `Undefined symbols: _OBJC_CLASS_$_<新类>` 链接失败。本轮新增
+# `RDMetadataRecoveryCoordinator` 后一次命中 **12 个脚本**，而它们的失败只写进各自
+# compile.log，套件日志里只留一行标题——最容易被当成「跑过了」。
+#
+# 只对「App.m 里以 `[[X alloc]`／`[X new]`／`X.class` 直接引用」的类要求：
+# 经 `NSClassFromString` 运行时装配的（RDAdaptiveTransport／RDCurlFallbackBackend）
+# 本就不该被套件编译，故排除；App.m 自身由 #import 引入，同样排除。
+# 只匹配真正的 `#import ... ResourceDetectorApp.m`（version.sh 只是 grep 它做语法
+# 破坏测试、并不编译，首版把它误判成需要，已修正）。
+_rd_app_srcs=$(grep -m1 '^SRC=(' "$REPO/scripts/build.sh" | grep -o 'App/[A-Za-z0-9_]*\.m' | sed 's|App/||' | sort -u)
+for _suite in "$REPO"/tests/Tests/*.sh; do
+  grep -q '#import.*src/App/ResourceDetectorApp\.m' "$_suite" 2>/dev/null || continue
+  _b="$(basename "$_suite")"
+  for _m in $_rd_app_srcs; do
+    [ "$_m" = "ResourceDetectorApp.m" ] && continue
+    _cls="${_m%.m}"
+    grep -qE "\[\[${_cls} alloc\]|\[${_cls} new\]|${_cls}\.class" "$ROOT/App/ResourceDetectorApp.m" 2>/dev/null || continue
+    grep -q "$_m" "$_suite" 2>/dev/null || {
+      echo "FAIL: $_b import 了生产 App.m，但未编译 App 层源 $_m（会 Undefined symbols 链接失败）" >&2
+      exit 1
+    }
+  done
+done
+
 echo "PASS: build, universal binary, macOS 13 target, bundle signing, app icon packaged and decodable, machine independence, no radar, view-based rows, slash-line UI with thin progress, download progress, site-mode, TLS trust tolerance, download-row uniform tint, and download wiring checks"

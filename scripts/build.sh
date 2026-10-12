@@ -58,7 +58,7 @@ CODE_LINES="$(sed -n 's/^CODE_LINES=//p' "$GEN/version.log" | head -1)"
 FIX_ROUND="$(sed -n 's/^FIX_ROUND=//p' "$GEN/version.log" | head -1)"
 DISPLAY_VERSION="$(sed -n 's/^DISPLAY_VERSION=//p' "$GEN/version.log" | head -1)"
 mkdir -p "$(dirname "$BIN")" "$OUT/Contents/Resources"
-SRC=("$SRCROOT/App/ResourceDetectorApp.m" "$SRCROOT/App/RDWatchlistPage.m" "$SRCROOT/App/ResourceResultRowView.m" "$SRCROOT/App/RDAdaptiveTransport.m" "$SRCROOT/App/RDCurlFallbackBackend.m")
+SRC=("$SRCROOT/App/ResourceDetectorApp.m" "$SRCROOT/App/RDWatchlistPage.m" "$SRCROOT/App/ResourceResultRowView.m" "$SRCROOT/App/RDAdaptiveTransport.m" "$SRCROOT/App/RDCurlFallbackBackend.m" "$SRCROOT/App/RDMetadataRecoveryCoordinator.m")
 for d in ResourceDetector ResourceDownload; do while IFS= read -r f; do SRC+=("$ROOT/$f"); done < <(find "$SRCROOT/Features/$d" -name '*.m' -print | sed "s#^$ROOT/##" | sort); done
 for f in AppError.m DNSResolver.m HTTPPrivacyPolicy.m IPAddressPolicy.m HTTPRequest.m HTTPResult.m HTTPClient.m RDLog.m RDCurlHopper.m; do SRC+=("$SRCROOT/Shared/Infrastructure/$f"); done
 for f in RequestGeneration.m PerformancePolicy.m; do SRC+=("$SRCROOT/Shared/Infrastructure/$( [ "$f" = PerformancePolicy.m ] && echo Performance || echo Async )/$f"); done

@@ -6,6 +6,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import "DiscoverySessionController.h"
 #import "DetectedMedia.h"
+#import "RDMetadataRecoveryCoordinator.h"   // 第 38 轮接线：元数据恢复编排（标题/封面防退化 + 标题翻译 + 封面恢复）
 #import "DownloadManager.h"
 #import "ResourceDownloadSettings.h"
 #import "PreferencesStore.h"
@@ -352,6 +353,7 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 @property (nonatomic, strong, nullable) id verificationCheckToken;  // 公开信号检查的 HTML 读取凭据
 @property (nonatomic, assign) NSInteger verificationCheckGeneration;
 @property DiscoverySessionController *session;
+@property (nonatomic, strong) RDMetadataRecoveryCoordinator *metadataRecovery;   // 第 38 轮接线
 @property DownloadManager *downloadManager;
 @property (nonatomic, copy) NSString *latestDownloadJobIdentifier;
 @property (nonatomic, strong) NSTimer *downloadRecencyTimer;
@@ -610,6 +612,15 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     self.downloadManager.delegate = self;
     self.refreshProbe = [[RDHybridPageProbe alloc] initWithPolicy:[URLPolicy new]];
     __weak typeof(self) refreshOwner = self;
+    // 第 38 轮接线：元数据恢复编排。重探测能力复用上面的 refreshProbe（单页探测），
+    // 于是恢复链第 4 步「重新访问来源页」走的是与探测链同一条实现，不另起一套。
+    self.metadataRecovery = [[RDMetadataRecoveryCoordinator alloc] initWithPolicy:[URLPolicy new]
+                                                                 reprobeHandler:^(NSURL *url, void (^completion)(NSArray<DetectedMedia *> * _Nullable)) {
+        [refreshOwner.refreshProbe probePageURL:url completion:^(NSArray<DetectedMedia *> *media, NSError *error) {
+            completion(media ?: @[]);
+        }];
+    }];
+    [self.metadataRecovery loadPersistedState];
     self.linkRefresher = [[DownloadLinkRefresher alloc] initWithManager:self.downloadManager reprobeHandler:^(NSURL *url, DownloadLinkReprobeCompletion completion) {
         [refreshOwner.refreshProbe probePageURL:url completion:completion];
     }];
@@ -1269,6 +1280,12 @@ static NSString *RDFormatForMediaURL(NSString *urlString) {
             if (snapshot.preview.state != RDMetadataLoading) {
                 self.thumbView.image = nil;
                 self.thumbShowsPosterImage = NO;
+                // 第 38 轮接线：封面**确实失败**（不是加载中）→ 交给恢复引擎做有限次恢复。
+                // 引擎自身保证「同一资源同时只有一条恢复链、一个生命周期只完整尝试一次」，
+                // 所以这里不需要再加去重；恢复成功会原位回填封面。
+                if (snapshot.preview.state == RDMetadataFailed || snapshot.preview.state == RDMetadataUnsupported) {
+                    [self attemptCoverRecoveryForMedia:m];
+                }
             }
             self.thumbStatusLabel.stringValue = snapshot.preview.statusText;
             self.thumbStatusLabel.hidden = NO;
@@ -1378,6 +1395,53 @@ static NSString *RDFormatForMediaURL(NSString *urlString) {
     for (DetectedMedia *m in visible) [self refreshVisibleRowForMedia:m];
 }
 
+// 第 38 轮接线：按来源页回补缺失的标题/封面。
+// 真实场景：站点 CDN 直链带 token，刷新后同一作品的 mediaURL 变了，标题/封面若只
+// 跟着 mediaURL 走就会「退化」成空；按来源页（作品页 URL）索引的历史记录正是为此存在。
+- (void)backfillDisplayMetadataForMedia:(NSArray<DetectedMedia *> *)media {
+    for (DetectedMedia *m in media) {
+        if (m.title.length && m.poster.length) continue;
+        RDResourceDisplayMetadata *known = [self.metadataRecovery metadataForSourcePageURL:m.sourcePageURL];
+        if (!known) continue;
+        if (!m.title.length && known.title.length) m.title = known.title;
+        if (!m.poster.length && known.posterURLString.length) m.poster = known.posterURLString;
+    }
+}
+
+// 第 38 轮接线：把非中文标题交给 ResourceTitleTranslator 翻译为简体中文。
+// 异步进行；翻译成功且确有变化时才回填标题并原位刷新该行（不整表 reload，
+// 不打断用户当前选择与滚动）。不需要翻译的标题由协调器同步回原文，无网络开销。
+- (void)translateTitlesIfNeededForMedia:(NSArray<DetectedMedia *> *)media {
+    for (DetectedMedia *m in media) {
+        NSString *original = m.title;
+        if (!original.length) continue;
+        __weak typeof(self) weakSelf = self;
+        [self.metadataRecovery resolvedTitleFor:original completion:^(NSString *resolved) {
+            typeof(self) sself = weakSelf;
+            if (!sself) return;
+            if (!resolved.length || [resolved isEqualToString:original]) return;
+            m.title = resolved;                       // 回填：同一对象，列表与详情共用
+            [sself refreshVisibleRowForMedia:m];
+        }];
+    }
+}
+
+// 第 38 轮接线：封面确实失败后启动有限次恢复（内存缓存 → 原 URL 重试 → 来源页重探测）。
+// 回填带与其它异步详情回填同一套守卫：世代未变且详情面板仍停在同一资源，绝不把
+// 恢复出来的封面画到别的资源上。
+- (void)attemptCoverRecoveryForMedia:(DetectedMedia *)media {
+    NSInteger generation = self.detailGeneration;
+    __weak typeof(self) weakSelf = self;
+    [self.metadataRecovery recoverCoverForMedia:media completion:^(NSImage *image) {
+        typeof(self) sself = weakSelf;
+        if (!sself || !image) return;
+        if (sself.detailGeneration != generation || sself.detailMedia != media) return;
+        sself.thumbView.image = image;
+        sself.thumbShowsPosterImage = YES;
+        sself.thumbStatusLabel.hidden = YES;
+    }];
+}
+
 // 仅配置已有行视图；不 reload/select，避免选择通知重入详情请求。
 - (void)refreshVisibleRowForMedia:(DetectedMedia *)media {
     NSArray<DetectedMedia *> *visible = self.visibleMedia;
@@ -1447,6 +1511,12 @@ static NSString *RDFormatForMediaURL(NSString *urlString) {
 
     [self.results removeAllObjects];
     [self.results addObjectsFromArray:media];
+    // 第 38 轮接线（顺序要紧）：先按来源页**回补**缺失的标题/封面（防 token 刷新或
+    // 重启后退化），再把补全后的元数据记回存储，最后才发起标题翻译。
+    [self backfillDisplayMetadataForMedia:media];
+    [self.metadataRecovery recordDetectedMedia:media];
+    [self translateTitlesIfNeededForMedia:media];
+    if (isFinal) [self.metadataRecovery persist];   // 只在终态落盘，避免 interim 频繁写偏好
     // Probe response lengths are unverified; metadata service validates file totals.
     for (DetectedMedia *m in self.results) m.sizeBytes = 0;
     if (isFinal) { self.scanning = NO; self.previewShown = NO; }
@@ -2909,6 +2979,16 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
                 sself.previewShown = YES;
                 sself.statusNote.stringValue = @"正在寻找媒体资源…";
             }
+        });
+    };
+    // 第 38 轮接线：列表页解析出的网站封面（详情页 URL → 封面 URL）同样落库。
+    // 这解决了「列表页先出封面、详情页稍后才探测完」的时序问题——此前该回调
+    // 从未被挂载，列表页封面信息直接丢弃。
+    self.session.listingPagePreviewHandler = ^(NSURL *listingPageURL, NSDictionary<NSString *, NSString *> *posterByPageURL){
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) sself = weakSelf;
+            if (!sself) return;
+            [sself.metadataRecovery recordListingPosters:posterByPageURL];
         });
     };
 }
