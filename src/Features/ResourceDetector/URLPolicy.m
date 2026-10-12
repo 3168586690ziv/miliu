@@ -6,6 +6,26 @@
 #import "RDLog.h"
 #import <arpa/inet.h>
 #import <netinet/in.h>
+#import <CFNetwork/CFNetwork.h>
+
+#pragma mark - 系统代理与 fake-ip（第 39 轮）
+
+// 测试注入（nil = 真实探测）。仅测试使用，生产路径不设置。
+static NSNumber *gRDSystemProxyOverride = nil;
+// 真实探测结果的短缓存：避免每个 URL 都去读系统配置。
+static BOOL gRDSystemProxyCached = NO;
+static NSTimeInterval gRDSystemProxyCachedAt = 0;
+
+/// 198.18.0.0/15：RFC 2544 基准测试保留段，同时是主流代理软件
+/// （Clash／Surge 等）fake-ip 模式的默认地址段。仅在系统代理启用时按
+/// 「代理 fake-ip」对待（理由见 URLPolicy.h）。
+static BOOL RDIsProxyFakeIPRange(NSString *ip) {
+    if (ip.length == 0) return NO;
+    struct in_addr v4;
+    if (inet_pton(AF_INET, ip.UTF8String, &v4) != 1) return NO;   // 非 IPv4 字面量
+    uint32_t h = ntohl(v4.s_addr);
+    return (h & 0xFFFE0000u) == 0xC6120000u;   // 198.18.0.0/15
+}
 
 #pragma mark - IP 分类（复用 Shared/IPAddressPolicy 单一事实来源）
 
@@ -81,6 +101,36 @@ static NSString *RDMessageForVerdict(URLPolicyVerdict v) {
 
 @implementation URLPolicy
 
+#pragma mark 系统代理 / fake-ip
+
++ (BOOL)systemProxyIsActive {
+    if (gRDSystemProxyOverride != nil) return gRDSystemProxyOverride.boolValue;
+    @synchronized (self) {
+        NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+        // 30 秒缓存：读系统配置有开销，但用户中途开关代理也要能跟上。
+        if (gRDSystemProxyCachedAt > 0 && now - gRDSystemProxyCachedAt < 30) return gRDSystemProxyCached;
+        NSDictionary *settings = CFBridgingRelease(CFNetworkCopySystemProxySettings());
+        BOOL active = [settings[(__bridge NSString *)kCFNetworkProxiesHTTPEnable] boolValue]
+                   || [settings[(__bridge NSString *)kCFNetworkProxiesHTTPSEnable] boolValue]
+                   || [settings[(__bridge NSString *)kCFNetworkProxiesSOCKSEnable] boolValue];
+        gRDSystemProxyCached = active;
+        gRDSystemProxyCachedAt = now;
+        return active;
+    }
+}
+
++ (void)setSystemProxyActiveOverride:(NSNumber *)override {
+    @synchronized (self) {
+        gRDSystemProxyOverride = override;
+        gRDSystemProxyCachedAt = 0;   // 解除覆盖后重新探测
+    }
+}
+
+/// 该 IP 是否应按「代理 fake-ip」放行（仅系统代理启用时成立）。
+static BOOL RDShouldTreatAsProxyFakeIP(NSString *ip) {
+    return RDIsProxyFakeIPRange(ip) && [URLPolicy systemProxyIsActive];
+}
+
 - (URLPolicyDecision *)evaluateTextURL:(NSString *)urlString {
     if (urlString == nil || urlString.length == 0) {
         return [URLPolicyDecision blockWithVerdict:URLPolicyBlockedReserved message:RDMessageForVerdict(URLPolicyBlockedReserved)];
@@ -106,13 +156,17 @@ static NSString *RDMessageForVerdict(URLPolicyVerdict v) {
     }
     // 主机本身是 IP 字面量：直接分类（localhost/127、私网、链路本地、组播/保留等）
     if (RDIsIPLiteral(host)) {
-        RDIPCategory cat = RDCategorizeIPString(host);
-        if (cat != RDIPPublic) {
-            URLPolicyVerdict v = (cat == RDIPLoopback) ? URLPolicyBlockedLoopback
-                                : (cat == RDIPLinkLocal) ? URLPolicyBlockedLinkLocal
-                                : (cat == RDIPReserved) ? URLPolicyBlockedReserved
-                                : URLPolicyBlockedPrivate;
-            return [URLPolicyDecision blockWithVerdict:v message:RDMessageForVerdict(v)];
+        // 代理 fake-ip 段：系统代理启用时按代理地址放行（用户直接粘贴
+        // 代理软件给出的假地址时不该被报成"保留地址"）。
+        if (!RDShouldTreatAsProxyFakeIP(host)) {
+            RDIPCategory cat = RDCategorizeIPString(host);
+            if (cat != RDIPPublic) {
+                URLPolicyVerdict v = (cat == RDIPLoopback) ? URLPolicyBlockedLoopback
+                                    : (cat == RDIPLinkLocal) ? URLPolicyBlockedLinkLocal
+                                    : (cat == RDIPReserved) ? URLPolicyBlockedReserved
+                                    : URLPolicyBlockedPrivate;
+                return [URLPolicyDecision blockWithVerdict:v message:RDMessageForVerdict(v)];
+            }
         }
     }
     // 公网主机名待 DNS 检查；预解析不等于连接 IP 绑定，不能保证防住 DNS rebinding。
@@ -123,6 +177,9 @@ static NSString *RDMessageForVerdict(URLPolicyVerdict v) {
     if (url == nil) {
         return [URLPolicyDecision blockWithVerdict:URLPolicyBlockedReserved message:RDMessageForVerdict(URLPolicyBlockedReserved)];
     }
+    // 代理 fake-ip（198.18.0.0/15）且系统代理启用：这是代理软件给出的假地址，
+    // 真实连接由代理端按域名解析 —— 本机 DNS 结论在此不具代表性，放行。
+    if (RDShouldTreatAsProxyFakeIP(ipString)) return [URLPolicyDecision allow];
     RDIPCategory cat = RDCategorizeIPString(ipString);
     if (cat == RDIPPublic) return [URLPolicyDecision allow];
     URLPolicyVerdict v = (cat == RDIPLoopback) ? URLPolicyBlockedLoopback

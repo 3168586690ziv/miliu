@@ -57,6 +57,26 @@ typedef NS_ENUM(NSInteger, URLPolicyVerdict) {
 // 时机 3：每次重定向目标。携带来源 URL，对目标重新做完整校验。
 - (URLPolicyDecision *)evaluateRedirect:(NSURL *)target fromURL:(NSURL *)current;
 
+#pragma mark - 系统代理与 fake-ip（2026-10-12 第 39 轮）
+
+// 系统代理是否启用。生产读 CFNetworkCopySystemProxySettings()（30 秒缓存，
+// 用户中途开关代理能跟上）；测试可用 setSystemProxyActiveOverride: 注入。
+//
+// 为什么 URLPolicy 需要知道代理状态：主流代理软件（Clash／Surge 等）的
+// fake-ip 模式会把**所有**域名答成 198.18.0.0/15 内的假地址，再由虚拟网卡
+// 按域名转发。该段同时是 RFC 2544 基准测试保留段，于是本策略会把它当
+// 「保留地址」拒绝 —— 用户开着代理时**任何网站都探测不了**，且提示是
+// 「地址被安全策略阻止：保留/无效地址不可探测」（把代理配置说成了安全问题）。
+// 走代理时本机 DNS 结果不具代表性（连接由代理端解析域名），项目 curl 路径
+// 早已用 socks5h 表达同一意图（"域名解析交代理执行，避免本机解析被污染"），
+// 原生路径此前缺这一层。故：**系统代理启用时**，198.18.0.0/15 按代理
+// fake-ip 放行；其余保留/私网/回环/链路本地段照旧拦截，文本阶段的 scheme、
+// 空主机、userinfo、IP 字面量分类也全部照旧。
++ (BOOL)systemProxyIsActive;
+
+// 测试注入：@YES／@NO 覆盖真实探测；nil 恢复真实探测并清缓存。
++ (void)setSystemProxyActiveOverride:(nullable NSNumber *)override;
+
 @end
 
 NS_ASSUME_NONNULL_END

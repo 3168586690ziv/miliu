@@ -4,7 +4,6 @@
 #import "StateView.h"
 #import "ColorTokens.h"
 #import "TypographyTokens.h"
-#import "LayoutMetrics.h"
 
 @interface StateView ()
 @property (nonatomic, strong) NSTextField *loadingLabel;
