@@ -2,6 +2,7 @@
 #import "RDLog.h"
 #import "RDManualVerification.h"   // 共享会话存储（探测 WebView 与验证窗口同一实例）
 #import "ResourceURLGate.h"
+#import "RDTLSTrust.h"   // 证书信任容错层（探测主链静态腿同样要走它）
 #import "WebProbe.h"
 #import "RDStaticScriptAnalyzer.h"
 #import <WebKit/WebKit.h>
@@ -757,6 +758,20 @@ htmlCompletion:(ZZDiscoveryHTMLCompletion)htmlCompletion
     NSError *finalError = error ?: (media.count ? nil : ctx.pageError);
     if(mediaCompletion)dispatch_async(dispatch_get_main_queue(),^{ if(!ctx.cancelled)mediaCompletion(media ?: @[],finalError); });
     if(htmlCompletion)dispatch_async(dispatch_get_main_queue(),^{ if(!ctx.cancelled)htmlCompletion(nil,nil,error); });
+}
+
+// 证书信任容错（2026-10-12 第 36 轮补接线）：这一腿是探测主链最先发出 HTTP 请求的
+// 地方（RDHybridPageProbe 腿 1），而站点证书被 Apple 判为「已吊销」时原生栈会间歇性
+// 返回 -1200/-1202 —— 静态腿整页取不到 HTML，用户在**探测**这一步就失败，连带
+// 「资源探测」整个流程走不下去（动态腿虽能用，但静态腿是直链类站点的主力）。
+// 此前第 36 轮只把容错接给了元数据/下载/能力探测/预览四条链路，恰好漏掉这一条。
+// 判定与放行规则全部收敛在 RDTLSTrust.h：只在「吊销是唯一失败项 + SAN 涵盖 host」
+// 时放行，其余失败形态（域名不匹配/自签名/过期/缺中间证书）照常拒绝。
+- (void)URLSession:(NSURLSession *)session
+        didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
+        completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))completionHandler {
+    if (RDTLSHandleServerTrustChallenge(challenge, @"probe/static", completionHandler)) return;
+    completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
 }
 
 - (void)URLSession:(NSURLSession *)session

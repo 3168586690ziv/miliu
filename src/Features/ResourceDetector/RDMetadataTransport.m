@@ -3,6 +3,7 @@
 #import "HTTPPrivacyPolicy.h"
 #import "DNSResolver.h"
 #import "RDLog.h"
+#import "RDTLSTrust.h"
 NSString * const RDMetadataErrorDomain = @"RDMetadata";
 @interface RDMetadataToken ()
 @property BOOL cancelled;
@@ -147,6 +148,16 @@ NSTimeInterval RDMetadataHedgeDelay(void) { return kRDHedgeDelay; }
 }
 - (RDMetadataTransfer *)transferForTask:(NSURLSessionTask *)task {
     @synchronized (self.transfers) { return task ? self.transfers[task] : nil; }
+}
+// 证书信任容错（2026-10-12 根因修复）：站点域证书被 Apple 判为「已吊销」时，
+// 原生栈会间歇性 -1200/-1202，导致元数据全部「读取失败」。判定与放行规则
+// 全部收敛在 RDTLSTrust.h（只在「吊销是唯一失败项 + SAN 涵盖 host」时放行）。
+// 系统默认信任的证书走默认处理，行为零变化。
+- (void)URLSession:(NSURLSession *)session
+        didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
+        completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))completionHandler {
+    if (RDTLSHandleServerTrustChallenge(challenge, @"meta", completionHandler)) return;
+    completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
 }
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task willPerformHTTPRedirection:(NSHTTPURLResponse *)response newRequest:(NSURLRequest *)request completionHandler:(void (^)(NSURLRequest *))handler {
     [[self transferForTask:task] URLSession:session task:task willPerformHTTPRedirection:response newRequest:request completionHandler:handler];

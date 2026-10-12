@@ -82,8 +82,19 @@ for action in downloadsPauseTapped downloadsResumeTapped downloadsRetryTapped do
   rg -q "$action" "$APP" || { echo "FAIL: 缺少行内操作 $action"; exit 1; }
 done
 
-# enqueuedAt 类型防护（旧记录/注入值不得让时间比较崩溃）
-rg -q 'isKindOfClass:\[NSDate class\]' "$APP" || { echo "FAIL: 弱化判断缺少 NSDate 类型防护"; exit 1; }
+# 时间比较的 NSDate 类型防护（旧记录/注入值不得让排序崩掉）。
+# 2026-10-12 第 36 轮：防护原先挂在 shouldWeakenJob 上，而该轮把行内弱化判据整体
+# 删除（主人点名「颜色深度统一 就是深色那一档」），防线随之迁到列表排序处。
+# 断言同步到新落点，不再指向已删除的方法。
+rg -q 'isKindOfClass:\[NSDate class\]' "$APP" || { echo "FAIL: 列表排序缺少 NSDate 类型防护"; exit 1; }
+
+# 行内弱化必须彻底消失：不得残留恒假判据或恒假三元分支。
+if rg -q 'shouldWeakenJob' "$APP"; then
+  echo "FAIL: 仍残留 shouldWeakenJob（第 36 轮已取消行内弱化）"; exit 1
+fi
+if rg -q 'weakened \?' "$APP"; then
+  echo "FAIL: 仍残留 weakened 三元分支（恒假死代码）"; exit 1
+fi
 
 
-echo "PASS: 下载列表页面静态检查通过（容器、导航、筛选、列表行、进度条、指标、操作）"
+echo "PASS: 下载列表页面静态检查通过（容器、导航、筛选、列表行、进度条、指标、操作、类型防护、无弱化残留）"

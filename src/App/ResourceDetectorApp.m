@@ -3605,8 +3605,15 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
         if (activeA != activeB) return activeA < activeB ? NSOrderedAscending : NSOrderedDescending;
         // 活动/非活动分组后，最近速率样本在前；没有样本时按入队时间倒序，
         // 最后用 identifier 做稳定 tie-breaker。
-        NSDate *da = a.lastRateSampleDate ?: a.enqueuedAt ?: [NSDate distantPast];
-        NSDate *db = b.lastRateSampleDate ?: b.enqueuedAt ?: [NSDate distantPast];
+        // 类型防护：lastRateSampleDate / enqueuedAt 声明为 NSDate，但恢复记录与外部
+        // 注入都可能塞进非日期对象；`compare:` 收到非日期会当场抛异常。第 36 轮删除
+        // 行内弱化判据后，列表里唯一仍在做时间比较的就是这里，原先挂在那条判据上的
+        // NSDate 防线随之迁到本处（语义不变：旧记录/注入值不得让时间比较崩溃）。
+        // 非日期一律按下界处理，退化为 identifier 稳定序。
+        id rawA = a.lastRateSampleDate ?: a.enqueuedAt;
+        id rawB = b.lastRateSampleDate ?: b.enqueuedAt;
+        NSDate *da = [rawA isKindOfClass:[NSDate class]] ? (NSDate *)rawA : [NSDate distantPast];
+        NSDate *db = [rawB isKindOfClass:[NSDate class]] ? (NSDate *)rawB : [NSDate distantPast];
         NSComparisonResult dateCmp = [db compare:da];
         if (dateCmp != NSOrderedSame) return dateCmp;
         return [b.identifier compare:a.identifier];
@@ -3617,14 +3624,6 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
 - (void)refreshDownloadRecency:(NSTimer *)timer {
     // 只重绘可见行，不整表 reload（避免闪烁/滚动跳动）。
     [self scheduleDownloadsRefresh];
-}
-
-- (BOOL)shouldWeakenJob:(DownloadJob *)job {
-    // enqueuedAt 必须是真实 NSDate；旧记录或外部注入的字符串不得让时间比较崩溃。
-    if (![job.enqueuedAt isKindOfClass:[NSDate class]]) return NO;
-    if ([job.identifier isEqualToString:self.downloadManager.latestEnqueuedJobIdentifier]) return NO;
-    NSTimeInterval age = [[NSDate date] timeIntervalSinceDate:job.enqueuedAt];
-    return age >= 0 && age < 600.0;
 }
 
 - (void)layoutDownloadsTable {
@@ -3744,7 +3743,15 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
 
 - (NSString *)stateLabelForJob:(DownloadJob *)job {
     switch (job.state) {
-        case DownloadJobStateQueued: return @"排队中";
+        case DownloadJobStateQueued:
+            // 2026-10-12 第 36 轮：主人报告「我下载一个视频，想下载第二个的时候会显示
+            // "排队中"。但就只有这两个视频，我本来就只想下两个，它显示"排队中"很不合理」。
+            // 根因是新任务入队后**必然**先过两道异步预检（端点解析校验 + 服务器能力探测，
+            // 见 DownloadManager startQueuedJobs 的两处 continue），这段等待期也占用
+            // Queued 状态，于是被无条件渲染成「排队中」——而真实情况是并发名额根本没用满。
+            // 修法（纯展示、不动排队语义）：名额未满时如实说「准备中」，只有真的在等
+            // 前序任务腾名额才说「排队中」。TLS 修复后预检通常是亚秒级。
+            return [self hasFreeDownloadSlotForJob:job] ? @"准备中" : @"排队中";
         case DownloadJobStateRunning: return @"下载中";
         case DownloadJobStatePaused: return @"已暂停";
         case DownloadJobStateCancelling: return @"取消中";
@@ -3754,6 +3761,20 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
         case DownloadJobStateInterrupted: return @"已中断";
     }
     return @"未知";
+}
+
+/// 该任务是否只是「在等预检」而非「在等别人腾名额」：并发视频名额还有空位即为真。
+/// 名额口径与 DownloadManager 的 activeJobCount 判定同源（运行中 + 已暂停）。
+- (BOOL)hasFreeDownloadSlotForJob:(DownloadJob *)job {
+    NSInteger budget = MAX(1, [PerformancePolicy concurrentDownloadJobs]);
+    NSInteger occupied = 0;
+    for (DownloadJob *other in self.downloadManager.allJobs) {
+        if (other.state == DownloadJobStateRunning || other.state == DownloadJobStatePaused) {
+            occupied += 1;
+        }
+    }
+    (void)job;
+    return occupied < budget;
 }
 
 - (NSString *)metricsStringForJob:(DownloadJob *)job {
@@ -4080,19 +4101,21 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
     else if (job.state == DownloadJobStateCompleted) progress = 1.0;
     self.progressView.progress = progress;
     self.progressView.indeterminate = unknownTotal && job.state == DownloadJobStateRunning;
-    BOOL weakened = [app shouldWeakenJob:job];
-    NSColor *primary = weakened ? [NSColor tertiaryLabelColor] : [NSColor labelColor];
-    NSColor *secondary = weakened ? [NSColor colorWithWhite:0.55 alpha:0.55] : [NSColor secondaryLabelColor];
-    self.fileNameLabel.textColor = primary;
-    self.stateLabel.textColor = secondary;
-    self.metricsLabel.textColor = secondary;
-    self.errorLabel.textColor = secondary;
-    self.pauseButton.alphaValue = weakened ? 0.55 : 1.0;
-    self.resumeButton.alphaValue = weakened ? 0.55 : 1.0;
-    self.retryButton.alphaValue = weakened ? 0.55 : 1.0;
-    self.cancelButton.alphaValue = weakened ? 0.55 : 1.0;
-    self.revealButton.alphaValue = weakened ? 0.55 : 1.0;
-    self.progressView.alphaValue = weakened ? 0.45 : 1.0;
+    // 行内配色统一为「深」一档（2026-10-12 第 36 轮，主人点名「下载列表里面颜色深度
+    // 统一 就是深色那一档 不要再有深浅的变化」）。此前这里按「入队 600 秒内且非最新
+    // 一条」把整行文字与控件降 alpha（tertiaryLabel / 0.55 alpha / 进度条 0.45），同一
+    // 列表里并存「深」「浅」两档，且与「未完成/已完成」等真实状态语义混淆。
+    // 该弱化判据已整体删除，不留恒假分支：行内深浅从此只来自真实状态语义。
+    self.fileNameLabel.textColor = [NSColor labelColor];
+    self.stateLabel.textColor = [NSColor secondaryLabelColor];
+    self.metricsLabel.textColor = [NSColor secondaryLabelColor];
+    self.errorLabel.textColor = [NSColor secondaryLabelColor];
+    self.pauseButton.alphaValue = 1.0;
+    self.resumeButton.alphaValue = 1.0;
+    self.retryButton.alphaValue = 1.0;
+    self.cancelButton.alphaValue = 1.0;
+    self.revealButton.alphaValue = 1.0;
+    self.progressView.alphaValue = 1.0;
 
     // 指标文字
     self.metricsLabel.stringValue = [app metricsStringForJob:job];

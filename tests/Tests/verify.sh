@@ -269,4 +269,107 @@ if ! rg -q 'RDWatchNotificationOpenAndScan' "$ROOT/App/ResourceDetectorApp.m"; t
   exit 1
 fi
 
-echo "PASS: build, universal binary, macOS 13 target, bundle signing, app icon packaged and decodable, machine independence, no radar, view-based rows, slash-line UI with thin progress, download progress, site-mode, and download wiring checks"
+# 4) 第 36 轮（2026-10-12）：证书信任容错 + 下载列表深浅统一 + 排队语义。
+#
+# 4a. 容错层必须存在，且必须被**全部**自行发起 HTTPS 请求的链路真正接线。
+#     只断言"文件存在"是弱断言——真正要防的是"容错层写了却没人用"。
+#     2026-10-12 核查补漏：初版只列了元数据/下载/能力探测/预览四条，**恰好漏掉探测
+#     主链最先发请求的静态腿**（RDHybridPageProbe 腿 1）——它在主人报障站点上同样会
+#     -1200 随机失败（第 33 轮 P1-④「测试没覆盖生产路径」的同型复发）。现把静态腿
+#     一并纳入断言，避免下次再加会话时重演同一缺口。
+if [ ! -f "$ROOT/Shared/Infrastructure/RDTLSTrust.h" ]; then
+  echo "FAIL: RDTLSTrust.h 缺失（第 36 轮证书容错层）" >&2
+  exit 1
+fi
+for f in \
+  "src/Features/ResourceDetector/RDMetadataTransport.m" \
+  "src/Features/ResourceDownload/DownloadManager.m" \
+  "src/Features/ResourceDownload/DownloadCapabilityProbe.m" \
+  "src/Features/ResourceDetector/RDPreviewController.m" \
+  "src/Features/ResourceDetector/StaticHTMLDiscoveryPageProbe.m" ; do
+  if ! rg -q 'RDTLSTrust\.h' "$REPO/$f"; then
+    echo "FAIL: $f 未引入 RDTLSTrust.h（容错层未接线）" >&2
+    exit 1
+  fi
+done
+if ! rg -q 'RDTLSHandleServerTrustChallenge' "$ROOT/Features/ResourceDetector/RDMetadataTransport.m"; then
+  echo "FAIL: 元数据会话未接管 ServerTrust 挑战" >&2
+  exit 1
+fi
+if ! rg -q 'RDTLSHandleServerTrustChallenge' "$ROOT/Features/ResourceDownload/DownloadManager.m"; then
+  echo "FAIL: 下载会话未接管 ServerTrust 挑战" >&2
+  exit 1
+fi
+if ! rg -q 'RDTLSHandleServerTrustChallenge' "$ROOT/Features/ResourceDownload/DownloadCapabilityProbe.m"; then
+  echo "FAIL: 能力探测未接管 ServerTrust 挑战（会导致下载降级成单连接）" >&2
+  exit 1
+fi
+if ! rg -q 'RDTLSHandleServerTrustChallenge' "$ROOT/Features/ResourceDetector/StaticHTMLDiscoveryPageProbe.m"; then
+  echo "FAIL: 探测主链静态腿未接管 ServerTrust 挑战（该腿是最先发请求的一条）" >&2
+  exit 1
+fi
+
+# 4b. 放行判据必须收敛在"吊销是唯一失败项 + SAN 涵盖 host"，
+#     不得退化成"只要评估失败就放行"。
+if rg -q 'credentialForTrust' "$ROOT/Shared/Infrastructure/RDTLSTrust.h"; then
+  if ! rg -q 'RDTLSTrustRevocationIsOnlyFailure' "$ROOT/Shared/Infrastructure/RDTLSTrust.h" ||
+     ! rg -q 'RDTLSTrustHostCoveredByCertificate' "$ROOT/Shared/Infrastructure/RDTLSTrust.h"; then
+    echo "FAIL: 放行路径缺少吊销唯一性判据或 SAN 复核（容错被放宽成任意放行）" >&2
+    exit 1
+  fi
+fi
+
+# 4c. 下载列表不得再有逐行透明度弱化（主人点名"颜色深度统一到深色那一档"）。
+#     2026-10-12 核查修订：恒返回 NO 是「半成品」形态——判据死了、方法名还在撒谎、
+#     调用点 13 行三元分支成了永不可达的死代码。要求彻底删除，而不是留一个恒假壳。
+if rg -q 'shouldWeakenJob' "$ROOT/App/ResourceDetectorApp.m"; then
+  echo "FAIL: 仍残留 shouldWeakenJob（第 36 轮已取消行内弱化，不得留恒假壳）" >&2
+  exit 1
+fi
+if rg -q 'weakened \?' "$ROOT/App/ResourceDetectorApp.m"; then
+  echo "FAIL: 仍残留 weakened 三元分支（恒假死代码）" >&2
+  exit 1
+fi
+# 类型防护必须仍在（弱化判据删除后，防线迁到列表排序的时间比较处）。
+if ! rg -q 'isKindOfClass:\[NSDate class\]' "$ROOT/App/ResourceDetectorApp.m"; then
+  echo "FAIL: 列表排序缺少 NSDate 类型防护（弱化判据删除时防线一并丢了）" >&2
+  exit 1
+fi
+
+# 4d. 新任务只等预检时必须如实显示"准备中"，不能再一律说"排队中"。
+if ! rg -q 'hasFreeDownloadSlotForJob' "$ROOT/App/ResourceDetectorApp.m"; then
+  echo "FAIL: 缺少 hasFreeDownloadSlotForJob（排队语义未区分预检与真排队）" >&2
+  exit 1
+fi
+
+# 4e. 队尾任务不得无限期停在 Queued（窗口收缩时必须有有限性兜底）。
+if ! rg -q 'kRDQueueStarvationGrace' "$ROOT/Features/ResourceDownload/DownloadManager.m"; then
+  echo "FAIL: 缺少排队饥饿超时兜底（队尾任务可能无限期显示排队中）" >&2
+  exit 1
+fi
+
+# 4f. 链接依赖纪律（2026-10-12 第 36 轮核查新增）。
+#     本项目的复发型失效：生产文件新增框架依赖后，**编译它们的套件脚本没跟着补**——
+#     套件从此编译不过，等于该套件自那一刻起再没真正跑过，而日志里还留着旧日的 PASS。
+#     已发生三次：第 28 轮缺 -lsqlite3、第 35 轮缺 -framework AVKit、第 36 轮接 TLS 容错层
+#     后 retry-after / external-scripts / preview-playback 三个套件缺 -framework Security。
+#     这里不再逐个补，而是按「生产引用关系」反推：凡编译了 RDTLSTrust 使用者的套件，
+#     必须链接 Security。请勿删除——它是这条纪律唯一的自动化看门人。
+for _suite in "$REPO"/tests/Tests/*.sh; do
+  _b="$(basename "$_suite")"
+  [ "$_b" = "verify.sh" ] && continue    # verify 走 build.sh，生产构建自带 Security
+  _hit=""
+  for _u in RDMetadataTransport DownloadManager DownloadCapabilityProbe RDPreviewController StaticHTMLDiscoveryPageProbe; do
+    grep -qE "(^|[^A-Za-z])${_u}([^A-Za-z]|\$)" "$_suite" 2>/dev/null || continue
+    if grep -q 'RDTLSTrust\.h' "$ROOT/Features/ResourceDetector/${_u}.m" 2>/dev/null ||
+       grep -q 'RDTLSTrust\.h' "$ROOT/Features/ResourceDownload/${_u}.m" 2>/dev/null; then
+      _hit="$_hit $_u"
+    fi
+  done
+  if [ -n "$_hit" ] && ! grep -q '\-framework Security' "$_suite"; then
+    echo "FAIL: $_b 编译了 TLS 容错层使用者($_hit) 但未链接 -framework Security（该套件编译不过）" >&2
+    exit 1
+  fi
+done
+
+echo "PASS: build, universal binary, macOS 13 target, bundle signing, app icon packaged and decodable, machine independence, no radar, view-based rows, slash-line UI with thin progress, download progress, site-mode, TLS trust tolerance, download-row uniform tint, and download wiring checks"

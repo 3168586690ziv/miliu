@@ -8,6 +8,8 @@
 #import "RDPreviewWindow.h"
 #import "DetectedMedia.h"
 #import "URLPolicy.h"
+#import "RDTLSTrust.h"
+#import "RDCurlHopper.h"
 #import <AVFoundation/AVFoundation.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
@@ -41,6 +43,82 @@ static AVPlayer *_player = nil;
 static NSURLSession *_masterSession = nil;
 static URLPolicy *_policy = nil;
 static BOOL _playing = NO;
+
+#pragma mark - 证书信任容错会话
+//
+// 根因（2026-10-12 真实站点实测）：媒体直链落在站点域（www.hanime2.org/jmpres/…）时，
+// 该域证书被 Apple 信任评估判为「已吊销」，而 AVPlayer 走系统栈、**无法**接管证书挑战
+// （AVURLAsset 没有对应委托），于是预览直接报 TLS -1200/-1202 失败。
+//
+// 但该直链会 302 到 Cloudflare CDN 域，那个域证书完全正常、AVPlayer 直接可播
+// （实测：站点域 playable=失败 / CDN 终跳 playable=可播 duration=910.8s）。
+//
+// 因此本条修复 = **开播前先把直链解析到终跳地址**，把 302 之后的 CDN 地址交给 AVPlayer。
+// 解析用带证书容错的 NSURLSession 做一次 Range: bytes=0-0 的轻量请求（不下载媒体本体），
+// 拿 response.URL。解析失败时原样使用输入 URL（行为与修复前一致，绝不让预览变得更差）。
+
+@interface RDPreviewTrustDelegate : NSObject <NSURLSessionDelegate>
+@end
+@implementation RDPreviewTrustDelegate
+- (void)URLSession:(NSURLSession *)session
+        didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
+        completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))completionHandler {
+    if (RDTLSHandleServerTrustChallenge(challenge, @"preview", completionHandler)) return;
+    completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+}
+@end
+
+static NSURLSession *_trustSession = nil;
+static RDPreviewTrustDelegate *_trustDelegate = nil;
+
+static NSURLSession *RDPreviewTrustSession(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSURLSessionConfiguration *cfg = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+        cfg.HTTPCookieStorage = nil;          // 与探测/下载一致：原生媒体链路无 Cookie
+        cfg.HTTPShouldSetCookies = NO;
+        cfg.timeoutIntervalForRequest = 8;
+        _trustDelegate = [RDPreviewTrustDelegate new];
+        _trustSession = [NSURLSession sessionWithConfiguration:cfg
+                                                      delegate:_trustDelegate
+                                                 delegateQueue:nil];
+    });
+    return _trustSession;
+}
+
+/// 把媒体地址解析到重定向终跳。返回 nil 表示「无需改写或解析失败」——
+/// 调用方应当继续用原地址（绝不因为解析失败而阻断预览）。
+static NSString *RDPreviewResolveFinalURL(NSString *urlString, DetectedMedia *media) {
+    if (!urlString.length) return nil;
+    NSURL *url = [NSURL URLWithString:urlString];
+    if (!url.host.length) return nil;
+    // 环回地址（钉选路径的伪 URL）本来就是本机、无重定向可言。
+    if ([url.host isEqualToString:@"127.0.0.1"] || [url.host isEqualToString:@"localhost"]) return nil;
+
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    req.timeoutInterval = 8;
+    req.HTTPMethod = @"GET";
+    [req setValue:@"bytes=0-0" forHTTPHeaderField:@"Range"];
+    if (media.sourcePageURL.length) [req setValue:media.sourcePageURL forHTTPHeaderField:@"Referer"];
+
+    __block NSString *finalURLString = nil;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    NSURLSessionDataTask *task = [RDPreviewTrustSession() dataTaskWithRequest:req
+        completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        // 只看终跳地址：状态码/正文一概不采信（这一步只为拿到重定向后的 host）。
+        if (!err && resp.URL.absoluteString.length) finalURLString = resp.URL.absoluteString;
+        dispatch_semaphore_signal(sem);
+    }];
+    [task resume];
+    // 预览是用户主动触发的动作，短暂等待可接受；超时则原样继续（不阻断）。
+    if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 9 * NSEC_PER_SEC)) != 0) {
+        [task cancel];
+        return nil;
+    }
+    if (!finalURLString.length) return nil;
+    if ([finalURLString isEqualToString:urlString]) return nil;   // 无重定向：不改写
+    return finalURLString;
+}
 
 #pragma mark - 环回钉选服务器
 
@@ -178,6 +256,15 @@ static void RDPreviewPlayDirect(NSURL *url, DetectedMedia *media, NSString *titl
     RDPreviewAttach(asset, title);
 }
 
+/// 直连播放前先解析终跳：站点域证书被吊销时 AVPlayer 会直接 TLS 失败，
+/// 而 302 之后的 CDN 域证书正常、可播。解析失败则原样播输入地址（不阻断）。
+static void RDPreviewPlayResolvedDirect(NSURL *url, DetectedMedia *media, NSString *title) {
+    NSString *resolved = RDPreviewResolveFinalURL(url.absoluteString, media);
+    NSURL *target = resolved.length ? [NSURL URLWithString:resolved] : url;
+    if (resolved.length) NSLog(@"[preview] 直链已解析到终跳 host=%@", target.host ?: @"-");
+    RDPreviewPlayDirect(target, media, title);
+}
+
 // 钉选路径：拉 master → 改写 → 环回 serve → AVPlayer 播环回地址（子请求直连远程）。
 static void RDPreviewPlayPinned(NSString *masterURLString, NSString *pinnedURLString,
                                 DetectedMedia *media, NSString *title) {
@@ -185,7 +272,9 @@ static void RDPreviewPlayPinned(NSString *masterURLString, NSString *pinnedURLSt
         NSURLSessionConfiguration *cfg = NSURLSessionConfiguration.ephemeralSessionConfiguration;
         cfg.HTTPCookieStorage = nil;          // 与探测/下载一致：原生媒体链路无 Cookie
         cfg.HTTPShouldSetCookies = NO;
-        _masterSession = [NSURLSession sessionWithConfiguration:cfg];
+        _masterSession = [NSURLSession sessionWithConfiguration:cfg
+                                                       delegate:_trustDelegate
+                                                  delegateQueue:nil];
     }
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:masterURLString]];
     req.timeoutInterval = 15;
@@ -206,7 +295,7 @@ static void RDPreviewPlayPinned(NSString *masterURLString, NSString *pinnedURLSt
                                                               pinnedVariantURL:pinnedURLString];
             if (!r.succeeded || r.remoteURLs.count == 0) {
                 // 钉选失败（变体不在清单等）→ 降级直连 master（自适应档位），不谎报钉选生效。
-                RDPreviewPlayDirect([NSURL URLWithString:masterURLString], media, title);
+                RDPreviewPlayResolvedDirect([NSURL URLWithString:masterURLString], media, title);
                 return;
             }
             for (NSString *u in r.remoteURLs) {
@@ -248,14 +337,14 @@ static void RDPreviewPlayPinned(NSString *masterURLString, NSString *pinnedURLSt
     switch (v.decision) {
         case RDPreviewDecisionDirectFile:
         case RDPreviewDecisionHLSMedia:
-            RDPreviewPlayDirect([NSURL URLWithString:media.mediaURL], media, title);
+            RDPreviewPlayResolvedDirect([NSURL URLWithString:media.mediaURL], media, title);
             break;
         case RDPreviewDecisionHLSMaster: {
             // 选中变体条目（parentMediaURL 指回 master）→ 钉选；master 条目本身 → 自适应。
             if (media.parentMediaURL.length && ![media.parentMediaURL isEqualToString:media.mediaURL]) {
                 RDPreviewPlayPinned(media.parentMediaURL, media.mediaURL, media, title);
             } else {
-                RDPreviewPlayDirect([NSURL URLWithString:media.mediaURL], media, title);
+                RDPreviewPlayResolvedDirect([NSURL URLWithString:media.mediaURL], media, title);
             }
             break;
         }

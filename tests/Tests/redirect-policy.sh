@@ -4,7 +4,7 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"; ROOT="$REPO/src"; OUT="$REPO/build/
 mkdir -p "$OUT"
 # 日志隔离：本测试驱动生产代码（含 RDLog 调用），绝不能污染用户真实日志。
 export RD_LOG_PATH="$OUT/test-ResourceDetector.log"
-xcrun clang -fobjc-arc -g -O1 -framework Foundation -framework AppKit \
+xcrun clang -fobjc-arc -g -O1 -framework Foundation -framework AppKit -framework Security \
  -I"$ROOT/Shared/Infrastructure" -I"$ROOT/Features/ResourceDetector" -I"$ROOT/Features/ResourceDownload" \
  "$REPO/tests/Tests/RedirectPolicyTests.m" "$ROOT/Shared/Infrastructure/HTTPPrivacyPolicy.m" \
  "$ROOT/Shared/Infrastructure/DNSResolver.m" "$ROOT/Shared/Infrastructure/RDLog.m" "$ROOT/Shared/Infrastructure/IPAddressPolicy.m" \

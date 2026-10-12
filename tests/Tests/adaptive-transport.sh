@@ -6,7 +6,7 @@ mkdir -p "$OUT"
 # 日志隔离：本测试驱动生产代码（含 RDLog 调用），绝不能污染用户真实日志。
 export RD_LOG_PATH="$OUT/test-ResourceDetector.log"
 xcrun clang -fobjc-arc -g -O1 -fsanitize=address -mmacosx-version-min=13.0 \
- -framework Foundation -framework AppKit \
+ -framework Foundation -framework AppKit -framework Security \
  -I"$ROOT/App" -I"$ROOT/Shared/Infrastructure" -I"$ROOT/Features/ResourceDetector" -I"$ROOT/Features/ResourceDownload" \
  "$REPO/tests/Tests/AdaptiveTransportTests.m" \
  "$ROOT/App/RDAdaptiveTransport.m" "$ROOT/App/RDCurlFallbackBackend.m" \

@@ -1,6 +1,7 @@
 #import "DownloadCapabilityProbe.h"
 #import "RDNetworkValidation.h"
 #import "HTTPPrivacyPolicy.h"
+#import "RDTLSTrust.h"
 @interface ZZCapabilityDelegate : NSObject <NSURLSessionDataDelegate>
 @property(nonatomic,copy) void (^completion)(ZZDownloadCapability *);
 @property(nonatomic,strong) NSURLSessionDataTask *task;
@@ -14,6 +15,15 @@
 @implementation ZZDownloadCapability
 @end
 @implementation ZZCapabilityDelegate
+// 证书信任容错（2026-10-12 根因修复）：能力探测此前遇 -1200/-1202 被归为
+// 「瞬时失败」，重试两次后一律「改用单连接」——这是主人实测 60KB/s 的直接原因。
+// 容错放行后探测正常返回 206 + Content-Range，分段提速恢复。
+- (void)URLSession:(NSURLSession *)session
+        didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
+        completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))completionHandler {
+    if (RDTLSHandleServerTrustChallenge(challenge, @"dl/probe", completionHandler)) return;
+    completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+}
 - (void)finish:(ZZDownloadCapability *)cap { if(self.finished)return; self.finished=YES; if(self.completion)self.completion(cap); self.completion=nil; [self.session invalidateAndCancel]; self.session=nil; }
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task willPerformHTTPRedirection:(NSHTTPURLResponse *)response newRequest:(NSURLRequest *)request completionHandler:(void (^)(NSURLRequest *))handler {
     URLPolicyDecision *redirect = [self.policy evaluateRedirect:request.URL fromURL:response.URL];

@@ -1849,6 +1849,20 @@ static int RSRunDownload(NSString *urlString, NSString *referer, NSString *title
         [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
     }
     printf("RS-TIMING download elapsed=%.3fs state=%ld\n", RSTicks() - t0, (long)job.state);
+    // 2026-10-12 第 36 轮：100 站下载测速专项需要机器可读的测速明细，
+    // 用于区分「网络层（对方服务器限速/节点问题）」与「配置层（APP 通病）」。
+    // 字段：耗时 / 字节 / 平均速度 / 任务侧平滑速率 / 首字节延迟 /
+    //       是否分段 / 段数 / 是否走了 curl 回退栈。
+    {
+        unsigned long long bytesForRate = (unsigned long long)MAX((int64_t)0, job.transferredBytes);
+        double elapsedForRate = RSTicks() - t0;
+        double avgBps = elapsedForRate > 0 ? (double)bytesForRate / elapsedForRate : 0;
+        printf("RS-SPEED elapsed=%.3f bytes=%llu avg_bps=%.0f smoothed_bps=%.0f "
+               "first_byte_s=%.3f segmented=%d segments=%ld fallback=%d state=%ld\n",
+               elapsedForRate, bytesForRate, avgBps, job.bytesPerSecond,
+               job.firstByteLatency, job.segmented ? 1 : 0, (long)job.segmentCount,
+               job.fallbackUsed ? 1 : 0, (long)job.state);
+    }
     if (job.state != DownloadJobStateCompleted) {
         printf("RS-RESULT FAIL 下载未完成 state=%ld error=%s\n", (long)job.state, (job.errorText ?: @"-").UTF8String);
         return 1;

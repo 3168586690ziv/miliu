@@ -14,6 +14,7 @@
 #import "IPAddressPolicy.h"
 #import "DownloadCapabilityProbe.h"
 #import "AdaptiveTransferScheduler.h"
+#import "RDTLSTrust.h"
 #import <fcntl.h>
 #import <sys/file.h>
 #import <sys/stat.h>
@@ -303,6 +304,18 @@ static BOOL RDPeerAddressAllowedForIPs(NSString *address, NSArray<NSString *> *a
         if (!adapter.paused) [task resume];
     });
     return adapter;
+}
+
+// 证书信任容错（2026-10-12 根因修复）：站点域证书被 Apple 判为「已吊销」时，
+// 原生下载栈会间歇性 -1200/-1202（实测 10/10 全失败），下载要么直接报错、
+// 要么被能力探测判成「瞬时失败」而降级成单连接（用户实测 60KB/s）。
+// 判定与放行规则全部收敛在 RDTLSTrust.h：只在「吊销是唯一失败项 + SAN 涵盖
+// host」时放行，其余失败形态（域名不匹配/自签名/过期/缺中间证书）照常拒绝。
+- (void)URLSession:(NSURLSession *)session
+        didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
+        completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))completionHandler {
+    if (RDTLSHandleServerTrustChallenge(challenge, @"dl", completionHandler)) return;
+    completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
 }
 
 - (void)URLSession:(NSURLSession *)session
@@ -896,6 +909,40 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
     return MIN(hardCap, fairShare);
 }
 
+// 「排队中」的最长宽容期（秒）：超过它仍未拿到足够槽位就不再谦让，直接用当前可用
+// 槽位启动。理由见 startQueuedJobs 里 2026-10-12 第 36 轮的说明——窗口收缩时
+// 原语义会让队尾任务无限期停在 Queued（没有定时器会叫醒它）。
+static const NSTimeInterval kRDQueueStarvationGrace = 20.0;
+
+// 队列里是否还有排在 identifier 之后的任务（i.e. 该任务不是队尾）。
+// 队尾没有可让位的后来者，因此不必为「避免饿死别人」而干等。
+- (BOOL)hasQueuedJobAfterIdentifier:(NSString *)identifier {
+    NSUInteger index = [self.queuedJobIdentifiers indexOfObject:identifier];
+    if (index == NSNotFound) return NO;
+    for (NSUInteger i = index + 1; i < self.queuedJobIdentifiers.count; i++) {
+        DownloadJob *job = self.jobs[self.queuedJobIdentifiers[i]];
+        if (job && job.state == DownloadJobStateQueued) return YES;
+    }
+    return NO;
+}
+
+// 是否有**别的**可立即启动的排队任务（用于判断「谦让」是否真有意义）。
+- (BOOL)hasStartableQueuedJobOtherThan:(NSString *)identifier {
+    for (NSString *other in self.queuedJobIdentifiers) {
+        if ([other isEqualToString:identifier]) continue;
+        DownloadJob *job = self.jobs[other];
+        if (job && job.state == DownloadJobStateQueued) return YES;
+    }
+    return NO;
+}
+
+// 该任务从入队到现在等了多久（秒）。enqueuedAt 缺失时按 0 处理（不触发超时兜底）。
+- (NSTimeInterval)queueWaitSecondsForJob:(DownloadJob *)job {
+    if (![job.enqueuedAt isKindOfClass:[NSDate class]]) return 0.0;
+    NSTimeInterval seconds = -[job.enqueuedAt timeIntervalSinceNow];
+    return seconds > 0 ? seconds : 0.0;
+}
+
 // 本轮队列排空预计能同时启动的任务数：受排队规模与剩余任务预算双重限制。
 // 批量入队时该值等于整批规模，分段计划因此感知整批任务数量。
 - (NSInteger)startableQueuedJobCount {
@@ -968,7 +1015,12 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
             if ([self activeJobCount] >= MAX(1, [PerformancePolicy concurrentDownloadJobs])) break;
             DownloadJob *job = self.jobs[identifier];
             if (!job || job.state != DownloadJobStateQueued) {
-                [self.queuedJobIdentifiers removeObjectAtIndex:0];
+                // 修订（2026-10-12 第 36 轮核查）：此前这里删的是下标 0，删的是「数组里的
+                // 第一个」而不是「当前这个 identifier」。本循环遍历的是快照，一旦排到
+                // 非队首的失效项（取消/失败/中断的残留标识），就会把真正的队首标识删掉，
+                // 而失效项自己留在数组里——队首因此被静默跳过，用户看到「明明有名额却
+                // 一直排队中」。改为按 identifier 精确删除，语义与其它清理点一致。
+                [self removeQueuedJobIdentifier:identifier];
                 continue;
             }
             if (self.rd_enableEndpointResolution && [self.validatedEndpointGenerations[identifier] integerValue] != job.generation) {
@@ -1117,9 +1169,26 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
             // 单连接任务：后续释放的槽位不会再补回 segmentCount。至少等到
             // 两个真实空槽同时可用，再一次性启动分段，避免队列饥饿和
             // “排队任务已运行但始终只有 1 段”的假提速状态。
-            // Leave this large job waiting for a full segment slot set, but keep
-            // pumping smaller jobs behind it while its capability probe has returned.
-            if ([self shouldSegmentJob:job] && available < 3) continue;
+            //
+            // 2026-10-12 第 36 轮修正（主人报「只有两个视频却显示排队中，很不合理」）：
+            // 原先无条件 `continue`，当自适应窗口收缩到 ≤3（AdaptiveTransferScheduler
+            // 遇错/限流会 20→10→5→3→2→1 减半，而窗口只在新吞吐样本回来时才回升）且
+            // 前序任务占满槽位时，这个任务会**无限期**停在 Queued——没有任何定时器会
+            // 再叫醒它，因为全部唤醒点都是事件驱动的。现在增加两条有限性护栏：
+            //   ① 队尾任务不再无限谦让：它后面没有别的任务可先走时，直接用当前可用
+            //      槽位启动（哪怕只有 1-2 段），宁可是单连接也不让它干等；
+            //   ② 等待超时兜底：已等满 kRDQueueStarvationGrace 的任务同样降级启动，
+            //      保证「排队中」永远是有限时长。
+            // 队首仍有后续任务可让位时保持原语义（避免小任务被大任务饿死）。
+            if ([self shouldSegmentJob:job] && available < 3) {
+                BOOL hasFollower = [self hasQueuedJobAfterIdentifier:identifier] ||
+                                   [self hasStartableQueuedJobOtherThan:identifier];
+                BOOL waitedTooLong = [self queueWaitSecondsForJob:job] >= kRDQueueStarvationGrace;
+                if (hasFollower && !waitedTooLong) continue;
+                RDDownloadLog(@"可用槽位不足 id=%@ available=%ld 已等 %.1f 秒，降级启动（段数=可用槽位）",
+                              identifier, (long)available,
+                              [self queueWaitSecondsForJob:job]);
+            }
             required = MIN(required, available);
 
             [self removeQueuedJobIdentifier:identifier];

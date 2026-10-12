@@ -17,7 +17,7 @@ compile_component() { # $1=测试名 $2=Tests.m $3=其余 .m 文件列表…
   local name="$1" test_m="$2"; shift 2
   local bin="$OUT/$name"
   xcrun clang -fobjc-arc -g -O1 -mmacosx-version-min=13.0 \
-    -framework Foundation -framework AVFoundation -framework CoreMedia \
+    -framework Foundation -framework AVFoundation -framework CoreMedia -framework Security \
     -I"$ROOT/Features/ResourceDetector" -I"$ROOT" \
     "$REPO/$test_m" "$@" \
     -o "$bin" > "$OUT/$name.compile.log" 2>&1 || return 1

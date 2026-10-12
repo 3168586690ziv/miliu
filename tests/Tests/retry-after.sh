@@ -27,7 +27,7 @@ for f in StaticHTMLDiscoveryPageProbe RDManualVerification RDHybridPageProbe \
 if [ -f "$ROOT/Features/ResourceDetector/RDStaticScriptAnalyzer.m" ]; then SRC+=("$ROOT/Features/ResourceDetector/RDStaticScriptAnalyzer.m"); fi
 for f in AppError DNSResolver IPAddressPolicy HTTPPrivacyPolicy HTTPRequest HTTPResult HTTPClient RDLog; do SRC+=("$ROOT/Shared/Infrastructure/$f.m"); done
 SRC+=("$ROOT/Shared/Infrastructure/Async/RequestGeneration.m")
-xcrun clang -fobjc-arc -g -O1 -mmacosx-version-min=13.0 -framework Cocoa -framework WebKit -framework AVFoundation \
+xcrun clang -fobjc-arc -g -O1 -mmacosx-version-min=13.0 -framework Cocoa -framework WebKit -framework AVFoundation -framework Security \
  -I"$ROOT/Features/ResourceDetector" -I"$ROOT/Shared/Infrastructure" -I"$ROOT/Shared/Infrastructure/Async" \
  "${SRC[@]}" -o "$OUT/RetryAfterPolicyTests" > "$OUT/compile.log" 2>&1
 "$OUT/RetryAfterPolicyTests"
