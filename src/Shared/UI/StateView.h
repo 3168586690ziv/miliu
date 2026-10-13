@@ -20,9 +20,6 @@ typedef NS_ENUM(NSInteger, StateViewState) {
 
 @property (nonatomic, readonly) StateViewState state;
 
-// 当前可见子视图（仅一个非隐藏），供测试断言单一状态。
-@property (nonatomic, readonly) NSInteger visibleChildCount;
-
 // 内容视图（content 状态展示）
 @property (nonatomic, strong, nullable) NSView *contentView;
 

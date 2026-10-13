@@ -82,14 +82,6 @@
     _contentView.hidden   = (_state != StateViewStateContent);
 }
 
-- (NSInteger)visibleChildCount {
-    NSInteger n = 0;
-    NSArray *tracked = @[_loadingLabel, _emptyLabel, _errorContainer, _staleLabel];
-    for (NSView *v in tracked) { if (v && !v.hidden) n++; }
-    if (_contentView && !_contentView.hidden) n++;
-    return n;
-}
-
 - (void)retryTapped:(id)sender { [self invokeRetry]; }
 
 - (BOOL)invokeRetry {

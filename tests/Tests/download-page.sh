@@ -75,7 +75,16 @@ rg -q 'column\.maxWidth = width' "$APP" || { echo "FAIL: 列宽未跟随表格�
 rg -q 'scheduleDownloadsRefresh' "$APP" || { echo "FAIL: 缺少实时刷新调度"; exit 1; }
 rg -q 'reloadDataForRowIndexes:' "$APP" || { echo "FAIL: 未使用可见行原位刷新"; exit 1; }
 rg -q 'downloadsRenderedIdentifiers' "$APP" || { echo "FAIL: 缺少行顺序快照（筛选归属变化检测）"; exit 1; }
-rg -q 'downloadsListDirtyWhileHidden' "$APP" || { echo "FAIL: 页面隐藏期间未记脏"; exit 1; }
+# 页面隐藏期间不刷新；重新进入页面时无条件全量同步。
+# 2026-10-13 第 41 轮：原断言守的是 downloadsListDirtyWhileHidden，而该标志位
+# **只写不读**（4 处写、0 处读，页面进入走的是 showDownloads → refreshDownloadsList
+# 无条件全量同步，行为一直是对的）——断言于是变成守一个没人读的位。已删该位，
+# 断言改为直接守真实机制：隐藏早退 + 进入页面全量同步，并反向禁止标志位回流。
+rg -q 'if \(self\.downloadsPage\.hidden\) return;' "$APP" || { echo "FAIL: 隐藏期间刷新调度缺少早退"; exit 1; }
+if rg -q 'downloadsListDirtyWhileHidden' "$APP"; then
+  echo "FAIL: 仍残留只写不读的 downloadsListDirtyWhileHidden"; exit 1
+fi
+rg -U -q 'showDownloads:\(id\)sender \{[^}]*refreshDownloadsList' "$APP" || { echo "FAIL: 进入下载页未全量同步"; exit 1; }
 
 # 操作按钮保留
 for action in downloadsPauseTapped downloadsResumeTapped downloadsRetryTapped downloadsCancelTapped downloadsRevealTapped; do

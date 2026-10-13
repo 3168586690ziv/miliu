@@ -7,6 +7,7 @@
 //
 
 #import "DownloadLinkRefresher.h"
+#import "RDURLUtilities.h"
 
 static NSString * const kLinkRefreshStatusFetching = @"链接已失效，正在重新获取…";
 static NSString * const kLinkRefreshStatusFailed = @"链接已失效，可点击“重新获取”重试";
@@ -130,11 +131,27 @@ static NSString * const kLinkRefreshStatusNoSource = @"链接已失效且来源�
 - (DetectedMedia *)bestMediaForJob:(DownloadJob *)job
                     fromCandidates:(NSArray<DetectedMedia *> *)candidates {
     if (!job || !candidates.count) return nil;
+    // 稳定资源身份必须**忽略 CDN 签名/过期参数**（RDResourceGroupingIdentity）。
+    // 2026-10-13 真实现场：重探测候选里同一影片的旧/新签名是两条不同的
+    // dedupKey；此前这里用保留全部参数的 RDCanonicalResourceURL，于是只有旧
+    // 签名那条能进池——新签名被当成「别的资源」踢出，过期让位根本没机会跑，
+    // 410 后自动刷新拿回同一个死链接。方法头注释里的「忽略签名」说的就是这个
+    // 语义，实现此前与注释不符。
     NSString *jobIdentity = [DownloadManager sourceIdentityForURL:job.sourceURL];
+    NSString *jobGroupIdentity = RDResourceGroupingIdentity(job.sourceURL);
 
     // 1) 稳定资源身份匹配（忽略 CDN 签名/过期参数）。
     NSMutableArray<DetectedMedia *> *pool = [NSMutableArray array];
-    if (jobIdentity.length) {
+    if (jobGroupIdentity.length) {
+        for (DetectedMedia *media in candidates) {
+            NSURL *url = [NSURL URLWithString:media.mediaURL];
+            if (!url) continue;
+            NSString *identity = RDResourceGroupingIdentity(url);
+            if (identity.length && [identity isEqualToString:jobGroupIdentity]) [pool addObject:media];
+        }
+    }
+    // 分组身份异常为空时才退回下载身份，绝不因实现改动把原有匹配面收窄。
+    if (!pool.count && jobIdentity.length) {
         for (DetectedMedia *media in candidates) {
             NSURL *url = [NSURL URLWithString:media.mediaURL];
             if (!url) continue;
@@ -160,13 +177,32 @@ static NSString * const kLinkRefreshStatusNoSource = @"链接已失效且来源�
     }
     if (!pool.count) return nil;
 
-    // 3) 优先原画质。
+    // 3) 过期签名让位（2026-10-13 真实现场驱动）。hanime2.org 每次取页给全部媒体
+    //    换一套签名（约 24–32h 有效）；重探测候选里「动态腿（共享 WebKit 会话的
+    //    缓存页）的旧签名」与「静态腿的新签名」并存，而动态结果在合并列表里排前
+    //    —— 此前取同画质第一条恰好总选旧签名，410 后自动刷新等于白刷一次。
+    //    判据是 URL **自己声明**的过期时刻（RDLinkTokenStateForURL）：
+    //    · 只让「确凿已过期」的让位，且仅当同池里还有别家可换时才让；
+    //    · 判定不出来的候选（Unknown）绝不剔除 —— 保证刷新只会变强，
+    //      不会因判定失败变弱。
+    if (pool.count > 1) {
+        NSMutableArray<DetectedMedia *> *live = [NSMutableArray array];
+        NSUInteger expiredCount = 0;
+        for (DetectedMedia *media in pool) {
+            NSURL *u = [NSURL URLWithString:media.mediaURL ?: @""];
+            if (u && RDLinkTokenStateForURL(u) == RDLinkTokenExpired) expiredCount++;
+            else [live addObject:media];
+        }
+        if (expiredCount > 0 && live.count > 0) pool = live;
+    }
+
+    // 4) 优先原画质。
     if (job.qualityHint.length) {
         for (DetectedMedia *media in pool) {
             if ([media.quality isEqualToString:job.qualityHint]) return media;
         }
     }
-    // 4) 原画质不可用 → 最低可用画质。
+    // 5) 原画质不可用 → 最低可用画质。
     DetectedMedia *lowest = nil;
     NSInteger lowestRank = NSIntegerMax;
     for (DetectedMedia *media in pool) {

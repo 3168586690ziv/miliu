@@ -126,6 +126,80 @@ static inline NSString *RDResourceGroupingIdentity(NSURL *url) {
     return RDCanonicalResourceURL(c.URL);
 }
 
+#pragma mark - 链接签名新鲜度（2026-10-13，下载链接刷新用）
+
+/// 链接签名的时效状态。
+/// · RDLinkTokenExpired   —— URL 显式携带过期时刻，且**此刻已过**（如
+///   `?secure=…,1791777629` 的尾缀、`?expires=1791777629`）。可以确凿地判旧。
+/// · RDLinkTokenFresh     —— 显式携带过期时刻且未过。
+/// · RDLinkTokenUnknown   —— URL 没有可解析的过期时刻（无该参数、值非法、
+///   或过期值藏在 base64 签名体里拿不出来）。**绝不猜测**：判定不出来就返回
+///   Unknown，调用方必须当作与现状等价处理，不得因 Unknown 拒绝或放行。
+typedef NS_ENUM(NSInteger, RDLinkTokenState) {
+    RDLinkTokenUnknown = 0,
+    RDLinkTokenFresh,
+    RDLinkTokenExpired,
+};
+
+/// 找出 URL 里「显式声明过期时刻」的参数值（Unix 秒，10 位量级）。
+/// 只认 `expires / expire / expiry / exp` 这四个键名——它们的名字本身就承诺
+/// 了值是过期时刻；`token/secure/signature` 这类键的值是签名体（ hanime2.org
+/// 的 `secure=<base64>,<unix秒>` 形态里时刻在逗号后），也一并取逗号后的
+/// 纯数字尾缀。解析不出来返回 0。
+///
+/// 为什么要这个函数（2026-10-13 真实现场）：hanime2.org 每次取页都给全部媒体
+/// 换一套签名（`secure=<b64>,<unix秒>`，有效期约 24–32h）。App 的 WebKit 共享
+/// 会话会缓存页面，于是重探测的候选里**旧签名与新签名并存**，而
+/// DownloadLinkRefresher 此前取同画质的第一条——恰好总是旧签名，410 后自动
+/// 刷新等于白刷。判据必须可证伪：只信「URL 自己声明的过期时刻」，不猜签名
+/// 新旧；拿不到时刻就承认不知道（Unknown），把决定权留给调用方。
+static inline long long RDLinkExpiryEpoch(NSURL *url) {
+    if (!url) return 0;
+    NSURLComponents *c = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:YES];
+    if (!c) return 0;
+    long long best = 0;
+    for (NSURLQueryItem *item in c.queryItems ?: @[]) {
+        NSString *name = item.name.lowercaseString;
+        NSString *value = item.value ?: @"";
+        NSString *candidate = nil;
+        if ([name isEqualToString:@"expires"] || [name isEqualToString:@"expire"] ||
+            [name isEqualToString:@"expiry"] || [name isEqualToString:@"exp"]) {
+            candidate = value;
+        } else if ([name isEqualToString:@"token"] || [name isEqualToString:@"secure"] ||
+                   [name isEqualToString:@"signature"] || [name isEqualToString:@"sig"]) {
+            // `secure=<base64>,<unix秒>`：逗号后的纯数字尾缀才是过期时刻。
+            NSRange comma = [value rangeOfString:@","];
+            if (comma.location == NSNotFound || comma.location + 1 >= value.length) continue;
+            candidate = [value substringFromIndex:comma.location + 1];
+        }
+        if (!candidate.length) continue;
+        // 只认纯十进制数字（10 位量级，容忍前后空白），拒绝十六进制/科学计数/
+        // 负数/小数——解析不出来的值绝不充当过期时刻。
+        NSString *trimmed = [candidate stringByTrimmingCharactersInSet:
+                             [NSCharacterSet whitespaceCharacterSet]];
+        if (trimmed.length < 9 || trimmed.length > 12) continue;
+        BOOL digitsOnly = YES;
+        for (NSUInteger i = 0; i < trimmed.length; i++) {
+            unichar ch = [trimmed characterAtIndex:i];
+            if (ch < '0' || ch > '9') { digitsOnly = NO; break; }
+        }
+        if (!digitsOnly) continue;
+        long long epoch = strtoll(trimmed.UTF8String, NULL, 10);
+        if (epoch > 1000000000LL && epoch > best) best = epoch;   // > 2001-09-09，滤掉明显噪声
+    }
+    return best;
+}
+
+/// 链接签名此刻是否已过期。只有「显式过期时刻存在且已过」才返回 YES；
+/// 拿不到过期时刻（RDLinkTokenUnknown）一律 NO——宁可让刷新照旧，绝不因
+/// 判定失败把还能用的链接判死。
+static inline RDLinkTokenState RDLinkTokenStateForURL(NSURL *url) {
+    long long epoch = RDLinkExpiryEpoch(url);
+    if (epoch <= 0) return RDLinkTokenUnknown;
+    return ([NSDate date].timeIntervalSince1970 >= epoch) ? RDLinkTokenExpired : RDLinkTokenFresh;
+}
+
+
 #pragma mark - 画质变体识别（2026-10-10）
 
 // 真实网址现场：X/Twitter 的同一段视频以「同目录、扩展名相同、分辨率分量不同」

@@ -25,6 +25,7 @@
 #import "DNSResolver.h"
 #import "PerformancePolicy.h"
 #import "DetectedMedia.h"
+#import "RDURLUtilities.h"
 #import "AdaptiveTransferScheduler.h"
 
 // MARK: - 测试基建
@@ -1400,6 +1401,100 @@ static void TestLargeVideoPlansEightTransfers(void) {
     Check(cap >= 8 && planned >= 8,
           @"性能回归：单个约 49MB Range 视频规划至少 8 段（cap=%ld planned=%ld）",
           (long)cap, (long)planned);
+}
+
+// T60（2026-10-13）：链接刷新的「过期签名让位」。
+// 真实现场：hanime2.org 每次取页给全部媒体换一套签名（secure=<b64>,<unix秒>，
+// 约 24–32h 有效）；App 的 WebKit 共享会话缓存旧页面，于是重探测候选里旧签名
+// 与新签名并存、动态腿结果排前，此前 bestMediaForJob 取同画质第一条恰好总选
+// 旧签名 —— 410 后自动刷新拿回同一个死链接，白刷一次（本机实弹复现）。
+// 断言三层：① 判据纯函数只认 URL 自声明的过期时刻，解析不出绝不猜；
+// ② 同画质同身份候选里，过期签名让位给新鲜签名；
+// ③ 候选全部过期 / 全部无法判定时不得拒绝刷新（让位只会变强不会变弱）。
+static void TestLinkRefreshPrefersUnexpiredSignature(void) {
+    // ① 判据纯函数（生产 RDURLUtilities.h，直调）。
+    // 真实形态一：secure=<base64>,<unix秒>（hanime2.org）。
+    NSURL *freshSec = [NSURL URLWithString:
+        @"https://cdn.example.com/a.mp4?secure=7IB5MgD4WnXe9y4NFfkEag==,4102444800"];
+    NSURL *staleSec = [NSURL URLWithString:
+        @"https://cdn.example.com/a.mp4?secure=xJLJOy-6dQqC1XF8cb8YhQ==,1791777629"];
+    // 真实形态二：token=<随机>&expires=<unix秒>（同站另一批直链）。
+    NSURL *freshExp = [NSURL URLWithString:
+        @"https://cdn.example.com/a.mp4?token=LLdUa3nM5-lzk4GdSCaP8g&expires=4102444800"];
+    // 反例组：无时刻 / 时刻藏在无法解析的签名体里 / 非十进制 / 长度异常。
+    NSURL *noMoment  = [NSURL URLWithString:@"https://cdn.example.com/a.mp4?token=ABC"];
+    NSURL *junkValue = [NSURL URLWithString:@"https://cdn.example.com/a.mp4?secure=abc,0x1F&expires=1e9"];
+    NSURL *shortNum  = [NSURL URLWithString:@"https://cdn.example.com/a.mp4?secure=ab,42"];
+    Check(RDLinkTokenStateForURL(freshSec) == RDLinkTokenFresh,
+          @"T60: secure=<b64>,<未来秒> → Fresh");
+    Check(RDLinkTokenStateForURL(staleSec) == RDLinkTokenExpired,
+          @"T60: secure=<b64>,<过去秒 1791777629=2026-10-12> → Expired（真实现场 token）");
+    Check(RDLinkTokenStateForURL(freshExp) == RDLinkTokenFresh,
+          @"T60: expires=<未来秒> → Fresh");
+    Check(RDLinkTokenStateForURL(noMoment) == RDLinkTokenUnknown,
+          @"T60: 无过期时刻 → Unknown（绝不猜）");
+    Check(RDLinkTokenStateForURL(junkValue) == RDLinkTokenUnknown,
+          @"T60: 非十进制（0x1F / 1e9）→ Unknown，不解析成时刻");
+    Check(RDLinkTokenStateForURL(shortNum) == RDLinkTokenUnknown,
+          @"T60: 过短数字（42）→ Unknown，不把噪声当时刻");
+    Check(RDLinkExpiryEpoch(nil) == 0, @"T60: nil URL → epoch 0");
+
+    // ② 候选选择：同画质同身份，旧签名让位给新签名。
+    TestContext *ctx = MakeContext();
+    NSData *body = MP4Body(4096);
+    ctx.backend.script = ^MockScript *(NSURLRequest *request, NSInteger index) {
+        return [MockScript response:200 headers:@{
+            @"Content-Type": @"video/mp4",
+            @"Content-Length": [NSString stringWithFormat:@"%lu", (unsigned long)body.length]} body:body];
+    };
+    // 任务的 sourceURL 决定稳定资源身份：与两条候选同一身份（路径一致，签名不同）。
+    DownloadJob *job = EnqueueVideo(ctx,
+        @"/a.mp4?secure=xJLJOy-6dQqC1XF8cb8YhQ==,1791777629", @"https://page.example.com/watch", 0);
+    job.qualityHint = @"480p";
+
+    DetectedMedia *stale = [DetectedMedia new];
+    stale.mediaURL = @"https://cdn.example.com/a.mp4?secure=xJLJOy-6dQqC1XF8cb8YhQ==,1791777629";
+    stale.quality = @"480p";
+    DetectedMedia *fresh = [DetectedMedia new];
+    fresh.mediaURL = @"https://cdn.example.com/a.mp4?secure=7IB5MgD4WnXe9y4NFfkEag==,4102444800";
+    fresh.quality = @"480p";
+    // 旧签名在前 —— 模拟动态腿（缓存页）结果排前的真实顺序。
+    DownloadLinkRefresher *picker =
+        [[DownloadLinkRefresher alloc] initWithManager:ctx.manager reprobeHandler:nil];
+    DetectedMedia *picked = [picker bestMediaForJob:job fromCandidates:@[stale, fresh]];
+    Check(picked != nil && [picked.mediaURL isEqualToString:fresh.mediaURL],
+          @"T60: 同画质候选里过期签名让位给新鲜签名（选中 %@）", picked.mediaURL);
+
+    // ③ 不变弱：候选全部过期时照旧返回（让位不得变成拒绝）。
+    DetectedMedia *stale2 = [DetectedMedia new];
+    stale2.mediaURL = @"https://cdn.example.com/a.mp4?secure=zzz,1791777629";
+    stale2.quality = @"480p";
+    picked = [picker bestMediaForJob:job fromCandidates:@[stale2]];
+    Check(picked != nil && [picked.mediaURL isEqualToString:stale2.mediaURL],
+          @"T60: 全部候选都过期时照旧返回（不得因过期拒绝刷新）");
+    // ③b：全部无法判定时照旧返回（Unknown 不剔除）。
+    DetectedMedia *opaque = [DetectedMedia new];
+    opaque.mediaURL = @"https://cdn.example.com/a.mp4?token=ABC";
+    opaque.quality = @"480p";
+    picked = [picker bestMediaForJob:job fromCandidates:@[opaque, stale]];
+    Check(picked != nil,
+          @"T60: 含 Unknown 候选时照常选择（Unknown 不参与让位剔除）");
+
+    // ③c：画质优先高于让位 —— 原画质（480p）有过期+新鲜两条并存、另有低画质
+    //    新鲜候选时，选 480p 的新鲜那条：先按画质保留原档位，再在同画质内让位。
+    DetectedMedia *fresh480 = [DetectedMedia new];
+    fresh480.mediaURL = @"https://cdn.example.com/a.mp4?secure=fresh,4102444800";
+    fresh480.quality = @"480p";
+    DetectedMedia *freshLow = [DetectedMedia new];
+    freshLow.mediaURL = @"https://cdn.example.com/a.mp4?secure=fresh,4102444800";
+    freshLow.quality = @"360p";
+    picked = [picker bestMediaForJob:job fromCandidates:@[stale2, freshLow, fresh480]];
+    Check(picked != nil && [picked.mediaURL isEqualToString:fresh480.mediaURL],
+          @"T60: 原画质候选过期时先在同画质内换新鲜签名，不跨画质跳档（选中 %@）", picked.mediaURL);
+    // ③d：原画质只剩过期签名（无同画质新鲜候选）→ 按既有规则选最低可用画质。
+    picked = [picker bestMediaForJob:job fromCandidates:@[stale2, freshLow]];
+    Check(picked != nil && [picked.quality isEqualToString:@"360p"],
+          @"T60: 原画质只剩过期签名时选最低可用画质（选中 %s）", picked.quality.UTF8String);
 }
 
 static void TestLinkRefreshRestartReprobesCapability(void) {
@@ -3617,6 +3712,7 @@ int main(int argc, const char **argv) {
         TestSegmentRetrySurvivesSlotStarvation();
         TestResumeRebuildsProgressWatchdog();
         TestLinkRefreshRestartReprobesCapability();
+        TestLinkRefreshPrefersUnexpiredSignature();
         TestDNSTimeoutClassification();
         TestEndpointDNSTimeoutDefersThenSucceeds();
         TestEndpointDNSTimeoutExhaustionReportsTimeout();

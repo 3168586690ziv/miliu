@@ -215,7 +215,6 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 @property NSScrollView *downloadsScrollView;
 @property (nonatomic, strong) NSTimer *downloadsRefreshTimer;              // 合并高频进度回调（≈5Hz）
 @property (nonatomic, copy) NSArray<NSString *> *downloadsRenderedIdentifiers; // 行顺序快照
-@property (nonatomic, assign) BOOL downloadsListDirtyWhileHidden;         // 页面隐藏期间的变动
 @property NSTextField *downloadsEmptyLabel;
 // 追更页（同窗口切页，与设置页/下载列表同级；契约 WATCH-V1 §2/§3.5）
 @property (nonatomic, strong) NSView *watchlistPage;
@@ -355,7 +354,6 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 @property DiscoverySessionController *session;
 @property (nonatomic, strong) RDMetadataRecoveryCoordinator *metadataRecovery;   // 第 38 轮接线
 @property DownloadManager *downloadManager;
-@property (nonatomic, copy) NSString *latestDownloadJobIdentifier;
 @property (nonatomic, strong) NSTimer *downloadRecencyTimer;
 @property ResourceDownloadSettings *downloadSettings;
 @property NSButton *rescanFooter;
@@ -3749,7 +3747,7 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
 // 跳回顶部、选中丢失与闪烁。页面隐藏时只记脏，重新进入时立即全量同步。
 - (void)scheduleDownloadsRefresh {
     if (!self.downloadsTable) return;
-    if (self.downloadsPage.hidden) { self.downloadsListDirtyWhileHidden = YES; return; }
+    if (self.downloadsPage.hidden) return;   // 隐藏期间不刷新；重新进入时由 refreshDownloadsList 全量同步
     if (self.downloadsRefreshTimer) return;
     NSTimer *timer = [NSTimer timerWithTimeInterval:0.2 target:self selector:@selector(applyDownloadsRefresh:) userInfo:nil repeats:NO];
     [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
@@ -3763,7 +3761,7 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
 
 - (void)applyDownloadsRefreshNow {
     if (!self.downloadsTable) return;
-    if (self.downloadsPage.hidden) { self.downloadsListDirtyWhileHidden = YES; return; }
+    if (self.downloadsPage.hidden) return;   // 隐藏期间不刷新；重新进入时由 refreshDownloadsList 全量同步
     [self layoutDownloadsTable];
     NSArray<DownloadJob *> *jobs = [self sortedDownloadJobsForFilter:self.downloadFilter];
     NSMutableArray<NSString *> *identifiers = [NSMutableArray arrayWithCapacity:jobs.count];
@@ -3792,7 +3790,6 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
         }
         [self.downloadsTable scrollPoint:scrollOrigin];
     }
-    self.downloadsListDirtyWhileHidden = NO;
     self.downloadsEmptyLabel.hidden = jobs.count != 0;
     [self layoutDownloadsEmptyLabel];
     [self updateDownloadsStatusLabel];
@@ -3814,7 +3811,6 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
         NSInteger restored = [identifiers indexOfObject:selectedIdentifier];
         if (restored != NSNotFound) [self.downloadsTable selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)restored] byExtendingSelection:NO];
     }
-    self.downloadsListDirtyWhileHidden = NO;
     self.downloadsEmptyLabel.hidden = jobs.count != 0;
     [self layoutDownloadsEmptyLabel];
     [self updateDownloadsStatusLabel];

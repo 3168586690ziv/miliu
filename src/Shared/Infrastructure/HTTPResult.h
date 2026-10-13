@@ -12,7 +12,6 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong, nullable) AppError *error;
 @property (nonatomic, copy) NSString *source;        // @"cache" / @"live"
 @property (nonatomic, copy) NSDate *fetchedAt;
-@property (nonatomic, assign) BOOL isExpired;          // 缓存过期
 @property (nonatomic, copy, nullable) NSString *contentType;
 - (BOOL)isSuccess;
 @end

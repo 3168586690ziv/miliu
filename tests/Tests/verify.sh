@@ -404,16 +404,35 @@ done
 # 本就不该被套件编译，故排除；App.m 自身由 #import 引入，同样排除。
 # 只匹配真正的 `#import ... ResourceDetectorApp.m`（version.sh 只是 grep 它做语法
 # 破坏测试、并不编译，首版把它误判成需要，已修正）。
+#
+# 2026-10-13 第 41 轮扩展（第 40 轮自查登记的盲区）：原实现只看 .sh **自身文本**里的
+# `#import`，而几何探针把 `#import` 写在 **harness .m** 里、由 .sh 编译——盲区正好落在
+# 第 35 轮 AVKit 复发过的那两个探针（build/*-probe/*.m）上。现在按「探针 .m 的
+# **仓库相对路径**」把 .m 归到真正编译它的 .sh，再对那个 .sh 逐源检查（实测覆盖 15 个脚本）。
+# 必须用相对路径而非 basename：`tests/Tests/RealSiteProbe.m`（仓库文件）与
+# `tls-trust-real-site.sh` 运行时生成的 `$OUT/RealSiteProbe.m` 同名不同物，
+# 用 basename 会把后者误判成前者（首版实测误报，已改）。
+# verify.sh 自身含该模式字符串但不编译生产 App 源，必须排除，否则自触发。
 _rd_app_srcs=$(grep -m1 '^SRC=(' "$REPO/scripts/build.sh" | grep -o 'App/[A-Za-z0-9_]*\.m' | sed 's|App/||' | sort -u)
-for _suite in "$REPO"/tests/Tests/*.sh; do
-  grep -q '#import.*src/App/ResourceDetectorApp\.m' "$_suite" 2>/dev/null || continue
+_rd_app_importing=""
+for _imp in $(grep -rl '#import.*ResourceDetectorApp\.m' "$REPO"/tests/Tests/*.m "$REPO"/build/*-probe/*.m 2>/dev/null || true); do
+  _rel="${_imp#"$REPO"/}"
+  for _suite in $_rd_scan_scripts; do
+    [ "$(basename "$_suite")" = "verify.sh" ] && continue
+    if grep -qF "$_rel" "$_suite" 2>/dev/null; then
+      _rd_app_importing="$_rd_app_importing $_suite"
+    fi
+  done
+done
+_rd_app_importing=$(printf '%s\n' $_rd_app_importing | sort -u | grep -v '^$' || true)
+for _suite in $_rd_app_importing; do
   _b="$(basename "$_suite")"
   for _m in $_rd_app_srcs; do
     [ "$_m" = "ResourceDetectorApp.m" ] && continue
     _cls="${_m%.m}"
     grep -qE "\[\[${_cls} alloc\]|\[${_cls} new\]|${_cls}\.class" "$ROOT/App/ResourceDetectorApp.m" 2>/dev/null || continue
-    grep -q "$_m" "$_suite" 2>/dev/null || {
-      echo "FAIL: $_b import 了生产 App.m，但未编译 App 层源 $_m（会 Undefined symbols 链接失败）" >&2
+    grep -qF "$_m" "$_suite" 2>/dev/null || {
+      echo "FAIL: $_b 编译了 import 生产 App.m 的探针，但未编译 App 层源 ${_m}（会 Undefined symbols 链接失败）" >&2
       exit 1
     }
   done
