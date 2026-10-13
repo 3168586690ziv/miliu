@@ -94,6 +94,17 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Contents/I
 test "$(/usr/libexec/PlistBuddy -c 'Print :NSAppTransportSecurity:NSAllowsArbitraryLoads' "$APP/Contents/Info.plist")" = "true"
 # 同族：源 Packaging/Info.plist 必须同步携带（build.sh 直接拷贝该文件，漏源文件则下次构建回退）
 test "$(/usr/libexec/PlistBuddy -c 'Print :NSAppTransportSecurity:NSAllowsArbitraryLoads' "$ROOT/Packaging/Info.plist")" = "true"
+# 4h 站点模式批次进度必须真被读取（2026-10-13 第 42 轮）。协调器一直在算
+# requested/completedListingPageCount 与 usedCurrentPageFallback，但全项目**没有任何
+# 读取点**——完成文案只写「发现 N 个资源」，用户分不清 12 个列表页成了几个还是只成了 3 个；
+# 而且批次层从不设置 usedCurrentPageFallback（只写到单页结果），算出来等于不存在。
+# 四条断言守**真实读取/写入点**（带 `result.` / `batch.` 前缀 —— 注释里裸写类名或
+# 字段名不能满足它们；首版只写字段名，注释即可顶替，属假绿，已收紧）。
+# 变异验证：把任一处读取点删掉 ⇒ 本套件立即红；恢复 ⇒ 绿。
+rg -q 'result\.requestedListingPageCount' "$ROOT/App/ResourceDetectorApp.m" || { echo "FAIL: 站点模式完成文案未读列表页请求数（有数据无出口）" >&2; exit 1; }
+rg -q 'result\.completedListingPageCount' "$ROOT/App/ResourceDetectorApp.m" || { echo "FAIL: 站点模式完成文案未读列表页完成数（有数据无出口）" >&2; exit 1; }
+rg -q 'result\.usedCurrentPageFallback' "$ROOT/App/ResourceDetectorApp.m" || { echo "FAIL: 站点模式完成文案未读回退标志（有数据无出口）" >&2; exit 1; }
+rg -q 'batch\.usedCurrentPageFallback = YES' "$ROOT/Features/ResourceDetector/DiscoverySessionController.m" || { echo "FAIL: 批次结果未汇入回退标志（批次层永不设置）" >&2; exit 1; }
 codesign --verify --deep --strict "$APP"
 
 # 机器独立性：不允许再引用 SevenZZ 主 App 的偏好套件
@@ -375,7 +386,10 @@ for _suite in $_rd_scan_scripts; do
   [ "$_b" = "verify.sh" ] && continue    # verify 走 build.sh，生产构建自带全部框架
   _hit=""
   for _u in RDMetadataTransport DownloadManager DownloadCapabilityProbe RDPreviewController StaticHTMLDiscoveryPageProbe; do
-    grep -qE "(^|[^A-Za-z])${_u}([^A-Za-z]|\$)" "$_suite" 2>/dev/null || continue
+    # 只认**非注释行**（2026-10-13 第 42 轮）：注释里提到类名不等于「编译了它」。
+    # download-page.sh 是纯静态源码检查脚本、根本不编译任何东西，仅因注释里写了
+    # DownloadManager 就被判「未链接 Security」——首版实测误报，已按注释剥离修正。
+    grep -vE '^[[:space:]]*#' "$_suite" 2>/dev/null | grep -qE "(^|[^A-Za-z])${_u}([^A-Za-z]|\$)" || continue
     if grep -q 'RDTLSTrust\.h' "$ROOT/Features/ResourceDetector/${_u}.m" 2>/dev/null ||
        grep -q 'RDTLSTrust\.h' "$ROOT/Features/ResourceDownload/${_u}.m" 2>/dev/null; then
       _hit="$_hit $_u"
@@ -386,7 +400,7 @@ for _suite in $_rd_scan_scripts; do
     exit 1
   fi
   # 同族：编译 Features 全树 ⇒ 必然收进 RDPreviewWindow.m ⇒ 必须链接 AVKit
-  if grep -q 'find "\$ROOT/Features"' "$_suite" 2>/dev/null &&
+  if grep -vE '^[[:space:]]*#' "$_suite" 2>/dev/null | grep -q 'find "\$ROOT/Features"' &&
      ! grep -q '\-framework AVKit' "$_suite"; then
     echo "FAIL: $_b 编译 Features 全树（含 import AVKit 的 RDPreviewWindow.m）但未链接 -framework AVKit" >&2
     exit 1

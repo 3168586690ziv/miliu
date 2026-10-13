@@ -505,6 +505,12 @@ static NSTimeInterval DSCListingRetryDelay(NSUInteger retryAttempt) {
     batch.preferredTitleByPageURL = titles;
     batch.preferredPosterByPageURL = posters;
     batch.completedListingPageCount = completed;
+    // 同批带上「是否回退探测当前页」（2026-10-13 第 42 轮接线）：该标志此前只写到
+    // 单页结果（ResourceDiscoveryCoordinator 的 r.usedCurrentPageFallback），批次层
+    // 从不设置、也无人读取——算出来等于不存在。现在由各分页结果汇入批次。
+    for (ZZResourceDiscoveryResult *page in pages) {
+        if (page.usedCurrentPageFallback) { batch.usedCurrentPageFallback = YES; break; }
+    }
     if (completed == 0 && firstError) batch.error = firstError;
 
     self.batchActive = NO;

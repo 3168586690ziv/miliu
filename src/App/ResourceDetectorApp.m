@@ -3369,15 +3369,29 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
     for (MultiPageProbePageResult *page in result.pageResults) if (page.status == MultiPageProbePageStatusFailed && page.error) [errors addObject:page.error];
     for (ZZResourceDiscoveryResult *listing in result.listingPageResults) if (listing.error) [errors addObject:listing.error];
     NSUInteger count = self.visibleMedia.count;
+    // 站点模式批次进度接线（2026-10-13 第 42 轮）：协调器早就在算
+    // requestedListingPageCount / completedListingPageCount / usedCurrentPageFallback，
+    // 但此前**没有任何读取点**——用户只看得到「发现 N 个资源」，分不清 12 个列表页
+    // 是全都探到了还是只成了 3 个。此处把它接到完成文案上（非站点模式两者皆 0，
+    // 文案与改动前逐字一致）。
+    NSMutableString *batchNote = [NSMutableString string];
+    if (result.requestedListingPageCount > 0) {
+        [batchNote appendFormat:@" · 列表页 %lu/%lu",
+         (unsigned long)result.completedListingPageCount,
+         (unsigned long)result.requestedListingPageCount];
+    }
+    if (result.usedCurrentPageFallback) {
+        [batchNote appendString:@" · 未发现子页面，已回退探测当前页"];
+    }
     if (errors.count) {
         self.pendingCompletionStatus = count
-            ? [NSString stringWithFormat:@"发现 %lu 个资源 · 部分页面失败：%@",(unsigned long)count,errors.firstObject.localizedDescription]
+            ? [NSString stringWithFormat:@"发现 %lu 个资源%@ · 部分页面失败：%@",(unsigned long)count,batchNote,errors.firstObject.localizedDescription]
             : [NSString stringWithFormat:@"探测失败：%@",errors.firstObject.localizedDescription];
         self.pendingCompletionShowsCheck = NO;
     } else {
         self.pendingCompletionStatus = count
-            ? [NSString stringWithFormat:@"探测完成 · 发现 %lu 个资源",(unsigned long)count]
-            : @"页面加载成功 · 未发现可下载资源";
+            ? [NSString stringWithFormat:@"探测完成 · 发现 %lu 个资源%@",(unsigned long)count,batchNote]
+            : [NSString stringWithFormat:@"页面加载成功 · 未发现可下载资源%@",batchNote];
         self.pendingCompletionShowsCheck = YES;
     }
     self.statusNote.stringValue = @"正在准备呈现…";
@@ -3875,6 +3889,13 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
     [s appendFormat:@"%@ / %@", transferred, total];
     if (job.bytesPerSecond > 0 && job.state == DownloadJobStateRunning) {
         [s appendFormat:@"    %@/s", [self formatBytes:job.bytesPerSecond]];
+        // 剩余时间接线（2026-10-13 第 42 轮）：DownloadManager 每轮采样都在算
+        // estimatedRemainingSeconds，而 formatRemainingSeconds: 也早已写好——
+        // 两者此前**都没有任何调用点**，界面上永远看不到「还要多久」。
+        // 只在真有可用的估算值（>0）时显示，不编造。
+        if (job.estimatedRemainingSeconds > 0) {
+            [s appendFormat:@"    剩余 %@", [self formatRemainingSeconds:(NSInteger)job.estimatedRemainingSeconds]];
+        }
     }
     NSString *pct = (job.expectedContentLength > 0) ? [NSString stringWithFormat:@"%.0f%%", job.progress * 100.0]
                                                     : (job.state == DownloadJobStateCompleted ? @"100%" : @"—");

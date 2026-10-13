@@ -86,6 +86,15 @@ if rg -q 'downloadsListDirtyWhileHidden' "$APP"; then
 fi
 rg -U -q 'showDownloads:\(id\)sender \{[^}]*refreshDownloadsList' "$APP" || { echo "FAIL: 进入下载页未全量同步"; exit 1; }
 
+# 预计剩余时间必须真接到下载行（2026-10-13 第 42 轮）：DownloadManager 每轮采样都在算
+# estimatedRemainingSeconds，且 formatRemainingSeconds: 也早已写好——但两者此前**都没有
+# 任何调用点**，界面上永远看不到「还要多久」（数据、格式化器、行渲染三者都在，只差接线）。
+# 断言守**真实调用点**（注释不能顶替 —— 首版只 grep 字段名，注释即可满足，属假绿，已收紧）：
+# 格式化器必须被 job 的估算值调用，且它不能只剩定义。
+rg -q 'formatRemainingSeconds:\(NSInteger\)job\.estimatedRemainingSeconds' "$APP" || { echo "FAIL: 下载行未用估算剩余时间调用格式化器（有数据无出口）"; exit 1; }
+n_fmt=$(rg -c 'formatRemainingSeconds' "$APP" 2>/dev/null || echo 0)
+[ "${n_fmt:-0}" -ge 2 ] || { echo "FAIL: formatRemainingSeconds 只有定义、没有调用点（有数据无出口）"; exit 1; }
+
 # 操作按钮保留
 for action in downloadsPauseTapped downloadsResumeTapped downloadsRetryTapped downloadsCancelTapped downloadsRevealTapped; do
   rg -q "$action" "$APP" || { echo "FAIL: 缺少行内操作 $action"; exit 1; }
