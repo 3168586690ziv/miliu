@@ -22,7 +22,6 @@ xcrun clang -fobjc-arc -g -O1 -mmacosx-version-min=13.0 \
   "$ROOT/Features/ResourceDetector/RDStaticScriptAnalyzer.m" \
   "$ROOT/Features/ResourceDetector/DetectedMedia.m" \
   "$ROOT/Features/ResourceDetector/RDQualityTier.m" \
-  "$ROOT/Features/ResourceDetector/RDWatchlistStore.m" \
   "$ROOT/Features/ResourceDetector/RDMetadataService.m" \
   "$ROOT/Features/ResourceDetector/RDMetadataTransport.m" \
   "$ROOT/Features/ResourceDetector/ResourceURLGate.m" \

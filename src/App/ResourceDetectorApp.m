@@ -21,7 +21,6 @@
 #import "DownloadLinkRefresher.h"
 #import "RDHybridPageProbe.h"
 #import "RDManualVerification.h"   // 手动验证后继续探测（第 13 轮接线）
-#import "RDWatchlistPage.h"        // 追更页（同窗口第四个页面容器；契约 WATCH-V1 §3.4/§3.5）
 #import "RDPreviewController.h"    // 预览播放编排（第 35 轮：探测命中不下载、直接预览）
 #import "RDPreviewWindow.h"        // 预览窗口关闭通知（第 35 轮）
 #import "RDGeneratedVersion.h"  // 构建期生成（scripts/generate-version.sh → build/generated/）
@@ -200,7 +199,7 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
     RDDownloadFilterFailed,
 };
 
-@interface ResourceDetectorAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, DownloadManagerDelegate, WKNavigationDelegate, RDWatchlistPageDelegate>
+@interface ResourceDetectorAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, DownloadManagerDelegate, WKNavigationDelegate>
 @property (nonatomic, assign) RDDownloadFilter downloadFilter;
 @property RDSlashWindow *window;
 @property NSView *homePage;
@@ -216,10 +215,6 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 @property (nonatomic, strong) NSTimer *downloadsRefreshTimer;              // 合并高频进度回调（≈5Hz）
 @property (nonatomic, copy) NSArray<NSString *> *downloadsRenderedIdentifiers; // 行顺序快照
 @property NSTextField *downloadsEmptyLabel;
-// 追更页（同窗口切页，与设置页/下载列表同级；契约 WATCH-V1 §2/§3.5）
-@property (nonatomic, strong) NSView *watchlistPage;
-@property (nonatomic, strong) RDWatchlistPageController *watchlistPageController;
-@property (nonatomic, strong) NSButton *watchNavButton;   // 主页右下角「追更」入口（AX: RDWatchNavButton）
 @property DownloadLinkRefresher *linkRefresher;
 @property RDHybridPageProbe *refreshProbe;
 @property NSTextField *slashLabel;
@@ -371,10 +366,6 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 - (void)scan:(id)sender;
 - (void)cancelScan:(id)sender;
 - (void)showDownloads:(id)sender;
-// 追更页切页与助手唤醒接收（契约 WATCH-V1 §3.1/§3.5）
-- (void)showWatchlistPage:(id)sender;
-- (void)switchBackToHomeFromWatchlist:(id)sender;
-- (void)handleWatchOpenAndScan:(NSNotification *)notification;
 #pragma mark - 统一呈现（私有）
 - (void)beginUnifiedPresentationForResult:(ZZResourceDiscoveryResult *)result;
 - (void)presentationSnapshotArrived:(RDMetadataSnapshot *)snapshot
@@ -436,7 +427,6 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
     [_downloadRecencyTimer invalidate];
     [_downloadsRefreshTimer invalidate];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
-    [[NSDistributedNotificationCenter defaultCenter] removeObserver:self];   // 追更 §3.1 唤醒观察者
     if (_spaceTapSource) {
         CFRunLoopSourceInvalidate(_spaceTapSource);
         CFRelease(_spaceTapSource);
@@ -655,7 +645,6 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     [root addSubview:self.downloadsPage];
     self.downloadFilter = RDDownloadFilterAll;
     [self buildDownloadsPage];
-    [self buildWatchlistPage];   // 追更页（同窗口第四个页面容器，初始隐藏）
 
     // ── 斜杠行（顶部固定） ──
     self.slashLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(30, 637, 16, 30)];
@@ -820,15 +809,6 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     [self.window makeFirstResponder:self.urlField];
 
     [self installSpaceHotkeyTap]; // ⌘空格 暂停/继续（前台接管，需辅助功能授权）
-
-    // ── 追更 v1（契约 WATCH-V1 §3.1）：助手唤醒 → 打开Miliu并自动探测目标页 ──
-    // 回调在主线程、仅当空闲（!scanning && !presentationPreparing）时生效；
-    // generation 保护照旧：scan: 内部自增 scanGeneration 作废旧回调，
-    // 迟到/乱序通知不会打断进行中的探测，进行中的探测也不被本通知打断。
-    [[NSDistributedNotificationCenter defaultCenter] addObserver:self
-                                                        selector:@selector(handleWatchOpenAndScan:)
-                                                            name:RDWatchNotificationOpenAndScan
-                                                          object:nil];
 }
 
 #pragma mark - 右侧详情面板
@@ -2209,11 +2189,8 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     self.rescanFooter = [self tinyButtonWithTitle:@"⏎ 重新探测" fontSize:11 color:[NSColor colorWithWhite:0.6 alpha:0.5] action:@selector(scan:)];
     self.downloadFooter = [self tinyButtonWithTitle:@"⌘D 下载选中" fontSize:11 color:[NSColor colorWithWhite:0.6 alpha:0.5] action:@selector(downloadSelected:)];
     self.downloadsFooter = [self tinyButtonWithTitle:@"⌘L 下载列表" fontSize:11 color:[NSColor colorWithWhite:0.6 alpha:0.5] action:@selector(showDownloads:)];
-    // 「追更」入口：照「⌘L 下载列表」的模式与位置（右下角小字链，AX 契约 §3.4）
-    self.watchNavButton = [self tinyButtonWithTitle:@"追更" fontSize:11 color:[NSColor colorWithWhite:0.6 alpha:0.5] action:@selector(showWatchlistPage:)];
-    self.watchNavButton.identifier = @"RDWatchNavButton";
     self.downloadPauseFooter = [self tinyButtonWithTitle:@"暂停下载" fontSize:11 color:NSColor.secondaryLabelColor action:@selector(toggleDownloadPauseResume:)];
-    for (NSButton *button in @[self.rescanFooter, self.downloadPauseFooter, self.downloadFooter, self.watchNavButton, self.downloadsFooter]) {
+    for (NSButton *button in @[self.rescanFooter, self.downloadPauseFooter, self.downloadFooter, self.downloadsFooter]) {
         button.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
         [self.homePage addSubview:button];
     }
@@ -2243,8 +2220,8 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 
 - (void)layoutFooterButtons {
     CGFloat right = NSWidth(self.window.contentView.bounds) - 24;
-    // 逆序摆放：最右是「⌘L 下载列表」，「追更」紧贴其左（同页入口）
-    for (NSButton *b in @[self.rescanFooter, self.downloadPauseFooter, self.downloadFooter, self.watchNavButton, self.downloadsFooter].reverseObjectEnumerator) {
+    // 逆序摆放：最右是「⌘L 下载列表」
+    for (NSButton *b in @[self.rescanFooter, self.downloadPauseFooter, self.downloadFooter, self.downloadsFooter].reverseObjectEnumerator) {
         NSRect f = b.frame;
         f.origin.x = right - NSWidth(f);
         f.origin.y = 18;
@@ -2275,7 +2252,6 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 - (void)showSettingsPage:(id)sender {
     self.homePage.hidden = YES;
     self.settingsPage.hidden = NO;
-    self.watchlistPage.hidden = YES;   // 追更页与设置页互斥（同窗口切页）
     // 同步探测模式控件状态（模式可能在主页被其他路径改变）
     self.settingsProbeModeControl.selectedSegment = (self.mode == ZZResourceDiscoveryModeSite) ? 1 : 0;
     // 下载位置的实际生效目录可能变化（U 盘插拔、自定义目录被删）：每次进设置页都刷新
@@ -3475,7 +3451,6 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
     self.homePage.hidden = YES;
     self.settingsPage.hidden = YES;
     self.downloadsPage.hidden = NO;
-    self.watchlistPage.hidden = YES;   // 追更页与下载列表互斥（同窗口切页；追更页 z 序在下载页之上）
     [self layoutDownloadsTable];
     [self refreshDownloadsList];
     [self.window makeFirstResponder:nil];
@@ -3486,71 +3461,6 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
     self.settingsPage.hidden = YES;
     self.homePage.hidden = NO;
     [self.window makeFirstResponder:self.urlField];
-}
-
-#pragma mark - 追更页（同窗口切页；契约 WATCH-V1 §3.1/§3.4/§3.5）
-// App 侧只做最小接线：页面容器注册、入口按钮、切页与「查看」动线、助手唤醒接收。
-// 页面内部构建与数据逻辑全部在 RDWatchlistPage.m 的 RDWatchlistPageController。
-
-- (void)buildWatchlistPage {
-    NSRect frame = self.window.contentView.bounds;
-    self.watchlistPageController = [[RDWatchlistPageController alloc] initWithFrame:frame delegate:self];
-    self.watchlistPage = self.watchlistPageController.pageView;
-    self.watchlistPage.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    self.watchlistPage.hidden = YES;
-    [self.window.contentView addSubview:self.watchlistPage];   // 最后加入 → z 序在最上
-}
-
-- (void)showWatchlistPage:(id)sender {
-    self.homePage.hidden = YES;
-    self.settingsPage.hidden = YES;
-    self.downloadsPage.hidden = YES;
-    self.watchlistPage.hidden = NO;
-    [self.watchlistPageController prepareForShow];   // 重读观察库 + 刷新助手运行态/相对时间
-    [self.window makeFirstResponder:nil];
-}
-
-- (void)switchBackToHomeFromWatchlist:(id)sender {
-    self.watchlistPage.hidden = YES;
-    self.downloadsPage.hidden = YES;
-    self.settingsPage.hidden = YES;
-    self.homePage.hidden = NO;
-    [self.window makeFirstResponder:self.urlField];
-}
-
-#pragma mark RDWatchlistPageDelegate
-
-// 行「查看」/ 行点按（页面已完成 markPendingRead）：回主页 + 填址 + scan:
-- (void)watchlistPageDidRequestOpenPageURL:(NSString *)pageURL {
-    self.watchlistPage.hidden = YES;
-    self.downloadsPage.hidden = YES;
-    self.settingsPage.hidden = YES;
-    self.homePage.hidden = NO;
-    self.urlField.stringValue = pageURL ?: @"";
-    [self.window makeFirstResponder:self.urlField];
-    [self scan:nil];
-}
-
-// 「＋添加当前页」取主页地址栏当前内容（校验在页面侧）
-- (NSString *)watchlistPageCurrentAddressForWatchlist {
-    return self.urlField.stringValue ?: @"";
-}
-
-- (void)watchlistPageDidRequestBack {
-    [self switchBackToHomeFromWatchlist:nil];
-}
-
-// 契约 §3.1：助手 post com.sevenzz.miliu.openAndScan {pageURL}（已先 NSWorkspace 打开本 App）。
-// NSDistributedNotificationCenter 的 selector 观察者本就在主线程回调；再入主队列一次，
-// 与「回调在主线程」的契约措辞对齐。空闲判定照契约：!scanning && !presentationPreparing。
-- (void)handleWatchOpenAndScan:(NSNotification *)notification {
-    NSString *pageURL = notification.userInfo[@"pageURL"];
-    if (![pageURL isKindOfClass:[NSString class]] || pageURL.length == 0) return;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.scanning || self.presentationPreparing) return;   // 空闲才生效
-        self.urlField.stringValue = pageURL;
-        [self scan:nil];
-    });
 }
 
 - (void)buildDownloadsPage {

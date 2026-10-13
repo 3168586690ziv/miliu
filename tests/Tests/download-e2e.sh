@@ -46,7 +46,7 @@ fi
 
 # ---------- 2. 编译行级时间轴测试 ----------
 bash "$REPO/scripts/generate-version.sh" >/dev/null
-SRC=("$REPO/tests/Tests/DownloadE2ETests.m" "$ROOT/App/ResourceResultRowView.m" "$ROOT/App/RDWatchlistPage.m")
+SRC=("$REPO/tests/Tests/DownloadE2ETests.m" "$ROOT/App/ResourceResultRowView.m")
 while IFS= read -r f; do SRC+=("$f"); done < <(find "$ROOT/Features" -name '*.m' -print | sort)
 for f in AppError DNSResolver HTTPPrivacyPolicy IPAddressPolicy HTTPRequest HTTPResult HTTPClient PreferencesStore RDLog; do
   SRC+=("$ROOT/Shared/Infrastructure/$f.m")

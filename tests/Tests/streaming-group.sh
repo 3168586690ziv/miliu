@@ -9,7 +9,7 @@ export RD_LOG_PATH="$OUT/test-ResourceDetector.log"
 mkdir -p "$OUT"
 bash "$REPO/scripts/generate-version.sh" >/dev/null
 printf 'Streaming/grouping focused tests: %s\n' "$(date -u)"
-SRC=("$REPO/tests/Tests/StreamingGroupTests.m" "$ROOT/App/ResourceResultRowView.m" "$ROOT/App/RDWatchlistPage.m")
+SRC=("$REPO/tests/Tests/StreamingGroupTests.m" "$ROOT/App/ResourceResultRowView.m")
 while IFS= read -r f; do SRC+=("$f"); done < <(find "$ROOT/Features" -name '*.m' -print | sort)
 for f in AppError DNSResolver HTTPPrivacyPolicy IPAddressPolicy HTTPRequest HTTPResult HTTPClient PreferencesStore RDLog; do
   SRC+=("$ROOT/Shared/Infrastructure/$f.m")

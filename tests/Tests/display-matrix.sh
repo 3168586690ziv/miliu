@@ -5,7 +5,7 @@ ROOT="$REPO/src"; BUILD="$REPO/build/display-matrix-tests"; mkdir -p "$BUILD"
 # 日志隔离：本测试驱动生产代码（含 RDLog 调用），绝不能污染用户真实日志。
 export RD_LOG_PATH="$BUILD/test-ResourceDetector.log"
 bash "$REPO/scripts/generate-version.sh" >/dev/null
-SRC=("$REPO/tests/Tests/DisplayMatrixTests.m" "$ROOT/App/ResourceResultRowView.m" "$ROOT/App/RDWatchlistPage.m")
+SRC=("$REPO/tests/Tests/DisplayMatrixTests.m" "$ROOT/App/ResourceResultRowView.m")
 while IFS= read -r f; do SRC+=("$f"); done < <(find "$ROOT/Features" -name '*.m' -print | sort)
 for f in AppError DNSResolver HTTPPrivacyPolicy IPAddressPolicy HTTPRequest HTTPResult HTTPClient PreferencesStore RDLog; do SRC+=("$ROOT/Shared/Infrastructure/$f.m"); done
 SRC+=("$ROOT/Shared/Infrastructure/Async/RequestGeneration.m" "$ROOT/Shared/Infrastructure/Performance/PerformancePolicy.m" "$ROOT/Shared/UI/DesignSystem/ColorTokens.m" "$ROOT/Shared/UI/DesignSystem/TypographyTokens.m" "$ROOT/Shared/UI/StateView.m" "$ROOT/Shared/UI/UIThemeSupport.m")

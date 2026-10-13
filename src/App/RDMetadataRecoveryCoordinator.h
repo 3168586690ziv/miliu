@@ -4,7 +4,7 @@
 //  背景：三个生产组件（RDCoverRecoveryEngine / RDDisplayMetadataRecoveryStore /
 //  ResourceTitleTranslator）此前**代码完整但零引用**——它们承诺的能力
 //  （封面自动恢复、标题与封面防退化、非中文标题翻译）在 App 里从不执行，
-//  却已被编进主 App 与追更助手两个二进制、并计入版本号第一段。
+//  却已被编进主 App 二进制、并计入版本号第一段。
 //  本类把它们接到真实调用链上，逐条对应：
 //    · RDDisplayMetadataRecoveryStore —— 探测结果落地时按来源页记录标题/封面，
 //      持久化到用户偏好；标题/封面退化（token 刷新、重启）时按来源页回补；

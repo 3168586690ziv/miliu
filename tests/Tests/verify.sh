@@ -227,67 +227,6 @@ rg -q 'cancel.keyEquivalent = @"\\r"' "$ROOT/App/ResourceDetectorApp.m"
 rg -q 'clearDownloadRecordsHint.stringValue = @"已清除' "$ROOT/App/ResourceDetectorApp.m"
 rg -q 'clearSiteSessionHint.stringValue = @"已清除' "$ROOT/App/ResourceDetectorApp.m"
 
-# ── 追更 v1（WATCH-V1-CONTRACT §1/§3.1/§3.2/§3.4）：助手 bundle 产物与双端接线（只增不改） ──
-# 1) 助手 bundle 产物存在、可执行就位、其中 Info.plist LSUIElement=true（契约 §3.2：
-#    LSUIElement 后台进程），且内嵌 LaunchAgent plist（契约 §3.2 固定路径，SMAppService.agent 注册用）。
-HELPER_APP="$APP/Contents/Helpers/Miliu追更助手.app"
-if ! test -d "$HELPER_APP"; then
-  echo "FAIL: helper bundle missing: $HELPER_APP" >&2
-  exit 1
-fi
-if ! test -x "$HELPER_APP/Contents/MacOS/SevenZZWatchAgent"; then
-  echo "FAIL: helper executable missing: $HELPER_APP/Contents/MacOS/SevenZZWatchAgent" >&2
-  exit 1
-fi
-if ! plutil -lint "$HELPER_APP/Contents/Info.plist" >/dev/null; then
-  echo "FAIL: helper Info.plist is not a valid plist" >&2
-  exit 1
-fi
-if ! test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$HELPER_APP/Contents/Info.plist")" = "true"; then
-  echo "FAIL: helper Info.plist LSUIElement must be true (contract §3.2)" >&2
-  exit 1
-fi
-if ! test -f "$HELPER_APP/Contents/Library/LaunchAgents/com.sevenzz.resource-detector.watchlist.plist"; then
-  echo "FAIL: embedded LaunchAgent plist missing in helper bundle (contract §3.2)" >&2
-  exit 1
-fi
-# SMAppService 实测（2026-10-03 安装后验收）：LimitLoadToSessionType 会令注册报
-# "plist content is invalid"（Aqua 会话由系统管理），禁止再引入。
-if grep -q "LimitLoadToSessionType" "$HELPER_APP/Contents/Library/LaunchAgents/com.sevenzz.resource-detector.watchlist.plist"; then
-  echo "FAIL: agent plist must not contain LimitLoadToSessionType (breaks SMAppService registration)" >&2
-  exit 1
-fi
-
-# 2) RDWatchlistStore 双端命中（契约 §1：App 侧与助手侧共用唯一存储，禁止第二套）。
-#    App 侧：ResourceDetectorApp.m 或 RDWatchlistPage.m 至少其一；助手侧：src/Helpers 至少其一。
-if ! rg -q 'RDWatchlistStore' "$ROOT/App/ResourceDetectorApp.m" "$ROOT/App/RDWatchlistPage.m"; then
-  echo "FAIL: app side does not reference RDWatchlistStore (ResourceDetectorApp.m / RDWatchlistPage.m)" >&2
-  exit 1
-fi
-if ! rg -q 'RDWatchlistStore' "$ROOT/Helpers" -g '*.m'; then
-  echo "FAIL: helper side does not reference RDWatchlistStore (src/Helpers)" >&2
-  exit 1
-fi
-
-# 3) 主程序追更接线：添加当前页按钮标识与跨进程唤醒通知名（契约 §3.1/§3.4）。
-#    原断言把两个符号都指向 ResourceDetectorApp.m；集成裁决：按契约 §3.4，AX 标识
-#    RDWatchAddCurrentPageButton 由页面主体 RDWatchlistPage.m 创建（App.m 只做切页接线），
-#    通知名字面值定死在 RDWatchlistPage.m 的契约常量区、App.m 经常量 RDWatchNotificationOpenAndScan
-#    接线（原断言在 App.m 只会被注释行命中，属弱断言）。新断言 = 定义处 + 接线处双命中，
-#    仍是追更接线必须同时存在的两个符号，无放宽。
-if ! rg -q 'RDWatchAddCurrentPageButton' "$ROOT/App/RDWatchlistPage.m"; then
-  echo "FAIL: RDWatchAddCurrentPageButton not built in RDWatchlistPage.m (contract §3.4)" >&2
-  exit 1
-fi
-if ! rg -q 'com\.sevenzz\.miliu\.openAndScan' "$ROOT/App/RDWatchlistPage.m"; then
-  echo "FAIL: contract constant com.sevenzz.miliu.openAndScan not defined in RDWatchlistPage.m" >&2
-  exit 1
-fi
-if ! rg -q 'RDWatchNotificationOpenAndScan' "$ROOT/App/ResourceDetectorApp.m"; then
-  echo "FAIL: ResourceDetectorApp.m does not wire RDWatchNotificationOpenAndScan (contract §3.1)" >&2
-  exit 1
-fi
-
 # 4) 第 36 轮（2026-10-12）：证书信任容错 + 下载列表深浅统一 + 排队语义。
 #
 # 4a. 容错层必须存在，且必须被**全部**自行发起 HTTPS 请求的链路真正接线。

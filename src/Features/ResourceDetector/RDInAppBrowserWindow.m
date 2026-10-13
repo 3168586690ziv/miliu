@@ -1,8 +1,8 @@
 //
 //  RDInAppBrowserWindow.m — 应用内浏览器窗口实现
 //
-//  自包含约束：本文件同时编入主 App 与常驻追更助手（build.sh 按 Features 目录
-//  自动收集），因此只依赖同目录 Features 层与系统框架，不得反向引用 App 层。
+//  自包含约束：本文件编入主 App（build.sh 按 Features 目录自动收集），
+//  因此只依赖同目录 Features 层与系统框架，不得反向引用 App 层。
 //
 
 #import "RDInAppBrowserWindow.h"

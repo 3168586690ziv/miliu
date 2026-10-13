@@ -1,7 +1,7 @@
 //
 //  RDPreviewWindow.m — 视频预览播放窗口实现（第 35 轮）
 //
-//  自包含约束（同 RDInAppBrowserWindow）：本文件同时编入主 App 与追更助手，
+//  自包含约束（同 RDInAppBrowserWindow）：本文件编入主 App，
 //  只依赖系统框架，不反向引用 App 层。窗口由用户点击「预览」触发（App 已在
 //  前台），只 makeKeyAndOrderFront:，不得抢前台；attachPlayer 与 showError
 //  互斥：先调哪个显示哪个。
