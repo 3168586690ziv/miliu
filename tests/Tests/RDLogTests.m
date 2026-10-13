@@ -226,10 +226,13 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
     [[NSFileManager defaultManager] removeItemAtPath:root error:nil];
     [[NSFileManager defaultManager] createDirectoryAtPath:root
                               withIntermediateDirectories:YES attributes:nil error:nil];
-    // 主进程整体隔离到临时日志：A 项会真实调用 RDLogRevealInFinder（打开访达），
+    // 主进程整体隔离到临时日志：A 项会真实调用 RDLogRevealInFinder（UI 动作静默），
     // 绝不能让它操作用户真实的 ~/Library/Logs/ResourceDetector.log。
     // LogPath() 是惰性的，这里在任何 RDLog 调用之前设置仍然有效。
     setenv("RD_LOG_PATH", [root stringByAppendingPathComponent:@"main.log"].UTF8String, 1);
+    // A 项的 UI 动作必须静默：否则每次回归都让 LaunchServices 用 Console.app
+    // 打开 $TMPDIR/rdlog-tests-<pid>/main.log，在用户屏幕上弹一个 main.log 窗口。
+    setenv("RD_LOG_NO_UI", "1", 1);
 
     // A. P0-1 打开日志不得截断已有内容
     {
@@ -237,7 +240,7 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         NSData *seed = [@"已有内容行 1\n已有内容行 2\n已有内容行 3\n" dataUsingEncoding:NSUTF8StringEncoding];
         [seed writeToFile:logPath atomically:YES];
         unsigned long long before = FileBytes(logPath);
-        RDLogRevealInFinder();   // 真实调用（会打开访达窗口，属预期副作用）
+        RDLogRevealInFinder();   // 真实调用；UI 动作由 RD_LOG_NO_UI 静默（不抢前台）
         unsigned long long after = FileBytes(logPath);
         Check(before > 0 && after == before,
               [NSString stringWithFormat:@"A 已有日志调用 RDLogRevealInFinder 后字节数不变：%llu → %llu",

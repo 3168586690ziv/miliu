@@ -641,7 +641,13 @@ void RDLogRevealInFinder(void) {
     if (![fm fileExistsAtPath:path]) {
         [fm createFileAtPath:path contents:[NSData data] attributes:nil];
     }
-    [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:path]];
+    // 回归测试只验证"不截断已有内容"，不得弹出任何窗口（第 35 轮不抢前台铁律）。
+    // 闸门放在判存在之后：被验证的截断路径仍真实执行，只有 UI 动作被静默。
+    if (getenv("RD_LOG_NO_UI")) return;
+    // 契约是"在访达中显示并选中"（见 RDLog.h），不是"用默认程序打开"：
+    // openURL: 会把 .log 交给 LaunchServices 的默认处理器（本机为 Console.app），
+    // 于是每跑一次回归就在用户屏幕上弹一个标题为 main.log 的控制台窗口。
+    [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[[NSURL fileURLWithPath:path]]];
 }
 
 NSString * _Nullable RDLogExportDiagnostics(NSString *appVersion, NSError * _Nullable *error) {
