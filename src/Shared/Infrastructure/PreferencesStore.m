@@ -38,6 +38,7 @@ NSString *const SevenZZKeyMoodHistoryDeletedSnapshot     = @"MoodHistoryDeletedS
 NSString *const SevenZZKeyMoodHistoryDeletedSnapshotDate = @"MoodHistoryDeletedSnapshotDate";
 NSString *const SevenZZKeySchemaVersion                  = @"SevenZZSchemaVersion";
 NSString *const SevenZZKeyDisplayMetadataHistory         = @"DisplayMetadataHistory";
+NSString *const SevenZZKeyRefererMode                    = @"ZZResourceDetector.RefererMode";
 
 @implementation SevenZZPreferenceKeySpec
 + (instancetype)specWithKey:(NSString *)key
@@ -237,6 +238,7 @@ NSString *const SevenZZKeyDisplayMetadataHistory         = @"DisplayMetadataHist
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyMoodHistoryDeletedSnapshotDate type:SevenZZPreferenceTypeString defaultValue:nil owningPage:@"mood" migrationRule:@"保留"]];
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeySchemaVersion type:SevenZZPreferenceTypeInteger defaultValue:@(0) owningPage:@"system" migrationRule:@"当前schema版本"]];
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyDisplayMetadataHistory type:SevenZZPreferenceTypeDictionary defaultValue:nil owningPage:@"media" migrationRule:@"保留；按来源页存标题/封面"]];
+    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyRefererMode type:SevenZZPreferenceTypeInteger defaultValue:@(0) owningPage:@"settings" migrationRule:@"非法值回退仅 origin"]];
     return specs;
 }
 

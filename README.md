@@ -91,7 +91,9 @@ bash scripts/build.sh
 | `download-e2e.sh` | 受控本地下载的行级验收 |
 | `download-page.sh` / `download-list-ui.sh` | 下载列表页面与筛选态界面回归 |
 | `real-site.sh` | 真实网址现场复现/验收（真实网络，手动运行） |
-| `real-webkit-redirect.sh` / `redirect-policy.sh` | 重定向策略与真实 WebKit 跳转 |
+| `real-webkit-redirect.sh` / `redirect-policy.sh` | 重定向策略与真实 WebKit 跳转；Referer 三档策略（仅域名/完整地址/不发送） |
+| `body-scan.sh` / `websocket-scan.sh` | 注入脚本发现面：接口响应体 JSON 扫描、WebSocket 帧解析（文本/JSON/ArrayBuffer、长度闸、故障隔离） |
+| `pagination-styles.sh` | 总站翻页多形态自适应（`?page=` / `/page/N` / `_pN` / `index_N.html` 等）与零回归 |
 | `dns-bound.sh` / `peer-binding-unit.sh` | DNS 绑定与传输对端绑定 |
 | `thumbnail.sh` / `display-matrix.sh` / `streaming-group.sh` | 缩略图、显示矩阵、流式页面回归 |
 | `fix-chain.sh` / `user-feedback.sh` | 历史修复链与用户反馈项回归 |

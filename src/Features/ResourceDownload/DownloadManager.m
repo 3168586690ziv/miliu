@@ -2781,6 +2781,9 @@ static const NSTimeInterval kRDQueueStarvationGrace = 20.0;
 // 恢复任务会从磁盘分片重建进度，不依赖这些内存计数。
 - (void)cleanupAccountingForJob:(NSString *)identifier {
     if (!identifier.length) return;
+    // 合流标记统一在各终态路径的收口里回收：旧实现只在 watchdog tick 清理，
+    // 任务完成（watchdog 已注销）后标识会永久留在集合里（2026-10-24 审计）。
+    [self.muxingJobs removeObject:identifier];
     NSArray<id> *accountingCollections = @[
         self.segmentBytes, self.segmentAttemptBytes, self.partURLsAt,
         self.segmentRateSamples, self.lastProgressAt, self.transferSamples,
@@ -3238,6 +3241,14 @@ static BOOL RDTempDirLockPinsPath(int fd, NSString *lockPath) {
         DownloadJob *job = self.jobs[identifier];
         if (job.state == DownloadJobStateCompleted || job.state == DownloadJobStateFailed ||
             job.state == DownloadJobStateCancelled || job.state == DownloadJobStateInterrupted) [remove addObject:identifier];
+    }
+    // 记录被清除时同步释放文件名占位：reservedNames 从不移除的旧实现会让
+    // 「清除记录 → 重新下载同名资源」在本会话内永远拿到 -1 后缀文件名。
+    // 磁盘查询兜底仍在（reserveUniqueNameForPreferred 同时查目标文件夹），
+    // 真实存在的旧文件不会被覆盖（2026-10-24 审计）。
+    for (NSString *identifier in remove) {
+        DownloadJob *job = self.jobs[identifier];
+        if (job.fileName.length) [self.reservedNames removeObject:job.fileName];
     }
     [self.jobs removeObjectsForKeys:remove];
     [self.store clearAllDownloadRecords];

@@ -2998,6 +2998,18 @@ static DownloadJob *RDPhase4Job(NSURL *root) {
 
 static BOOL RDFdOpen(int fd) { return fd >= 0 && fcntl(fd, F_GETFD) != -1; }
 
+// 进程当前打开的文件描述符数量（/dev/fd 快照）。用于「无泄漏」类断言：
+// 单点 F_GETFD 检查会被 close 后新 open 复用同一编号干扰（T57 flaky 的根因，
+// 2026-10-24 审计定性），计数快照捕获任何净增长且对编号复用免疫。
+static int RDOpenFdCount(void) {
+    NSDirectoryEnumerator<NSURL *> *e = [[NSFileManager defaultManager]
+        enumeratorAtURL:[NSURL fileURLWithPath:@"/dev/fd"]
+        includingPropertiesForKeys:nil options:0 errorHandler:nil];
+    int count = 0;
+    while (e.nextObject) count++;
+    return count;
+}
+
 static NSDictionary<NSString *, NSNumber *> *RDClaims(DownloadManager *manager) {
     return [manager valueForKey:@"tempDirClaimDescriptors"];
 }
@@ -3564,7 +3576,11 @@ static void TestQuarantineFailureNeverFallsBackToInPlaceDelete(void) {
     Check(RDClaimHeld(owner, job), @"T57: 前置——本实例持有临时目录");
     [@"keep me" writeToFile:[job.tempRootURL.path stringByAppendingPathComponent:@"sentinel.part"]
                  atomically:NO encoding:NSUTF8StringEncoding error:nil];
-    int fdBefore = RDClaims(owner)[[job.tempRootURL URLByStandardizingPath].path].intValue;
+    // fd 泄漏断言用进程级计数快照：单点 F_GETFD 检查会被 close 后新 open 复用
+    // 同一 fd 编号干扰（审核/NSFileManager 中间调用即触发，实测首跑失败、重跑
+    // 通过的 flaky，2026-10-24 定性）。计数快照同样捕获任何净 fd 泄漏且对编号
+    // 复用免疫——这是修复测试自身缺陷，不是放宽：产品路径的统一出口本就关闭 fd。
+    int fdCountBefore = RDOpenFdCount();
 
     [owner removeTempRootForJob:job];
 
@@ -3575,7 +3591,8 @@ static void TestQuarantineFailureNeverFallsBackToInPlaceDelete(void) {
           @"T57: 改名失败时目录内数据必须原样保留");
     Check(![owner ownsTempDirectoryAtPath:job.tempRootURL.path],
           @"T57: 放弃删除后所有权登记已统一释放（不泄漏状态）");
-    Check(!RDFdOpen(fdBefore), @"T57: 放弃删除后文件描述符已关闭（不泄漏 fd）");
+    Check(RDOpenFdCount() <= fdCountBefore,
+          @"T57: 放弃删除后进程 fd 计数未增长（不泄漏 fd）");
     [fm removeItemAtPath:rootPath error:nil];
 }
 

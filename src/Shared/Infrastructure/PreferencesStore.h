@@ -44,6 +44,7 @@ extern NSString *const SevenZZKeyMoodHistoryDeletedSnapshot;
 extern NSString *const SevenZZKeyMoodHistoryDeletedSnapshotDate;
 extern NSString *const SevenZZKeySchemaVersion;
 extern NSString *const SevenZZKeyDisplayMetadataHistory;   // 展示元数据历史（按来源页存标题/封面，防 token 刷新后退化；第 38 轮接线）
+extern NSString *const SevenZZKeyRefererMode;              // Referer 强度：0=仅 origin（默认），1=完整来源页 URL，2=不发
 
 typedef NS_ENUM(NSInteger, SevenZZPreferenceType) {
     SevenZZPreferenceTypeInteger = 0,

@@ -39,7 +39,7 @@ rg -q '@"下载列表"' "$APP" || { echo "FAIL: 缺少下载列表标题"; exit 
 for sym in RDDownloadFilterAll RDDownloadFilterActive RDDownloadFilterSucceeded RDDownloadFilterFailed; do
   rg -q "$sym" "$APP" || { echo "FAIL: 缺少筛选状态 $sym"; exit 1; }
 done
-for label in "全部" "下载中" "已成功" "已失败"; do
+for label in "全部" "下载中" "已成功" "未完成"; do   # 第44轮「已失败→未完成」改名同步（此前断言靠清除框文案巧合通过，意图已失效）
   rg -qF "$label" "$APP" || { echo "FAIL: 缺少筛选按钮文案 $label"; exit 1; }
 done
 

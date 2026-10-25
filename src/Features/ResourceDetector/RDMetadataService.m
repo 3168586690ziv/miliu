@@ -629,7 +629,14 @@ static BOOL RDSnapshotEquals(RDMetadataSnapshot *a, RDMetadataSnapshot *b) {
     // 每个字段独立落缓存：另一个字段失败/超时/取消都不影响已成功字段复用。
     for (NSString *name in RDFieldNames()) {
         RDMetadataField *f = RDFieldNamed(w.snapshot,name);
-        if (f.state != RDMetadataLoading) [self storeField:f forKey:w.key field:name];
+        if (f.state == RDMetadataLoading) continue;
+        // previewOnly（列表首屏预热）没有媒体腿：finish 时把残留 Loading 染成
+        // Unknown 的 duration/size/dimensions 是「从未探测」，不是结构性结论。
+        // 绝不落缓存——否则 TTL 窗口内用户点详情会从缓存恢复出假「未知」，且
+        // anyLoading=NO 早退后不再发起媒体腿（2026-10-24 审计 BUG-05）。
+        // preview 字段是 previewOnly 腿的真实产出，照常落缓存。
+        if (w.previewOnly && ![name isEqualToString:@"preview"]) continue;
+        [self storeField:f forKey:w.key field:name];
     }
     if (w.snapshot.variants.count) [self storeVariants:w.snapshot.variants forKey:w.key];
     if (!changed) return;   // 状态未变化的重复发布不再打扰订阅者（分阶段发布只在字段真正变化时投递）

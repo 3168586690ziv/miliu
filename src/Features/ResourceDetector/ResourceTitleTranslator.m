@@ -3,6 +3,7 @@
 
 @interface ResourceTitleTranslator ()
 @property (nonatomic, strong) NSURLSession *session;
+@property (nonatomic, copy) NSURLSessionConfiguration *sessionConfiguration;
 @end
 
 @implementation ResourceTitleTranslator
@@ -20,9 +21,20 @@
         sessionConfiguration.HTTPCookieStorage=nil;
         sessionConfiguration.HTTPMaximumConnectionsPerHost=4;
         sessionConfiguration.timeoutIntervalForRequest=6.0;
-        _session=[NSURLSession sessionWithConfiguration:sessionConfiguration];
+        _sessionConfiguration=sessionConfiguration;
+        _session=[NSURLSession sessionWithConfiguration:_sessionConfiguration];
     }
     return self;
+}
+
+// invalidate 后的 session 永久不可用：dataTaskWithRequest: 返回 nil，completion
+// 链会整体断掉（调用方 resolvedTitleFor: 永不回调）。取消后惰性重建，
+// 让同一实例上的后续翻译照常工作（2026-10-24 审计）。
+- (NSURLSession *)session {
+    if (!_session) {
+        _session = [NSURLSession sessionWithConfiguration:_sessionConfiguration ?: NSURLSessionConfiguration.ephemeralSessionConfiguration];
+    }
+    return _session;
 }
 
 static BOOL ZZContainsHan(NSString *text) {

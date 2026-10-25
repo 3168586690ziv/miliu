@@ -155,8 +155,10 @@ static NSError *RDCdpError(NSInteger code, NSString *message) {
         NSTask *task = [NSTask new];
         task.launchPath = source.executablePath;
         task.arguments = args;
-        task.standardOutput = [NSPipe pipe];
-        task.standardError = [NSPipe pipe];
+        // 输出直接进 /dev/null：NSPipe 无人排空时 64KB 缓冲写满会反向阻塞浏览器，
+        // 间接导致「调试端点未就绪」超时（2026-10-24 审计）。
+        task.standardOutput = NSFileHandle.fileHandleWithNullDevice;
+        task.standardError = NSFileHandle.fileHandleWithNullDevice;
         @try {
             [task launch];
         } @catch (NSException *e) {
@@ -217,25 +219,45 @@ static NSError *RDCdpError(NSInteger code, NSString *message) {
                     dispatch_semaphore_signal(done);
                     return;
                 }
-                [ws receiveMessageWithCompletionHandler:^(NSURLSessionWebSocketMessage *msg, NSError *err2) {
-                    if (err2 || msg.type != NSURLSessionWebSocketMessageTypeString) {
-                        wsError = RDCdpError(5, @"CDP 响应接收失败");
-                        dispatch_semaphore_signal(done);
-                        return;
-                    }
-                    NSDictionary *resp = [NSJSONSerialization JSONObjectWithData:
-                        [msg.string dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data] options:0 error:nil];
-                    NSDictionary *result = [resp isKindOfClass:[NSDictionary class]] ? resp[@"result"] : nil;
-                    NSArray *list = [result isKindOfClass:[NSDictionary class]] ? result[@"cookies"] : nil;
-                    if ([list isKindOfClass:[NSArray class]]) {
-                        for (NSDictionary *e in list) {
-                            if ([e isKindOfClass:[NSDictionary class]]) [cookies addObject:e];
+                // CDP 目标响应（id=1）可能被浏览器先推的事件占队：逐包收、只认
+                // 目标 id，事件/心跳跳过继续收（有限预算防事件风暴）。单次
+                // receive 的旧实现会把事件误判为「CDP 响应格式异常」。
+                // 本函数运行在后台队列（sendAndReceive 的 dispatch_after 上下文），
+                // 每包带独立超时地同步收；外层 25s 兜底与 [ws cancel] 仍负责总上限。
+                __block BOOL gotResponse = NO;
+                for (int attempt = 0; attempt < 8 && !gotResponse && !wsError; attempt++) {
+                    dispatch_semaphore_t packet = dispatch_semaphore_create(0);
+                    __block NSDictionary *payload = nil;
+                    __block NSError *recvErr = nil;
+                    [ws receiveMessageWithCompletionHandler:^(NSURLSessionWebSocketMessage *msg, NSError *err2) {
+                        recvErr = err2;
+                        if (!err2 && msg.type == NSURLSessionWebSocketMessageTypeString) {
+                            payload = [NSJSONSerialization JSONObjectWithData:
+                                [msg.string dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data] options:0 error:nil];
                         }
-                    } else {
-                        wsError = RDCdpError(6, @"CDP 响应格式异常");
+                        dispatch_semaphore_signal(packet);
+                    }];
+                    dispatch_semaphore_wait(packet, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20 * NSEC_PER_SEC)));
+                    if (recvErr) { wsError = RDCdpError(5, @"CDP 响应接收失败"); break; }
+                    if (!payload) { wsError = RDCdpError(7, @"CDP 导出超时"); break; }
+                    id responseID = [payload isKindOfClass:[NSDictionary class]] ? payload[@"id"] : nil;
+                    if ([responseID respondsToSelector:@selector(integerValue)] &&
+                        [responseID integerValue] == 1) {
+                        gotResponse = YES;
+                        NSDictionary *result = [payload isKindOfClass:[NSDictionary class]] ? payload[@"result"] : nil;
+                        NSArray *list = [result isKindOfClass:[NSDictionary class]] ? result[@"cookies"] : nil;
+                        if ([list isKindOfClass:[NSArray class]]) {
+                            for (NSDictionary *e in list) {
+                                if ([e isKindOfClass:[NSDictionary class]]) [cookies addObject:e];
+                            }
+                        } else {
+                            wsError = RDCdpError(6, @"CDP 响应格式异常");
+                        }
+                        break;
                     }
-                    dispatch_semaphore_signal(done);
-                }];
+                    // 非 id=1（浏览器事件/心跳）：跳过，继续收下一包
+                }
+                dispatch_semaphore_signal(done);
             }];
         };
         // 先等 socket 建立（短轮询 receive 一次空转握手），再发命令。

@@ -52,6 +52,9 @@ fi
 # 构建期版本：统计 src/ 物理行数 + 读取 PROJECT_VERSION.json 的修复轮数（不递增），
 # 生成 build/generated/RDGeneratedVersion.h 供 App 编译期读取，并打印三行构建日志。
 GEN="$ROOT/build/generated"; mkdir -p "$GEN"
+# 本地构建产物不是给系统搜索的第二个「密流」：整个 build/ 排除 Spotlight 索引。
+# 每次构建自愈，避免 build/Miliu.app 与 /Applications/Miliu.app 同时出现在搜索结果里。
+touch "$ROOT/build/.metadata_never_index"
 bash "$ROOT/scripts/generate-version.sh" > "$GEN/version.log"
 cat "$GEN/version.log"
 CODE_LINES="$(sed -n 's/^CODE_LINES=//p' "$GEN/version.log" | head -1)"
@@ -106,5 +109,10 @@ if [ "$RELEASE_FIX" = 1 ]; then
   python3 "$PYV" write "$FIX_ROUND" "$DISPLAY_VERSION" "$RELEASE_DIGEST"
   echo "$RELEASE_NOTE"
   echo "RELEASE-FIX: lastReleaseVersion=$DISPLAY_VERSION 已写入 PROJECT_VERSION.json"
+fi
+# build/ 里的副本只用于测试，不注册为第二个可启动 App（正式版只认 /Applications/Miliu.app）。
+LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [ "$OUT" = "$ROOT/build/Miliu.app" ] && [ -x "$LSREG" ]; then
+  "$LSREG" -u "$OUT" >/dev/null 2>&1 || true
 fi
 echo "Built $OUT"

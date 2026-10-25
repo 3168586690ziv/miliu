@@ -12,7 +12,11 @@
 static const NSUInteger kRDCoverRecoveryDefaultMaxFetchAttempts = 3;
 static const NSUInteger kRDCoverRecoveryHardMaxFetchAttempts = 3;
 static const NSTimeInterval kRDCoverRecoveryDefaultBackoff = 0.4;
-static const NSTimeInterval kRDCoverRecoveryDefaultWatchdog = 15.0;
+// 看门狗必须覆盖完整重试链的最坏预算：maxAttempts(3) × 单次海报超时(10s，
+// RDMetadataRecoveryCoordinator.fetchPosterAtURL) + 退避 ≈ 31s。旧值 15s 会把
+// 「慢网络下合法重试」整链判死并按 Failed 终态缓存（同一资源本会话永久无封面，
+// 2026-10-24 审计）。取 40s：既覆盖完整链，又仍是有界防挂起。
+static const NSTimeInterval kRDCoverRecoveryDefaultWatchdog = 40.0;
 
 // stateQueue 的队列级 specific key：init 时通过 dispatch_queue_set_specific 注册，
 // syncOnStateQueue 用 dispatch_get_specific 检测“当前线程正在执行 stateQueue 的块”，

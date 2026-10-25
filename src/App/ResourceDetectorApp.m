@@ -24,6 +24,7 @@
 #import "RDPreviewController.h"    // 预览播放编排（第 35 轮：探测命中不下载、直接预览）
 #import "RDPreviewWindow.h"        // 预览窗口关闭通知（第 35 轮）
 #import "RDGeneratedVersion.h"  // 构建期生成（scripts/generate-version.sh → build/generated/）
+#import "HTTPPrivacyPolicy.h"   // Referer 强度档位注入（App 层读偏好 → 策略层收注入值）
 
 // AppKit 的 NSProgressIndicator 即使把 frame 压到 1px，仍可能按控件尺寸
 // 强制绘制成约 2px。这个轻量视图直接绘制 1px 的轨道与填充，保证视觉粗细
@@ -228,6 +229,7 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 @property NSSwitch *settingsImagesSwitch;
 @property NSSegmentedControl *settingsPaneRatioControl;
 @property NSSegmentedControl *settingsProbeModeControl;
+@property NSSegmentedControl *settingsRefererModeControl;
 @property NSButton *clearDownloadRecordsButton;
 @property NSButton *clearSiteSessionButton;   // 设置页「清除网站会话」（第 13 轮新增）
 @property NSButton *openInAppBrowserButton;   // 设置页「应用内浏览器」：与探测共用登录态的网页窗口（第 21 轮新增）
@@ -247,6 +249,15 @@ typedef NS_ENUM(NSInteger, RDDownloadFilter) {
 // 「下载位置」行的说明文字兼作当前生效路径的常驻显示：进入设置页与选完目录后就地刷新，
 // 用户不点「选择」也能知道文件会落到哪里（2026-10-02 用户需求）。
 @property (nonatomic, weak) NSTextField *settingsDownloadLocationHint;
+// 行内右侧常驻值：当前实际选择的下载位置（下载文件夹 / 桌面 / 自定义（名称））。
+@property (nonatomic, weak) NSTextField *settingsDownloadLocationValue;
+// 关窗驻留：红叉只隐藏主窗口，进程与在途下载继续；托盘图标负责恢复窗口与显式退出。
+// 有在途任务时连 ⌘Q 也先收起到托盘，避免误触把下载打断（显式点托盘「退出密流」才真退出）。
+@property NSStatusItem *mainStatusItem;
+@property NSMenu *mainStatusMenu;
+@property (nonatomic, assign) BOOL forceQuitRequested;
+// ⌘Q 被在途任务拦下时只提示一次（同一会话不重复打扰）。
+@property (nonatomic, assign) BOOL terminateDeferredNoticeShown;
 // 「下载性能」行分段控件（省电/标准）：PerformancePolicy 读同一 defaults 键，
 // 切换时经 DownloadManager.applyPerformanceModeChange 即时重设调度窗口（第 18 轮）。
 @property NSSegmentedControl *settingsPerformanceControl;
@@ -588,6 +599,14 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     self.mode = (persistedMode == 1) ? ZZResourceDiscoveryModeSite : ZZResourceDiscoveryModeCurrentPage;
     NSInteger persistedPages = [PreferencesStore.shared integerForKey:SevenZZKeySitePages defaultValue:3];
     self.sitePages = (NSUInteger)MAX(1, persistedPages);
+    // Referer 强度档位（0=仅 origin 默认 / 1=完整来源页 URL / 2=不发）：
+    // 偏好读在 App 层，策略层只收注入值 —— HTTPPrivacyPolicy 不 import
+    // PreferencesStore（否则 redirect-policy / adaptive-transport /
+    // download-integrity 三个套件会 Undefined symbols 链接失败）。
+    // 非法值回退 0，与 PreferencesStore 的 migrationRule 同一口径。
+    NSInteger persistedRefererMode = [PreferencesStore.shared integerForKey:SevenZZKeyRefererMode defaultValue:0];
+    if (persistedRefererMode < 0 || persistedRefererMode > 2) persistedRefererMode = 0;
+    [HTTPPrivacyPolicy setRefererModeOverride:@(persistedRefererMode)];
     // 内容过滤开关（可叠加，持久化在独立 App 自己的 defaults 中）
     NSUserDefaults *def = [NSUserDefaults standardUserDefaults];
     self.filterVideoOnly = [def boolForKey:@"ZZFilterVideoOnly"];
@@ -809,6 +828,7 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     [self.window makeFirstResponder:self.urlField];
 
     [self installSpaceHotkeyTap]; // ⌘空格 暂停/继续（前台接管，需辅助功能授权）
+    [self installStatusItem];     // 关窗驻留：托盘图标常驻，窗口隐藏后可恢复/显式退出
 }
 
 #pragma mark - 右侧详情面板
@@ -2372,6 +2392,16 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     [self updatePagesFieldVisibility];
 }
 
+- (void)changeRefererMode:(NSSegmentedControl *)sender {
+    // Referer 强度切换：写偏好 + 立即注入策略层。
+    // 与探测模式不同，这里**允许在探测/下载进行中切换**——档位只影响
+    // 之后发出的请求，不改变已入队任务的身份；立即生效，无需重启。
+    NSInteger mode = sender.selectedSegment;
+    if (mode < 0 || mode > 2) mode = 0;
+    [PreferencesStore.shared setInteger:mode forKey:SevenZZKeyRefererMode];
+    [HTTPPrivacyPolicy setRefererModeOverride:@(mode)];
+}
+
 // 设置页布局：标题 + 返回（固定页头）+ 滚动表单区 + 右下角版本号。
 // 最小内容区 760×438 不再需要「装下全部控件」——装不下就滚动，
 // 因此行高恒为 48pt、间距恒为固定刻度，不再随窗口缩放（RD-11 改为分别断言
@@ -2531,6 +2561,24 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     probeModeControl.selectedSegment = (self.mode == ZZResourceDiscoveryModeSite) ? 1 : 0;
     self.settingsProbeModeControl = probeModeControl;
     addRow(@"探测模式", @"探测当前网页或整个站点的资源", @[probeModeControl]);
+    addSeparator();
+    // Referer 强度三档（热链保护站点救回）：0=仅 origin（默认，最保护隐私）；
+    // 1=完整来源页 URL（带 path/query，救回校验完整 Referer 的 CDN）；2=不发。
+    // 跨域在 0/1 档一律不发（绝不把来源路径泄露给别的域）。
+    NSSegmentedControl *refererModeControl =
+        [NSSegmentedControl segmentedControlWithLabels:@[@"仅域名", @"完整地址", @"不发送"]
+                                          trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                target:self
+                                                action:@selector(changeRefererMode:)];
+    refererModeControl.identifier = @"RDRefererModeControl";
+    refererModeControl.frame = NSMakeRect(0, 0, 186, 26);
+    refererModeControl.segmentStyle = NSSegmentStyleRounded;
+    refererModeControl.font = [NSFont systemFontOfSize:11.5];
+    NSInteger refererIdx = [PreferencesStore.shared integerForKey:SevenZZKeyRefererMode defaultValue:0];
+    if (refererIdx < 0 || refererIdx > 2) refererIdx = 0;
+    refererModeControl.selectedSegment = refererIdx;
+    self.settingsRefererModeControl = refererModeControl;
+    addRow(@"Referer 强度", @"热链保护的站点下不了时切「完整地址」；跨域始终不发", @[refererModeControl]);
 
     // 卡片 1：布局 —— 左右栏比例三档平铺（点哪档切哪档）。
     // identifier 故意沿用 "RDPaneRatioPopup"：它是 build/ui-probe/accept2.sh 的黑盒定位锚点，
@@ -2557,8 +2605,18 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     choose.controlSize = NSControlSizeSmall;
     choose.font = [NSFont systemFontOfSize:11.5];
     [choose sizeToFit];
-    // 说明行常驻显示实际生效路径（含自定义失效回退的如实标注），选完目录后就地更新
-    addRow(@"下载位置", [self currentDownloadLocationHintText], @[choose]);
+    // 行内常驻值直接回答「当前选的是哪个位置」，下方说明再给完整路径；
+    // 两者都在进入设置页与选完目录后刷新（失效的 U 盘/被删目录会如实回退）。
+    NSTextField *locationValue = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 150, 17)];
+    locationValue.bezeled = NO; locationValue.drawsBackground = NO;
+    locationValue.editable = NO; locationValue.selectable = YES;
+    locationValue.alignment = NSTextAlignmentRight;
+    locationValue.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    locationValue.font = [NSFont systemFontOfSize:12 weight:NSFontWeightMedium];
+    locationValue.textColor = [NSColor labelColor];
+    locationValue.stringValue = self.downloadSettings.downloadDirectoryDisplayName ?: @"";
+    self.settingsDownloadLocationValue = locationValue;
+    addRow(@"下载位置", [self currentDownloadLocationHintText], @[locationValue, choose]);
     if ([rowHints.lastObject isKindOfClass:[NSTextField class]]) {
         self.settingsDownloadLocationHint = rowHints.lastObject;
         // 路径可能很长（U 盘等自定义目录）：中间截断，头尾都保留
@@ -2873,9 +2931,11 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 }
 
 - (void)refreshDownloadLocationHint {
+    if (self.settingsDownloadLocationValue)
+        self.settingsDownloadLocationValue.stringValue = self.downloadSettings.downloadDirectoryDisplayName ?: @"";
     if (!self.settingsDownloadLocationHint) return;
     self.settingsDownloadLocationHint.stringValue = [self currentDownloadLocationHintText];
-    self.settingsDownloadLocationHint.textColor = [[NSColor labelColor] colorWithAlphaComponent:0.60];
+    self.settingsDownloadLocationHint.textColor = [[NSColor labelColor] colorWithAlphaComponent:0.72];
 }
 
 #pragma mark - 内容过滤视图
@@ -3044,6 +3104,11 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
             [NSCharacterSet whitespaceAndNewlineCharacterSet]]) {
         if (piece.length == 0) continue;
         NSURL *url = [NSURL URLWithString:piece];
+        // 用户直接粘贴「www.example.com/...」（无 scheme）很常见：看起来像域名
+        // 就补 https:// 再验证；不像域名的输入仍会被下面的 http(s) 检查拒绝。
+        if (url && !url.scheme.length && [piece containsString:@"."] && ![piece containsString:@" "]) {
+            url = [NSURL URLWithString:[@"https://" stringByAppendingString:piece]];
+        }
         NSString *scheme = url.scheme.lowercaseString;
         if (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"]) continue;
         if (url.host.length == 0) continue;
@@ -3095,6 +3160,10 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     self.batchActive = NO;
     self.scanning = NO;
     self.settingsProbeModeControl.enabled = YES;
+    // 批量模式全程走 applyMediaList:final:NO（落盘只发生在 final:YES），收尾必须
+    // 补一次 persist：否则批量探测记录的标题/封面历史跨会话全部丢失，重启后
+    // 同源页资源退化（2026-10-24 审计 BUG-07）。
+    [self.metadataRecovery persist];
     NSUInteger count = self.visibleMedia.count;
     NSMutableString *text = [NSMutableString stringWithFormat:@"批量探测完成 · %ld 个网址发现 %lu 个资源",
                              (long)self.batchTotal, (unsigned long)count];
@@ -3384,10 +3453,93 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
     if (self.presentationPreparing) [self.table reloadData];
 }
 
-- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender { return YES; }
+// 关窗不退出：红叉只隐藏主窗口，下载继续。真正退出走托盘菜单或 ⌘Q（无在途任务时）。
+- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender { return NO; }
 
-// 关窗即退出（见上）。退出前必须把在途任务记为中断并持久化，否则下一次
-// 启动下载列表为空、未完成任务无处可寻（2026-09-08 任务丢失事故）。
+// 未做系统级后台下载（下载后端是默认会话 + curl/ffmpeg 子进程，随进程存活），
+// 因此保证「关窗不中断」的唯一可靠方式是进程常驻：窗口隐藏、任务照跑。
+- (BOOL)windowShouldClose:(NSWindow *)sender {
+    if (sender != self.window) return YES;
+    [self.window orderOut:nil];
+    return NO;
+}
+
+- (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)flag {
+    [self showMainWindow];
+    return YES;
+}
+
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    if (self.forceQuitRequested) return NSTerminateNow;
+    if ([DownloadManager activeJobsForJobs:[self.downloadManager allJobs]].count > 0) {
+        [self.window orderOut:nil];
+        // ⌘Q 被在途任务拦下时绝不能静默：窗口消失极易被理解为「已退出」。
+        // 首次给出可见说明（显式退出仍走托盘菜单），同一会话不再重复打扰。
+        if (!self.terminateDeferredNoticeShown) {
+            self.terminateDeferredNoticeShown = YES;
+            NSUInteger activeCount = [DownloadManager activeJobsForJobs:[self.downloadManager allJobs]].count;
+            NSAlert *alert = [[NSAlert alloc] init];
+            alert.messageText = [NSString stringWithFormat:@"还有 %lu 个下载未完成，已收起到菜单栏",
+                                 (unsigned long)activeCount];
+            alert.informativeText = @"下载会在后台继续，点菜单栏的下载图标可恢复窗口；"
+                                     "要立即退出请使用菜单栏图标菜单里的「退出密流」。";
+            [alert addButtonWithTitle:@"好的"];
+            [alert runModal];
+        }
+        return NSTerminateCancel;
+    }
+    return NSTerminateNow;
+}
+
+- (void)showMainWindow {
+    [NSApp activateIgnoringOtherApps:YES];
+    [self.window makeKeyAndOrderFront:nil];
+}
+
+- (void)installStatusItem {
+    // 测试静默启动（-RDTestSilentWindow）不建托盘，避免影响无 GUI 套件的进程状态。
+    if ([NSUserDefaults.standardUserDefaults boolForKey:@"RDTestSilentWindow"]) return;
+    if (self.mainStatusItem) return;
+    NSImage *icon = [NSImage imageWithSystemSymbolName:@"arrow.down.circle"
+                              accessibilityDescription:@"密流"];
+    icon.template = YES;
+    NSStatusItem *item = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
+    item.button.image = icon;
+    item.button.toolTip = @"密流：关闭窗口后仍在此继续下载";
+    item.button.target = self;
+    item.button.action = @selector(statusItemClicked:);
+    [item.button sendActionOn:(NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp)];
+    self.mainStatusItem = item;
+
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"密流"];
+    NSMenuItem *show = [menu addItemWithTitle:@"显示主窗口" action:@selector(showMainWindowFromStatusItem:) keyEquivalent:@""];
+    show.target = self;
+    [menu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *quit = [menu addItemWithTitle:@"退出密流" action:@selector(quitFromStatusItem:) keyEquivalent:@""];
+    quit.target = self;
+    self.mainStatusMenu = menu;
+}
+
+- (void)statusItemClicked:(id)sender {
+    NSEvent *event = NSApp.currentEvent;
+    BOOL secondary = event.type == NSEventTypeRightMouseUp ||
+                     (event.modifierFlags & NSEventModifierFlagControl) != 0;
+    if (secondary) [NSMenu popUpContextMenu:self.mainStatusMenu withEvent:event forView:self.mainStatusItem.button];
+    else [self showMainWindow];
+}
+
+- (void)showMainWindowFromStatusItem:(id)sender {
+    [self showMainWindow];
+}
+
+- (void)quitFromStatusItem:(id)sender {
+    self.forceQuitRequested = YES;
+    [NSApp terminate:nil];
+}
+
+// 显式退出（托盘「退出密流」，或无在途任务时的 ⌘Q）会走到这里：退出前必须把
+// 在途任务记为中断并持久化，否则下一次启动下载列表为空、未完成任务无处可寻
+//（2026-09-08 任务丢失事故）。关窗本身不退出——红叉只隐藏窗口（见上）。
 - (void)applicationWillTerminate:(NSNotification *)notification {
     RDLogWrite(@"app", @"applicationWillTerminate");
     [self cleanupManualVerification];   // 退出即清理待恢复状态，绝不恢复探测
@@ -3494,7 +3646,7 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
     self.downloadsFilterBar.autoresizingMask = NSViewMinYMargin;
     [page addSubview:self.downloadsFilterBar];
 
-    NSArray<NSString *> *filterTitles = @[@"全部", @"下载中", @"已成功", @"已失败"];
+    NSArray<NSString *> *filterTitles = @[@"全部", @"下载中", @"已成功", @"未完成"];
     NSMutableArray<NSButton *> *filterButtons = [NSMutableArray array];
     CGFloat fx = 0;
     for (NSUInteger i = 0; i < filterTitles.count; i++) {
@@ -3742,17 +3894,19 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
 
 - (void)updateDownloadsStatusLabel {
     NSArray<DownloadJob *> *all = self.downloadManager.allJobs ?: @[];
-    NSUInteger active = 0, completed = 0, failed = 0;
+    NSUInteger active = 0, completed = 0, unfinished = 0;
     for (DownloadJob *job in all) {
         if ([self downloadFilter:RDDownloadFilterActive includesState:job.state]) active++;
         else if (job.state == DownloadJobStateCompleted) completed++;
-        else if ([self downloadFilter:RDDownloadFilterFailed includesState:job.state]) failed++;
+        // 失败 / 已取消 / 已中断都是「未完成」：把用户主动取消算进「已失败」
+        // 会和行内「已取消」文案直接矛盾。
+        else if ([self downloadFilter:RDDownloadFilterFailed includesState:job.state]) unfinished++;
     }
-    NSString *filterName = @[@"全部", @"下载中", @"已成功", @"已失败"][self.downloadFilter];
+    NSString *filterName = @[@"全部", @"下载中", @"已成功", @"未完成"][self.downloadFilter];
     if (all.count == 0) {
         self.downloadsStatusLabel.stringValue = [NSString stringWithFormat:@"%@ · 共 0 个任务", filterName];
     } else {
-        self.downloadsStatusLabel.stringValue = [NSString stringWithFormat:@"%@ · 共 %lu 个任务（下载中 %lu / 已完成 %lu / 已失败 %lu）", filterName, (unsigned long)all.count, (unsigned long)active, (unsigned long)completed, (unsigned long)failed];
+        self.downloadsStatusLabel.stringValue = [NSString stringWithFormat:@"%@ · 共 %lu 个任务（下载中 %lu / 已完成 %lu / 未完成 %lu）", filterName, (unsigned long)all.count, (unsigned long)active, (unsigned long)completed, (unsigned long)unfinished];
     }
 }
 

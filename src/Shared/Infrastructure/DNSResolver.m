@@ -160,7 +160,14 @@ static NSOperationQueue *DNSResolverWorkQueue(void) {
             // A resolver completion can land after the wait times out.  In that
             // case report the resolver's real answer, not a transient timeout.
             // status 可为 NULL（便捷封装 resolveIPsForHost: 传 NULL），写前必须判空。
-            if (lookup.completed) { if (status) *status = lookup.status; }
+            if (lookup.completed) {
+                if (status) *status = lookup.status;
+                // 完成恰好落在超时之后的竞态窗口：真实解析结果已经就位（成功路径
+                // 已填 lookup.ips），必须如实返回而不是丢弃——否则下游按空 IP
+                // fail-closed，把「已成功的解析」误报成超时/繁忙（2026-10-24 审计：
+                // 修复注释承诺与实现矛盾；返回真实 IP 后仍走全 IP 安全校验，不降级）。
+                if (lookup.status == DNSResolutionSucceeded) return lookup.ips ?: @[];
+            }
             else if (status) *status = lookup.startedSystem ? DNSResolutionTimedOut : DNSResolutionBusy;
         }
         return @[];

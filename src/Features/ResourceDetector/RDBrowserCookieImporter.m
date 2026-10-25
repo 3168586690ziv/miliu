@@ -233,20 +233,31 @@ static NSArray *RDBrowserCandidates(void) {
                    (unsigned long)(cookies.count + failed), (unsigned long)cookies.count, (unsigned long)failed,
                    (unsigned long)prefixV10, (unsigned long)prefixOther, (unsigned long)emptyValue);
 
-        // 灌入共享会话存储：串行等待每个 setCookie 完成，全部结束后回主线程。
-        WKHTTPCookieStore *store = [RDManualVerificationController sharedSessionDataStore].httpCookieStore;
-        dispatch_group_t group = dispatch_group_create();
-        for (NSHTTPCookie *cookie in cookies) {
-            dispatch_group_enter(group);
-            [store setCookie:cookie completionHandler:^{
-                dispatch_group_leave(group);
-            }];
-        }
-        dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+        // 灌入共享会话存储：串行等待每个 setCookie 完成。WebKit2 要求首次触碰与
+        // API 调用在主线程（后台线程冷初始化会在 runInitializationCode 直接
+        // SIGTRAP，实测；与 RDCdpCookieImporter 的同源注释一致），因此整段灌入
+        // 收口到主线程；group 等待带超时兜底，绝不永久挂起导入线程。
         NSUInteger imported = cookies.count;
-        dispatch_async(dispatch_get_main_queue(), ^{
+        void (^installAndWait)(void) = ^{
+            WKHTTPCookieStore *store = [RDManualVerificationController sharedSessionDataStore].httpCookieStore;
+            dispatch_group_t group = dispatch_group_create();
+            for (NSHTTPCookie *cookie in cookies) {
+                dispatch_group_enter(group);
+                [store setCookie:cookie completionHandler:^{
+                    dispatch_group_leave(group);
+                }];
+            }
+            dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)));
+        };
+        if ([NSThread isMainThread]) {
+            installAndWait();
             if (completion) completion(imported, failed, nil);
-        });
+        } else {
+            dispatch_sync(dispatch_get_main_queue(), installAndWait);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(imported, failed, nil);
+            });
+        }
     });
 }
 
@@ -304,7 +315,11 @@ static NSArray *RDBrowserCandidates(void) {
         return nil;
     }
     NSData *data = CFBridgingRelease(found);
-    return [data subdataWithRange:NSMakeRange(0, MIN(16, data.length))];
+    // Chromium 的 macOS「Safe Storage」口令是随机生成的（普遍超过 16 字节），
+    // v10 派生规约要求**完整口令**进入 PBKDF2。此前截断到 16 字节会让派生密钥
+    // 与浏览器真实密钥必然不同，对真实浏览器的导入整体失败（2026-10-24 审计）。
+    if (data.length == 0) return nil;
+    return data;
 }
 
 + (nullable NSString *)stringColumn:(sqlite3_stmt *)stmt index:(int)index {

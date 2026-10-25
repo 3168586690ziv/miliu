@@ -89,6 +89,15 @@
             if(!ctx.dynamicDone && ctx.staticMedia.count >= 60 && !ctx.staticConverged){
                 ctx.staticConverged=YES;
                 ctx.dynamicDone=YES;          // 让 finishIfBothLegsDone 直接收敛
+                // 已启动的动态腿立即停：cancelAll 明确不触发 completion，槽位必须自己还，
+                // 否则全局动态并发（2）会被一条已无意义的 WebKit 腿占满 45s。
+                if(ctx.hasDynamicSlot){
+                    ctx.hasDynamicSlot=NO;
+                    if(self.activeDynamic>0)self.activeDynamic--;
+                }
+                [ctx.dynamic cancelAll];
+                [ctx.dynamic detachWebView];
+                [self pump];
                 RDLogWrite(@"probe", @"静态腿丰收 media=%lu（≥60），提前收敛不再等动态腿", (unsigned long)ctx.staticMedia.count);
             }
             [self finishIfBothLegsDone:ctx];
@@ -106,7 +115,7 @@
             [self.dynamicQueue addObject:^{
                 RDHybridPageProbe *owner = weakSelf;
                 if(!owner){ return; }
-                if(ctx.cancelled){owner.activeDynamic--;[owner pump];return;}
+                if(ctx.cancelled || ctx.dynamicDone){owner.activeDynamic--;[owner pump];return;}
                 ctx.hasDynamicSlot=YES;
                 // 动态腿硬超时 20s → 45s（2026-09-18）：20s 对「首屏只是 JS 壳、内容全靠
                 // 脚本渲染」的站点不够用。实测 www.360kan.com 的 HTML 仅 1749 字节、

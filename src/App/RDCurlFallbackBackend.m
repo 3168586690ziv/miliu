@@ -73,13 +73,17 @@ static const NSTimeInterval kRDCurlFallbackSegmentDeadline = 3600.0;
     RDCurlFallbackTask *task = [RDCurlFallbackTask new];
     __block RDCurlHopper *hopper = nil;
     __block NSTimer *poller = nil;
+    __block BOOL cancelled = NO;
     void (^stopPoller)(void) = ^{ [poller invalidate]; poller = nil; };
     task.onCancel = ^{
+        cancelled = YES;
         [hopper cancel];
         stopPoller();
     };
 
     void (^nativeBlock)(NSURL *, NSHTTPURLResponse *, NSError *) = ^(NSURL *written, NSHTTPURLResponse *resp, NSError *err) {
+        // 取消先于原生完成：绝不进入回退（否则 curl 子进程在已取消的下载上白跑）。
+        if (cancelled) { completion(written, resp, err); return; }
         if (![self shouldFallbackForNativeResult:written response:resp error:err]) {
             completion(written, resp, err);
             return;
@@ -106,6 +110,9 @@ static const NSTimeInterval kRDCurlFallbackSegmentDeadline = 3600.0;
 
         if (progress) {
             dispatch_async(dispatch_get_main_queue(), ^{
+                // 取消可能发生在本创建块尚未执行时（同一 runloop tick 内先取消）：
+                // 此时 stopPoller 曾扑空，绝不能再建 repeats:YES 的计时器。
+                if (cancelled) return;
                 __block unsigned long long last = 0;
                 NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
                     unsigned long long size = [[NSFileManager defaultManager] attributesOfItemAtPath:bodyPath error:nil].fileSize;
@@ -177,6 +184,10 @@ static void deliveredOnMain(NSURL *url, NSHTTPURLResponse *response, NSError *er
 
 // 原生结果是否值得换栈重试（见头文件契约）。
 - (BOOL)shouldFallbackForNativeResult:(NSURL * _Nullable)written response:(NSHTTPURLResponse * _Nullable)resp error:(NSError * _Nullable)err {
+    // 用户取消不是连接故障：换栈重试会让已取消的下载在后台继续跑（且新 hopper
+    // 不再受 onCancel 约束）。必须显式排除，否则「取消」只取消了原生这一路。
+    // 校验 domain：-999 码值理论上可由其他 domain 携带，误判方向是「少回退」。
+    if ([err.domain isEqual:NSURLErrorDomain] && err.code == NSURLErrorCancelled) return NO;
     if (resp && resp.statusCode == 403) return YES;                          // CF 拦截页（可能已作为响应体写盘）
     if (err && !resp && [err.domain isEqual:NSURLErrorDomain]) return YES;   // 连接层失败/被晾
     return NO;

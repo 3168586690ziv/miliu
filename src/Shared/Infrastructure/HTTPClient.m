@@ -314,7 +314,19 @@
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
     HTTPTask *t = [self taskForDataTask:task];
-    if (!t || t.isCancelled) return;
+    if (!t || t.isCancelled) {
+        // 被取消任务的完成回调也要解除登记：否则 taskMap（连同响应缓冲）与
+        // activeTasks 成员永不清理，批量探测每次取消泄漏一个任务
+        //（finishTask 对取消任务提前返回，不会走到清理段，2026-10-24 审计）。
+        // 不投递 completion：取消语义保持「调用方已放弃，不再打扰」。
+        if (t.isCancelled) {
+            @synchronized(self.activeTasks) { [self.activeTasks removeObject:t]; }
+            @synchronized(self.taskMap) {
+                if (t.dataTask) [self.taskMap removeObjectForKey:@(t.dataTask.taskIdentifier)];
+            }
+        }
+        return;
+    }
 
     HTTPResult *r = [[HTTPResult alloc] init];
     r.fetchedAt = [NSDate date];

@@ -191,15 +191,17 @@ if rg -q 'RDProgressRingView|self\.ring|setRingProgress|rd-ring' "$ROOT/App/Reso
   echo "FAIL: circular progress control remains" >&2
   exit 1
 fi
-# 旧"模式切换"分段控件已移除；当前设置页有三个分段控件：
+# 旧"模式切换"分段控件已移除；当前设置页有四个分段控件：
 # 1. 左右栏比例三档（identifier = RDPaneRatioPopup）
 # 2. 探测模式「当前页/总站」（identifier = RDProbeModeControl）
 # 3. 下载性能「省电/标准」（identifier = RDPerformanceModeControl，2026-10-02 第16轮新增）
-# 三者都是已知的合理控件；除此以外出现任何分段控件即失败。
+# 4. Referer 强度「仅域名/完整地址/不发送」（identifier = RDRefererModeControl，热链保护站点救回）
+# 四者都是已知的合理控件；除此以外出现任何分段控件即失败。
 OTHER_SEG="$(rg -n 'NSSegmentedControl' "$ROOT/App/ResourceDetectorApp.m" \
   | grep -v 'settingsPaneRatioControl' | grep -v 'changePaneRatio' | grep -v 'ratioControl' \
   | grep -v 'settingsProbeModeControl' | grep -v 'changeProbeMode' | grep -v 'probeModeControl' \
   | grep -v 'settingsPerformanceControl' | grep -v 'changePerformanceMode' | grep -v 'perfControl' \
+  | grep -v 'settingsRefererModeControl' | grep -v 'changeRefererMode' | grep -v 'refererModeControl' \
   | grep -v 'NSSegmentedControl segmentedControlWithLabels' || true)"
 if [ -n "$OTHER_SEG" ]; then
   echo "FAIL: unexpected segmented control remains (not a whitelisted settings control):" >&2
@@ -210,6 +212,11 @@ rg -q 'identifier = @"RDPaneRatioPopup"' "$ROOT/App/ResourceDetectorApp.m"
 rg -q 'NSSegmentedControl \*settingsPaneRatioControl' "$ROOT/App/ResourceDetectorApp.m"
 rg -q 'identifier = @"RDProbeModeControl"' "$ROOT/App/ResourceDetectorApp.m"
 rg -q 'NSSegmentedControl \*settingsProbeModeControl' "$ROOT/App/ResourceDetectorApp.m"
+rg -q 'identifier = @"RDRefererModeControl"' "$ROOT/App/ResourceDetectorApp.m"
+rg -q 'NSSegmentedControl \*settingsRefererModeControl' "$ROOT/App/ResourceDetectorApp.m"
+# Referer 档位必须真的接线到策略层（只画控件不注入 = 假功能）
+rg -q 'setRefererModeOverride' "$ROOT/App/ResourceDetectorApp.m"
+rg -q 'SevenZZKeyRefererMode' "$ROOT/App/ResourceDetectorApp.m"
 # 下载进度条（NSProgressIndicator）为当前合理用途，确认已接入
 rg -q 'RDThinProgressView' "$ROOT/App/ResourceDetectorApp.m"
 rg -q 'metricsStringForJob:' "$ROOT/App/ResourceDetectorApp.m"
@@ -390,5 +397,36 @@ for _suite in $_rd_app_importing; do
     }
   done
 done
+
+# ── 关窗驻留（第 44 轮）：红叉只隐藏窗口，下载继续；托盘可恢复或显式退出 ──
+grep -q 'applicationShouldTerminateAfterLastWindowClosed:(NSApplication \*)sender { return NO; }' "$ROOT/App/ResourceDetectorApp.m" \
+  || { echo "FAIL: 关最后一个窗口不得退出 App（会中断在途下载），应驻留托盘" >&2; exit 1; }
+grep -q -- '- (BOOL)windowShouldClose:(NSWindow \*)sender' "$ROOT/App/ResourceDetectorApp.m" \
+  || { echo "FAIL: 主窗口未实现 windowShouldClose：关红叉无法只隐藏窗口" >&2; exit 1; }
+grep -q '\[self.window orderOut:nil\];' "$ROOT/App/ResourceDetectorApp.m" \
+  || { echo "FAIL: windowShouldClose 未隐藏主窗口" >&2; exit 1; }
+grep -q '\[\[NSStatusBar systemStatusBar\] statusItemWithLength:' "$ROOT/App/ResourceDetectorApp.m" \
+  || { echo "FAIL: 未创建托盘图标，窗口隐藏后无法恢复" >&2; exit 1; }
+grep -q 'addItemWithTitle:@"退出密流" action:@selector(quitFromStatusItem:)' "$ROOT/App/ResourceDetectorApp.m" \
+  || { echo "FAIL: 托盘缺少显式退出入口" >&2; exit 1; }
+grep -q 'forceQuitRequested' "$ROOT/App/ResourceDetectorApp.m" \
+  || { echo "FAIL: 托盘退出未绕过「有任务则驻留」的拦截" >&2; exit 1; }
+grep -q '\[DownloadManager activeJobsForJobs:\[self.downloadManager allJobs\]\].count > 0' "$ROOT/App/ResourceDetectorApp.m" \
+  || { echo "FAIL: 退出前未检查在途任务（会把下载打断）" >&2; exit 1; }
+
+# ── 下载位置显示（第 44 轮）：行内必须显示「当前选的是哪个位置」，且失效自定义目录真正回退 ──
+grep -q 'self.settingsDownloadLocationValue = locationValue;' "$ROOT/App/ResourceDetectorApp.m" \
+  || { echo "FAIL: 下载位置行未接入常驻值控件（用户看不到当前选择）" >&2; exit 1; }
+grep -q 'stringValue = self.downloadSettings.downloadDirectoryDisplayName' "$ROOT/App/ResourceDetectorApp.m" \
+  || { echo "FAIL: 下载位置常驻值未取 downloadDirectoryDisplayName" >&2; exit 1; }
+grep -q 'return \[self validCustomDirectoryURL\] ?: self.downloadsURL;' "$ROOT/Features/ResourceDownload/ResourceDownloadSettings.m" \
+  || { echo "FAIL: 自定义下载目录失效时未真正回退下载文件夹" >&2; exit 1; }
+grep -q 'fileExistsAtPath:custom.path isDirectory:&isDir' "$ROOT/Features/ResourceDownload/ResourceDownloadSettings.m" \
+  || { echo "FAIL: 自定义下载目录未校验存在性" >&2; exit 1; }
+# build/ 是本地测试产物，不得成为系统搜索里的第二个「密流」App
+grep -q 'touch "$ROOT/build/.metadata_never_index"' "$REPO/scripts/build.sh" \
+  || { echo "FAIL: build.sh 未排除 build/ 的 Spotlight 索引（会出现两个 Miliu）" >&2; exit 1; }
+[ -f "$BUILD/.metadata_never_index" ] \
+  || { echo "FAIL: build/.metadata_never_index 缺失（构建产物会被 Spotlight 索引）" >&2; exit 1; }
 
 echo "PASS: build, universal binary, macOS 13 target, bundle signing, app icon packaged and decodable, machine independence, no radar, view-based rows, slash-line UI with thin progress, download progress, site-mode, TLS trust tolerance, download-row uniform tint, and download wiring checks"

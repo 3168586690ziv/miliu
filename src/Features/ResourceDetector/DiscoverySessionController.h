@@ -23,6 +23,25 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+#pragma mark - 站点模式分页形态
+
+/// 列表页的分页标记风格。真实站点的分页形态远不止 `?page=N`：还有 `/page/2`、`/page2`、
+/// `_p2`、`-2`、`?p=2`、`?pg=2`、`?paged=2`、`/index_2.html`。用户**不需要**手动选择：
+/// `+detectPaginationStyleForURL:` 从种子 URL 自身推断，推断不出就退回默认的
+/// `RDPaginationStyleQueryPage`（即历史行为，零回归）。
+typedef NS_ENUM(NSInteger, RDPaginationStyle) {
+    RDPaginationStyleQueryPage = 0,   ///< ?page=N 或 &page=N（默认，历史行为）
+    RDPaginationStyleQueryP,          ///< ?p=N
+    RDPaginationStyleQueryPg,         ///< ?pg=N
+    RDPaginationStyleQueryPaged,      ///< ?paged=N
+    RDPaginationStylePathSlash,       ///< /page/N（末尾斜杠形态 /page/N/ 同此）
+    RDPaginationStylePathConcat,      ///< /pageN
+    RDPaginationStyleSuffixP,         ///< /name_pN
+    RDPaginationStyleSuffixDash,      ///< /name-N
+    RDPaginationStyleSuffixUnderscore,///< /name_N
+    RDPaginationStyleIndexHtml,       ///< /index_N.html
+};
+
 @interface DiscoverySessionController : NSObject
 
 /// 中文进度状态（主线程；nil 表示无更新）。
@@ -93,12 +112,28 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark - 站点模式翻页（纯 URL 工具）
 
 /// 解析 URL 的 page 页码；无 page 参数或值非法（非正整数）返回 1。
+/// 既有行为与既有签名均保持不变（第 388 行调用点依赖它）。
 + (NSInteger)sitePageNumberFromURL:(NSURL *)url;
+
+/// 同上，但按 `style` 的标记形态解析（`?p=` / `/page/N` / `_pN` / `index_N.html` …）。
+/// 新增重载：既有单参方法的行为一行未改，这里只是换一种标记去读同一个页码。
++ (NSInteger)sitePageNumberFromURL:(NSURL *)url style:(RDPaginationStyle)style;
+
+/// 从种子 URL 自身推断分页形态（**纯函数：不触网、不读 HTML**）。
+/// 已有可识别的分页标记 → 返回对应风格；否则返回 `RDPaginationStyleQueryPage`。
++ (RDPaginationStyle)detectPaginationStyleForURL:(NSURL *)url;
 
 /// 构造种子 URL 指定页码的地址：设置/替换 page 查询参数并保留其余查询参数
 /// （如 genre 等筛选条件）；page<=1 时移除 page 参数（还原为首页形态）。
 /// 翻页探测本身就是一次普通 Site 任务（种子带 page 参数），协调器无需改动。
+/// 内部按 `detectPaginationStyleForURL:` 分派；无分页标记的 URL 输出与历史实现逐字相同。
 + (nullable NSURL *)sitePageURLForSeed:(NSURL *)seedURL page:(NSInteger)page;
+
+/// 同上，但显式指定风格（测试与将来扩展用）。
+/// 返回 nil 的情形：URL 为 nil / 非 http(s) / 缺 host / 带 userinfo；page < 1 或 > `siteMaxPages`。
++ (nullable NSURL *)sitePageURLForSeed:(NSURL *)seedURL
+                                  page:(NSInteger)page
+                                 style:(RDPaginationStyle)style;
 
 /// 站点模式翻页上限（防无限爬取）。
 @property (class, readonly) NSInteger siteMaxPages;

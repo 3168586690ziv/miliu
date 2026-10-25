@@ -163,6 +163,13 @@ static NSError *RDCurlHopMakeError(RDCurlHopError code) {
                                  @"--max-time", [NSString stringWithFormat:@"%.2f", remaining]]];
     if (budget > 0 && ![method isEqual:@"HEAD"]) {
         [argv addObjectsFromArray:@[@"--max-filesize", [NSString stringWithFormat:@"%lu", (unsigned long)budget]]];
+        // --max-filesize 依赖 Content-Length，对 chunked/未知长度响应不生效。
+        // 内存路径（bodyToFile:NO，元数据探测）改用 Range 上限作为服务器端硬顶：
+        // 服务器最多送出 budget 字节（206 仍是 2xx，响应体即清单/文档前缀，
+        // 对探测语义无害）。调用方已自带 Range 时不覆盖。
+        if (!bodyToFile && ![method isEqual:@"HEAD"] && ![headers objectForKey:@"Range"] && ![headers objectForKey:@"range"]) {
+            [argv addObjectsFromArray:@[@"-r", [NSString stringWithFormat:@"0-%lu", (unsigned long)(budget - 1)]]];
+        }
     }
     if ([method isEqual:@"HEAD"]) [argv addObject:@"-I"];
     // curl 不读 macOS 系统代理设置：代理网络环境下这条回退路径必须显式传 --proxy，
@@ -175,12 +182,38 @@ static NSError *RDCurlHopMakeError(RDCurlHopError code) {
     }
     [argv addObject:url.absoluteString];
 
+    // 传输中磁盘防线：--max-filesize 对未知长度不生效、Range 头可被服务器忽略，
+    // chunked 恶意响应仍可能写满 /tmp。定时监控落盘大小，超预算立即终止 curl
+    //（cancel 会 terminate 子进程，launchCurl 返回非零 → unresolved，本 hopper
+    // 后续跳也被 cancelled 拦截）。
+    dispatch_source_t budgetWatcher = nil;
+    if (budget > 0 && !bodyToFile && ![method isEqual:@"HEAD"] && !self.runner) {
+        __weak typeof(self) wself = self;
+        NSString *watchPath = bodyFile;
+        NSUInteger watchBudget = budget;
+        budgetWatcher = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+        dispatch_source_set_timer(budgetWatcher,
+                                  dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                                  (int64_t)(0.25 * NSEC_PER_SEC), 0);
+        dispatch_source_set_event_handler(budgetWatcher, ^{
+            NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:watchPath error:nil];
+            unsigned long long size = [(NSNumber *)attrs[NSFileSize] unsignedLongLongValue];
+            if (size > watchBudget) {
+                RDLogWriteLevel(RDLogLevelWarn, self.logComponent ?: @"meta",
+                                @"curl 响应体超过预算，终止传输 host=%@ 已落盘=%llu 上限=%lu",
+                                url.host ?: @"-", size, (unsigned long)watchBudget);
+                [wself cancel];
+            }
+        });
+        dispatch_resume(budgetWatcher);
+    }
     NSInteger exitCode;
     if (self.runner) {
         exitCode = self.runner(argv, headerFile, bodyFile);
     } else {
         exitCode = [self launchCurlWithArgv:argv];
     }
+    if (budgetWatcher) dispatch_source_cancel(budgetWatcher);
     if (exitCode != 0) {
         RDLogWriteLevel(RDLogLevelWarn, self.logComponent,
                         @"curl 跳未成功 exit=%ld host=%@ hop=%lu", (long)exitCode, url.host ?: @"-", (unsigned long)hop);
@@ -238,6 +271,18 @@ static NSError *RDCurlHopMakeError(RDCurlHopError code) {
         return;
     }
 
+    // 内存防线：先核对落盘大小再读入内存，超预算绝不把整个文件拉进进程。
+    NSDictionary *bodyAttrs = [[NSFileManager defaultManager] attributesOfItemAtPath:bodyFile error:nil];
+    unsigned long long bodySize = [(NSNumber *)bodyAttrs[NSFileSize] unsignedLongLongValue];
+    if (budget > 0 && bodySize > budget) {
+        [self cleanupFiles:@[ headerFile, bodyFile ]];
+        result.error = RDCurlHopMakeError(RDCurlHopBudgetExceeded);
+        RDLogWriteLevel(RDLogLevelWarn, self.logComponent,
+                        @"curl 响应体超预算（读入内存前拦截）host=%@ %llu > %lu", url.host ?: @"-",
+                        bodySize, (unsigned long)budget);
+        completion(result);
+        return;
+    }
     NSData *body = [NSData dataWithContentsOfFile:bodyFile];
     [self cleanupFiles:@[ headerFile, bodyFile ]];
     if (!body) body = [NSData data];

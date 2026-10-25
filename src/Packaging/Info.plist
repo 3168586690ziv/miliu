@@ -19,9 +19,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>v27700.43</string>
+	<string>v28633.45</string>
 	<key>CFBundleVersion</key>
-	<string>v27700.43</string>
+	<string>v28633.45</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>LSMinimumSystemVersion</key>
@@ -31,6 +31,10 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Miliu 需要访问「桌面」以把下载的视频保存到您选择的位置。</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Miliu 需要访问「下载」文件夹以保存下载的视频与读取浏览器 Cookie 库。</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>

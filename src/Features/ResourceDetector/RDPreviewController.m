@@ -152,12 +152,21 @@ static void RDPreviewLoopbackStop(void) {
 }
 
 static BOOL RDPreviewLoopbackStart(NSString *body) {
-    _loopbackBody = body;
-    if (_loopbackListenFD >= 0) return YES;   // 已在服务，只换响应体
+    if (_loopbackListenFD >= 0) {
+        // 已在服务，只换响应体。写操作投递到 accept 循环所在的串行队列，
+        // 与循环内的读操作串行化，消除跨线程裸读写（2026-10-24 审计）。
+        dispatch_queue_t q = _loopbackQueue;
+        if (q) dispatch_async(q, ^{ _loopbackBody = body; });
+        else _loopbackBody = body;
+        return YES;
+    }
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return NO;
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    // 客户端在 send 前断开（AVPlayer 快速切换预览的常态）时，macOS 默认处置
+    // SIGPIPE 会终止整个进程；本服务器是自管裸 socket，必须自行屏蔽。
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -174,13 +183,27 @@ static BOOL RDPreviewLoopbackStart(NSString *body) {
     _loopbackQueue = dispatch_queue_create("com.sevenzz.miliu.preview-loopback", DISPATCH_QUEUE_SERIAL);
     dispatch_queue_t q = _loopbackQueue;
 
-    // accept 循环：listen fd 被 stopPreview 关闭后 accept 返回 -1，线程随之退出。
+    // accept 循环：listen fd 被 stopPreview 关闭（shutdown 使 accept 以 EINVAL
+    // 失败）后线程随之退出。
     dispatch_async(q, ^{
         for (;;) {
             struct sockaddr_in peer;
             socklen_t plen = sizeof(peer);
             int conn = accept(_loopbackListenFD, (struct sockaddr *)&peer, &plen);
-            if (conn < 0) break;
+            if (conn < 0) {
+                // 瞬时失败继续服务：BSD 对「进队后被客户端中止」的连接真实返回
+                // ECONNABORTED（AVPlayer 快速断开即可触发），EINTR 是信号打断。
+                // 其余错误从统一出口收尾，绝不停在「fd 仍开但无人 accept」的
+                // 假服务状态（否则后续每次 Start 都直接返回 YES 而预览永挂）。
+                if (errno == ECONNABORTED || errno == EINTR) continue;
+                dispatch_async(dispatch_get_main_queue(), ^{ RDPreviewLoopbackStop(); });
+                break;
+            }
+            int nosig = 1;
+            setsockopt(conn, SOL_SOCKET, SO_NOSIGPIPE, &nosig, sizeof(nosig));
+            // 无超时的 recv 会让单个不发请求的本地连接卡死整个串行循环。
+            struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
+            setsockopt(conn, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
             char buf[4096];
             size_t got = 0;
             while (got < sizeof(buf) - 1) {
@@ -214,7 +237,9 @@ static BOOL RDPreviewLoopbackStart(NSString *body) {
                 [resp appendData:[@"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n"
                                    "Connection: close\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding]];
             }
-            send(conn, resp.bytes, resp.length, 0);
+            // 客户端已断开时的 send 失败是常态：忽略结果、关闭连接即可。
+            ssize_t sent = send(conn, resp.bytes, resp.length, 0);
+            (void)sent;
             close(conn);
         }
     });
@@ -269,6 +294,10 @@ static void RDPreviewPlayResolvedDirect(NSURL *url, DetectedMedia *media, NSStri
 static void RDPreviewPlayPinned(NSString *masterURLString, NSString *pinnedURLString,
                                 DetectedMedia *media, NSString *title) {
     if (!_masterSession) {
+        // 信任委托只在 RDPreviewTrustSession() 的 dispatch_once 里创建；钉选路径若
+        // 先于直连路径发生，直接用 nil 委托建会话会让被吊销证书的站点首次预览必败，
+        // 且 static 会话永不重建。这里先确保委托已存在。
+        (void)RDPreviewTrustSession();
         NSURLSessionConfiguration *cfg = NSURLSessionConfiguration.ephemeralSessionConfiguration;
         cfg.HTTPCookieStorage = nil;          // 与探测/下载一致：原生媒体链路无 Cookie
         cfg.HTTPShouldSetCookies = NO;

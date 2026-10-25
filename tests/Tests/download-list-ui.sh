@@ -1,7 +1,7 @@
 #!/bin/bash
 # 下载列表真实界面回归：在真实构建 App 上验证
 #  · 统计文案中的任务数量 == 下载表格可访问行数
-#  · “全部 / 下载中 / 已成功 / 已失败”四个筛选各自显示正确行数
+#  · “全部 / 下载中 / 已成功 / 未完成”四个筛选各自显示正确行数
 #  · 只有筛选结果确实为 0 时才显示空状态
 #  · 行内主文本是文件名，不再出现“视频 / 图片”等类型称号
 #
@@ -67,7 +67,7 @@ tell application "System Events" to tell process "Miliu"
       end try
       set out to out & "ROWNAME=" & v & linefeed
     end repeat
-    repeat with labelName in {"全部", "下载中", "已成功", "已失败"}
+    repeat with labelName in {"全部", "下载中", "已成功", "未完成"}
       click (first button whose name is labelName)
       delay 0.4
       set rowCount to count of rows of table 1 of scroll area 1
@@ -106,7 +106,7 @@ echo "$RESULT" | grep -q "TOTALROWS=$EXPECT_ALL" || fail "全部筛选的表格�
 echo "$RESULT" | grep -q "全部=$EXPECT_ALL"      || fail "“全部”筛选应显示 $EXPECT_ALL 行"
 echo "$RESULT" | grep -q '下载中=0'              || fail "“下载中”筛选应显示 0 行"
 echo "$RESULT" | grep -q '已成功=12'             || fail "“已成功”筛选应显示 12 行"
-echo "$RESULT" | grep -q "已失败=$EXPECT_FAILED" || fail "“已失败”筛选应显示 $EXPECT_FAILED 行（失败 3 + 取消 1 + $REAL_INTERRUPTED 真实）"
+echo "$RESULT" | grep -q "未完成=$EXPECT_FAILED" || fail "“未完成”筛选应显示 $EXPECT_FAILED 行（失败 3 + 取消 1 + $REAL_INTERRUPTED 真实）"
 echo "$RESULT" | grep -q "共 $EXPECT_ALL 个任务"  || fail "统计文案应显示共 $EXPECT_ALL 个任务"
 echo "$RESULT" | grep -q 'EMPTY_WHEN_ZERO=true'  || fail "筛选结果为 0 时应显示空状态"
 echo "$RESULT" | grep -q 'EMPTY_WHEN_FULL=false' || fail "筛选结果非 0 时不得显示空状态"

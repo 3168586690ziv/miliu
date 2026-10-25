@@ -175,6 +175,12 @@ static const NSUInteger kRDCoverMemoryCapacity = 32;
 
 - (void)rememberCover:(NSImage *)image forReuseKey:(NSString *)reuseKey {
     if (!image || !reuseKey.length) return;
+    // 封面会话的完成回调在后台队列；内存缓存的读取点在主线程。
+    // 统一回主线程再改可变集合，避免并发读写 NSMutableDictionary/NSMutableArray。
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self rememberCover:image forReuseKey:reuseKey]; });
+        return;
+    }
     self.coverMemory[reuseKey] = image;
     [self.coverMemoryOrder removeObject:reuseKey];
     [self.coverMemoryOrder addObject:reuseKey];
@@ -227,6 +233,10 @@ static const NSUInteger kRDCoverMemoryCapacity = 32;
         cfg.HTTPShouldSetCookies = NO;
         cfg.URLCache = nil;
         cfg.timeoutIntervalForRequest = 10;
+        // 海报 URL 来自被探测页面（站点可控）。resource 级超时保持默认 7 天的
+        // 旧实现会让「每 9 秒滴 1 字节」的慢滴流长占连接；整体超时与元数据主链
+        // 同口径（2026-10-24 审计）。
+        cfg.timeoutIntervalForResource = 15;
         self.coverDelegate = [RDMetadataCoverSessionDelegate new];
         self.coverSession = [NSURLSession sessionWithConfiguration:cfg
                                                           delegate:self.coverDelegate
@@ -243,6 +253,13 @@ static const NSUInteger kRDCoverMemoryCapacity = 32;
         NSInteger status = [resp isKindOfClass:[NSHTTPURLResponse class]] ? ((NSHTTPURLResponse *)resp).statusCode : 0;
         if (err || !data.length || (status && (status < 200 || status >= 300))) {
             completion(nil, status, err);
+            return;
+        }
+        // 纵深防御：海报单图上限 8MB（与页面读取上限同量级），超限绝不进入图片
+        // 解码器。传输中止式限制需流式 delegate，此处与 15s 资源级超时共同收口。
+        if (data.length > 8LL * 1024 * 1024) {
+            completion(nil, status, [NSError errorWithDomain:@"RDMetadataRecovery" code:3
+                                                   userInfo:@{NSLocalizedDescriptionKey: @"封面响应超过大小上限"}]);
             return;
         }
         // 「已验证」：MIME 可接受 + 能真正解码出图片，二者缺一不可
