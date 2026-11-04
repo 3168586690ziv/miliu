@@ -1,6 +1,7 @@
 #import "RDStreamDownloadTask.h"
 #import "RDStreamPlan.h"
 #import "RDManifestParser.h"
+#import "RDImageWrapperStripper.h"
 #import "PerformancePolicy.h"
 #import "RDLog.h"
 static NSError *StreamError(NSString *text) { return [NSError errorWithDomain:@"RDStream" code:1 userInfo:@{NSLocalizedDescriptionKey:text}]; }
@@ -120,7 +121,29 @@ static NSError *StreamError(NSString *text) { return [NSError errorWithDomain:@"
                 NSFileHandle *reader=[NSFileHandle fileHandleForReadingFromURL:file error:&error];NSFileHandle *writer=[NSFileHandle fileHandleForWritingToURL:append error:&error];
                 @try{[writer seekToEndOfFile];while(!error){NSData *chunk=[reader readDataUpToLength:1024*1024 error:&error];if(!chunk.length)break;[writer writeData:chunk error:&error];}}@catch(NSException *exception){error=StreamError(@"写入媒体分片失败");}
                 [reader closeFile];[writer closeFile];
-            }else [[NSFileManager defaultManager]moveItemAtURL:file toURL:[folder URLByAppendingPathComponent:resource[@"local"]] error:&error];
+            }else{
+                NSURL *destination=[folder URLByAppendingPathComponent:resource[@"local"]];
+                // 防盗链站点会在每条分片前接一张完整的 PNG/JPEG；外壳在加密之外，
+                // 必须在 ffmpeg 解密之前剥掉，否则「分片全齐、合流必炸」。
+                // 密钥（16 字节）与任何小于一屏的文件不参与，避免把真数据当外壳切掉。
+                BOOL isKey=[resource[@"key"] boolValue];
+                NSData *payload=isKey?nil:[NSData dataWithContentsOfURL:file options:NSDataReadingMappedIfSafe error:nil];
+                NSUInteger offset=payload.length>64?RDImageWrapperPayloadOffset(payload):0;
+                if(offset>0){
+                    NSData *stripped=[payload subdataWithRange:NSMakeRange(offset,payload.length-offset)];
+                    // 剥完为空或过短：说明这张「图」后面没有正文，按原样落盘交给长度校验拒绝，
+                    // 绝不写一个空分片进合流。
+                    if(stripped.length>16){
+                        RDLogWrite(@"dl", @"剥除分片图片外壳 %@：%lu → %lu 字节", resource[@"local"], (unsigned long)payload.length, (unsigned long)stripped.length);
+                        if(![stripped writeToURL:destination options:NSDataWritingAtomic error:&error])error=StreamError(@"写入媒体分片失败");
+                        [[NSFileManager defaultManager]removeItemAtURL:file error:nil];
+                    }else{
+                        [[NSFileManager defaultManager]moveItemAtURL:file toURL:destination error:&error];
+                    }
+                }else{
+                    [[NSFileManager defaultManager]moveItemAtURL:file toURL:destination error:&error];
+                }
+            }
             dispatch_async(dispatch_get_main_queue(),^{if(self.finished)return;if(error){[self finish:nil response:nil error:error];return;}[self step:^{[self resources:resources index:index+1 folder:folder appendTo:append completion:done];}];});
         });
     }];

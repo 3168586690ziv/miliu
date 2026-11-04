@@ -22,19 +22,6 @@
     return self;
 }
 
-- (ResourceSelectAllScope)selectAllScope {
-    NSInteger value = [self.store integerForKey:SevenZZKeyResourceSelectAllScope
-                                    defaultValue:ResourceSelectAllScopeAllResults];
-    return value == ResourceSelectAllScopeCurrentPage
-        ? ResourceSelectAllScopeCurrentPage : ResourceSelectAllScopeAllResults;
-}
-
-- (void)setSelectAllScope:(ResourceSelectAllScope)value {
-    ResourceSelectAllScope safeValue = value == ResourceSelectAllScopeCurrentPage
-        ? ResourceSelectAllScopeCurrentPage : ResourceSelectAllScopeAllResults;
-    [self.store setInteger:safeValue forKey:SevenZZKeyResourceSelectAllScope];
-}
-
 - (ResourceDownloadDestination)downloadDestination {
     NSInteger value = [self.store integerForKey:SevenZZKeyResourceDownloadDestination
                                     defaultValue:ResourceDownloadDestinationDownloads];
@@ -61,20 +48,6 @@
 - (void)setCustomDirectoryURL:(NSURL *)url {
     NSString *path = url.isFileURL ? url.path : @"";
     [self.store setString:path forKey:SevenZZKeyResourceDownloadCustomDirectory];
-}
-
-- (NSIndexSet *)selectionIndexesForItemCount:(NSUInteger)itemCount
-                                 currentPage:(NSInteger)currentPage
-                                    pageSize:(NSUInteger)pageSize {
-    if (itemCount == 0) return [NSIndexSet indexSet];
-    if (self.selectAllScope == ResourceSelectAllScopeAllResults)
-        return [NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, itemCount)];
-    if (currentPage < 0 || pageSize == 0) return [NSIndexSet indexSet];
-    NSUInteger page = (NSUInteger)currentPage;
-    if (page > NSUIntegerMax / pageSize) return [NSIndexSet indexSet];
-    NSUInteger start = page * pageSize;
-    if (start >= itemCount) return [NSIndexSet indexSet];
-    return [NSIndexSet indexSetWithIndexesInRange:NSMakeRange(start, MIN(pageSize, itemCount - start))];
 }
 
 - (NSURL *)downloadDirectoryURL {

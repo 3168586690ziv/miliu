@@ -4,39 +4,12 @@
 #import "PreferencesStore.h"
 
 NSString *const SevenZZKeyPerformanceMode                = @"PerformanceMode";
-NSString *const SevenZZKeyAppTheme                       = @"AppTheme";
-NSString *const SevenZZKeyWhiteInterfaceRefreshV1        = @"WhiteInterfaceRefreshV1";
-NSString *const SevenZZKeySourceURLBookmark              = @"SourceURLBookmark";
-NSString *const SevenZZKeyConversionOutputURLBookmark    = @"ConversionOutputURLBookmark";
-NSString *const SevenZZKeyLastMainPage                   = @"LastMainPage";
-NSString *const SevenZZKeyLastWorkspace                   = @"LastWorkspace";
-NSString *const SevenZZKeyDeltaNativePayloadJSON         = @"DeltaNativePayloadJSON";
-NSString *const SevenZZKeyDeltaNativePayloadRefreshedAt   = @"DeltaNativePayloadRefreshedAt";
-NSString *const SevenZZKeyDeltaProfitSnapshot            = @"DeltaProfitSnapshot";
-NSString *const SevenZZKeyDeltaNativePayloadDay          = @"DeltaNativePayloadDay";
-NSString *const SevenZZKeyDeltaFavoriteItems             = @"DeltaFavoriteItems";
-NSString *const SevenZZKeyMarketIndex                    = @"MarketIndex";
-NSString *const SevenZZKeyMarketRange                    = @"MarketRange";
-NSString *const SevenZZKeyMarketIntradayDefaultV1        = @"MarketIntradayDefaultV1";
-NSString *const SevenZZKeyMarketRangeOrderV2             = @"MarketRangeOrderV2";
-NSString *const SevenZZKeyMarketCacheNdx                 = @"market.cache.ndx";
-NSString *const SevenZZKeyMarketCacheNdxUpdated          = @"market.cache.ndx.updated";
-NSString *const SevenZZKeyMarketCacheSpx                 = @"market.cache.spx";
-NSString *const SevenZZKeyMarketCacheSpxUpdated          = @"market.cache.spx.updated";
 NSString *const SevenZZKeyCompletedResourceURLs          = @"CompletedResourceURLs";
-NSString *const SevenZZKeyResourceSelectAllScope         = @"ZZResourceDownload.SelectAllScope";
 NSString *const SevenZZKeyResourceDownloadDestination    = @"ZZResourceDownload.Destination";
 NSString *const SevenZZKeyResourceDownloadCustomDirectory = @"ZZResourceDownload.CustomDirectory";
 NSString *const SevenZZKeyMainPaneRatio              = @"ZZResourceDetector.MainPaneRatio";
 NSString *const SevenZZKeyProbeMode                  = @"ZZResourceDetector.ProbeMode";
 NSString *const SevenZZKeySitePages                  = @"ZZResourceDetector.SitePages";
-NSString *const SevenZZKeyLastMood                       = @"LastMood";
-NSString *const SevenZZKeyLastMoodLabel                  = @"LastMoodLabel";
-NSString *const SevenZZKeyRecentMoodQuoteIDs             = @"RecentMoodQuoteIDs";
-NSString *const SevenZZKeyMoodHistoryRecords             = @"MoodHistoryRecords";
-NSString *const SevenZZKeyMoodHistoryDeletedSnapshot     = @"MoodHistoryDeletedSnapshot";
-NSString *const SevenZZKeyMoodHistoryDeletedSnapshotDate = @"MoodHistoryDeletedSnapshotDate";
-NSString *const SevenZZKeySchemaVersion                  = @"SevenZZSchemaVersion";
 NSString *const SevenZZKeyDisplayMetadataHistory         = @"DisplayMetadataHistory";
 NSString *const SevenZZKeyRefererMode                    = @"ZZResourceDetector.RefererMode";
 
@@ -205,41 +178,39 @@ NSString *const SevenZZKeyRefererMode                    = @"ZZResourceDetector.
 + (NSArray<SevenZZPreferenceKeySpec *> *)allKeySpecs {
     NSMutableArray *specs = [NSMutableArray array];
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyPerformanceMode type:SevenZZPreferenceTypeInteger defaultValue:@(1) owningPage:@"settings" migrationRule:@"保留"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyAppTheme type:SevenZZPreferenceTypeString defaultValue:@"light" owningPage:@"settings" migrationRule:@"保留"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyWhiteInterfaceRefreshV1 type:SevenZZPreferenceTypeBool defaultValue:@(NO) owningPage:@"settings" migrationRule:@"V1一次性迁移标记"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeySourceURLBookmark type:SevenZZPreferenceTypeData defaultValue:nil owningPage:@"media" migrationRule:@"书签stale检查"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyConversionOutputURLBookmark type:SevenZZPreferenceTypeData defaultValue:nil owningPage:@"media" migrationRule:@"书签stale检查"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyLastMainPage type:SevenZZPreferenceTypeString defaultValue:@"media" owningPage:@"all" migrationRule:@"未知值回退media"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyLastWorkspace type:SevenZZPreferenceTypeString defaultValue:@"daily" owningPage:@"all" migrationRule:@"保留"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyDeltaNativePayloadJSON type:SevenZZPreferenceTypeString defaultValue:nil owningPage:@"delta" migrationRule:@"缓存，可降级"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyDeltaNativePayloadRefreshedAt type:SevenZZPreferenceTypeDouble defaultValue:@(0) owningPage:@"delta" migrationRule:@"缓存时间"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyDeltaProfitSnapshot type:SevenZZPreferenceTypeDictionary defaultValue:nil owningPage:@"delta" migrationRule:@"保留"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyDeltaNativePayloadDay type:SevenZZPreferenceTypeString defaultValue:nil owningPage:@"delta" migrationRule:@"保留"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyDeltaFavoriteItems type:SevenZZPreferenceTypeArray defaultValue:@[] owningPage:@"delta" migrationRule:@"保留"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyMarketIndex type:SevenZZPreferenceTypeInteger defaultValue:@(0) owningPage:@"market" migrationRule:@"保留"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyMarketRange type:SevenZZPreferenceTypeInteger defaultValue:@(0) owningPage:@"market" migrationRule:@"保留"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyMarketIntradayDefaultV1 type:SevenZZPreferenceTypeBool defaultValue:@(NO) owningPage:@"market" migrationRule:@"V1一次性迁移标记"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyMarketRangeOrderV2 type:SevenZZPreferenceTypeBool defaultValue:@(NO) owningPage:@"market" migrationRule:@"V2范围排序迁移"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyMarketCacheNdx type:SevenZZPreferenceTypeArray defaultValue:nil owningPage:@"market" migrationRule:@"缓存，可降级"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyMarketCacheNdxUpdated type:SevenZZPreferenceTypeDouble defaultValue:@(0) owningPage:@"market" migrationRule:@"缓存时间"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyMarketCacheSpx type:SevenZZPreferenceTypeArray defaultValue:nil owningPage:@"market" migrationRule:@"缓存，可降级"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyMarketCacheSpxUpdated type:SevenZZPreferenceTypeDouble defaultValue:@(0) owningPage:@"market" migrationRule:@"缓存时间"]];
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyCompletedResourceURLs type:SevenZZPreferenceTypeArray defaultValue:@[] owningPage:@"resource" migrationRule:@"上限300"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyResourceSelectAllScope type:SevenZZPreferenceTypeInteger defaultValue:@(1) owningPage:@"settings" migrationRule:@"非法值回退全部结果"]];
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyResourceDownloadDestination type:SevenZZPreferenceTypeInteger defaultValue:@(0) owningPage:@"settings" migrationRule:@"非法值回退下载文件夹"]];
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyMainPaneRatio type:SevenZZPreferenceTypeInteger defaultValue:@(0) owningPage:@"settings" migrationRule:@"非法值回退 3:7"]];
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyProbeMode type:SevenZZPreferenceTypeInteger defaultValue:@(0) owningPage:@"settings" migrationRule:@"非法值回退当前页"]];
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeySitePages type:SevenZZPreferenceTypeInteger defaultValue:@(3) owningPage:@"settings" migrationRule:@"非法值回退 3"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyLastMood type:SevenZZPreferenceTypeDouble defaultValue:@(0) owningPage:@"mood" migrationRule:@"保留"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyLastMoodLabel type:SevenZZPreferenceTypeString defaultValue:@"" owningPage:@"mood" migrationRule:@"保留"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyRecentMoodQuoteIDs type:SevenZZPreferenceTypeArray defaultValue:@[] owningPage:@"mood" migrationRule:@"保留"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyMoodHistoryRecords type:SevenZZPreferenceTypeArray defaultValue:@[] owningPage:@"mood" migrationRule:@"保留"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyMoodHistoryDeletedSnapshot type:SevenZZPreferenceTypeArray defaultValue:@[] owningPage:@"mood" migrationRule:@"用于恢复"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyMoodHistoryDeletedSnapshotDate type:SevenZZPreferenceTypeString defaultValue:nil owningPage:@"mood" migrationRule:@"保留"]];
-    [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeySchemaVersion type:SevenZZPreferenceTypeInteger defaultValue:@(0) owningPage:@"system" migrationRule:@"当前schema版本"]];
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyDisplayMetadataHistory type:SevenZZPreferenceTypeDictionary defaultValue:nil owningPage:@"media" migrationRule:@"保留；按来源页存标题/封面"]];
     [specs addObject:[SevenZZPreferenceKeySpec specWithKey:SevenZZKeyRefererMode type:SevenZZPreferenceTypeInteger defaultValue:@(0) owningPage:@"settings" migrationRule:@"非法值回退仅 origin"]];
     return specs;
+}
+
+// 键规范自检（2026-10-26 新增，把 allKeySpecs 从「零调用死方法」接成真消费者）：
+// 历史问题——`allKeySpecs` 声明为「用于审计与迁移」却**全项目零调用**，导致规格表
+// 与实际键长期脱节：实测曾有 26 个键（MarketCache* / Delta* / Mood* / AppTheme 等
+// Seven zz 时代遗留）只存在于规格表、零消费者，仍被当作在用偏好维护下去。
+// 本方法让规格表变成可断言的对象：返回两个方向的偏差——
+//   · 「登记但无消费者」：规格表里有、传进来的在用键集合里没有；
+//   · 「在用但未登记」：真实在用、规格表漏登。
+// 测试用生产键集合调用它，任一方向非空即判回归。
++ (NSArray<NSString *> *)specAuditAgainstLiveKeys:(NSSet<NSString *> *)liveKeys {
+    NSMutableArray<NSString *> *issues = [NSMutableArray array];
+    NSMutableSet<NSString *> *declared = [NSMutableSet set];
+    for (SevenZZPreferenceKeySpec *spec in [self allKeySpecs]) {
+        [declared addObject:spec.key];
+        if (![liveKeys containsObject:spec.key]) {
+            [issues addObject:[NSString stringWithFormat:@"登记但无消费者：%@", spec.key]];
+        }
+    }
+    for (NSString *key in liveKeys) {
+        if (![declared containsObject:key]) {
+            [issues addObject:[NSString stringWithFormat:@"在用但未登记：%@", key]];
+        }
+    }
+    return issues;
 }
 
 @end

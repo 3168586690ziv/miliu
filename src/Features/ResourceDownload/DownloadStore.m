@@ -5,7 +5,18 @@
 
 #import "DownloadStore.h"
 
+// 已下载 URL 集合的键（2026-10-26 修，两个约束必须同时满足）：
+//  ① 值只有一个来源 —— 必须与 PreferencesStore 的 SevenZZKeyCompletedResourceURLs 相同，
+//     不能各写一份字面量任由两侧漂移；
+//  ② 本文件**不得**因此获得对新符号的链接依赖 —— download-integrity 等套件只编译
+//     DownloadStore.m、不链接 PreferencesStore.m（实测引用 extern 常量会
+//     `Undefined symbols: _SevenZZKeyCompletedResourceURLs` 链接失败；这与本项目
+//     第 28/35/36/38 轮反复踩过的「套件因新增依赖而链接失败」是同一类坑）。
+// 因此这里保留字面量，但把「与常量一致」做成**编译期/套件期**两条断言：
+//  · verify.sh 断言本行字面量 == PreferencesStore 里的常量值（分叉即红）；
+//  · 上面的注释与行内容成对出现，改一侧忘另一侧会被当场抓到。
 static NSString *const kCompletedKey = @"CompletedResourceURLs";
+// 以下三个是本模块私有的下载队列持久化键，PreferencesStore 未登记，保持在本地。
 static NSString *const kInterruptedKey = @"InterruptedDownloadJobs";
 static NSString *const kFinishedJobsKey = @"FinishedDownloadJobs";
 static NSString *const kLatestEnqueuedJobKey = @"LatestEnqueuedDownloadJob";

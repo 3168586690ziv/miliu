@@ -77,7 +77,8 @@ bash scripts/build.sh
 
 ## 运行验收与测试
 
-`tests/Tests/` 下是可独立运行的验收脚本，全部用 `bash` 执行，例如：
+`tests/Tests/` 下是 **41 个**可独立运行的验收脚本（`run-suites.sh` 是跑器，不计入），全部用 `bash` 执行。
+下表按主题归类，不是全部单列——未在此表的套件名可直接 `ls tests/Tests/*.sh` 查看：
 
 | 脚本 | 覆盖内容 |
 | --- | --- |
@@ -99,6 +100,17 @@ bash scripts/build.sh
 | `fix-chain.sh` / `user-feedback.sh` | 历史修复链与用户反馈项回归 |
 | `audit.sh` / `bug16.sh` | 生产源码审计（ASan 下运行 AuditChecks）与 Bug16 聚焦回归 |
 | `external-scripts.sh` / `performance-smoke.sh` | 外部脚本调用与性能冒烟 |
+| `adaptive-transport.sh` / `curl-proxy.sh` | Cloudflare 指纹拦截的 curl 回退栈、系统代理参数组装 |
+| `tls-trust.sh` / `tls-trust-real-site.sh` | 证书吊销窄容错（纯逻辑 37 项 + 真实被吊销站点端到端） |
+| `proxy-fakeip.sh` | 系统代理 fake-ip（198.18/15）放行与危险网段仍拒 |
+| `aes-encryption.sh` | HLS AES-128 加密流（显式/隐式 IV、密钥轮换、METHOD=NONE 不误报） |
+| `media-discovery.sh` | 抓取面专项（og:video、JSON-LD、全文兜底、同族画质聚合） |
+| `segment-filter.sh` | HLS/DASH 分片收口（一个视频不得被拆成几十个碎片；整段 .ts 直链必须保留） |
+| `preview-playback.sh` | 在线预览（判定/钉选改写纯函数；端到端段需完整版 ffmpeg，缺则降级跳过） |
+| `metadata-recovery.sh` | 标题/封面防退化与恢复接线 |
+| `cookie-import.sh` / `cdp-cookie-import.sh` | 浏览器登录态导入（v10 解密纯函数 / CDP 自动化） |
+| `pagination-zero-regression.sh` | 翻页改造的零回归对照（旧实现原文 vs 新实现逐字比对，基线钉死在第 43 轮提交） |
+| `retry-after.sh` | 429/503 的 Retry-After 退避策略 |
 | `run-suites.sh` | 批量运行上述脚本（`bash tests/Tests/run-suites.sh <suite>...`） |
 
 **这些脚本必须串行执行，不能并行。** 其中 `repair.sh`、`ui-experience.sh`、`version.sh` 以及

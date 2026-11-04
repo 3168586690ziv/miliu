@@ -4,11 +4,6 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-typedef NS_ENUM(NSInteger, ResourceSelectAllScope) {
-    ResourceSelectAllScopeCurrentPage = 0,
-    ResourceSelectAllScopeAllResults = 1,
-};
-
 typedef NS_ENUM(NSInteger, ResourceDownloadDestination) {
     ResourceDownloadDestinationDownloads = 0,
     ResourceDownloadDestinationDesktop = 1,
@@ -22,12 +17,8 @@ typedef NS_ENUM(NSInteger, ResourceDownloadDestination) {
                                desktopURL:(NSURL *)desktopURL NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
 
-@property (nonatomic, assign) ResourceSelectAllScope selectAllScope;
 @property (nonatomic, assign) ResourceDownloadDestination downloadDestination;
 
-- (NSIndexSet *)selectionIndexesForItemCount:(NSUInteger)itemCount
-                                 currentPage:(NSInteger)currentPage
-                                    pageSize:(NSUInteger)pageSize;
 - (NSURL *)downloadDirectoryURL;
 - (NSString *)downloadDirectoryDisplayName;
 

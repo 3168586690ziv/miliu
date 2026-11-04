@@ -22,7 +22,9 @@ static NSNumber *gRDRefererModeOverride;
         if (override == nil) return HTTPRefererModeOrigin;
         // 非法值（越界/非整数形态）一律按默认 Origin 处理，绝不崩。
         NSInteger raw = override.integerValue;
-        if (raw < (NSInteger)HTTPRefererModeOrigin || raw > (NSInteger)HTTPRefererModeNone) {
+        // 上限必须跟着枚举一起前进（第 47 轮加 CrossOrigin 时这里漏改，
+        // 导致第 4 档被当成非法值静默退回 Origin —— 自测当场抓到）。
+        if (raw < (NSInteger)HTTPRefererModeOrigin || raw > (NSInteger)HTTPRefererModeCrossOrigin) {
             return HTTPRefererModeOrigin;
         }
         return (HTTPRefererMode)raw;
@@ -115,7 +117,12 @@ static NSNumber *gRDRefererModeOverride;
     if (reqOrigin.length == 0 || pageOrigin.length == 0) return nil;
     // 跨域：不发 Referer。同域：Origin 档仅 origin（不含 path/query/fragment）；
     // FullPath 档发完整来源页 URL（去 fragment、去 userinfo）。
-    if (![reqOrigin isEqualToString:pageOrigin]) return nil;
+    // 跨域档（第 47 轮）：跨域也发**来源页 origin**（不含 path/query）。
+    // 只发 origin 是最小暴露面：目标域能知道"从哪个站点来"，但拿不到具体页面。
+    if (![reqOrigin isEqualToString:pageOrigin]) {
+        if (mode == HTTPRefererModeCrossOrigin) return pageOrigin;
+        return nil;
+    }
     if (mode == HTTPRefererModeFullPath) return [self fullPageURLStringForURL:pageURL];
     return pageOrigin;
 }

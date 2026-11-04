@@ -4,6 +4,7 @@
 #import "WebProbe.h"
 #import "RDStaticScriptAnalyzer.h"
 #import "RDLog.h"
+#import "HTTPPrivacyPolicy.h"   // 导航请求的 Referer 档位（第 47 轮）
 #import "RDManualVerification.h"   // 共享会话存储（探测 WebView 与验证窗口同一实例）
 #import "RDURLUtilities.h"
 #import "RDQualityTier.h"
@@ -186,6 +187,20 @@ static BOOL RDIsHTTPURL(NSString *value) { NSURL *url=[NSURL URLWithString:value
     if (html == nil || html.length == 0) {
         r.isBadPage = YES;       // 坏页面/无内容
         return r;
+    }
+    // ── packer 混淆解包（第 47 轮）──
+    // 一部分站把播放器地址整段塞进 `eval(function(p,a,c,k,e,d){...})`，
+    // 不解包则所有后续扫描（script 正则、JSON、全文兜底）都看不到 m3u8。
+    // 实测 jav.guru → javclan 的 hls2/hls3 地址就是这样藏的。
+    // 解包是纯字符串变换、不执行脚本；不是 packer 形态时原样返回，零副作用。
+    // 上限 8MB：整页 HTML 上限就是这个量级，解包结果不得超过它两倍。
+    if ([html rangeOfString:@"eval(function(p,a,c,k,e,"].location != NSNotFound) {
+        NSString *unpacked = [RDStaticScriptAnalyzer unpackDeanEdwardsPacker:html
+                                                                    maxBytes:MAX((NSUInteger)8*1024*1024, html.length * 2)];
+        if (unpacked.length > html.length) {
+            RDLogWrite(@"probe", @"packer 解包 %lu → %lu 字节", (unsigned long)html.length, (unsigned long)unpacked.length);
+            html = unpacked;
+        }
     }
     NSURL *sourcePageURL = baseURL;
     NSRegularExpression *baseRE = [NSRegularExpression regularExpressionWithPattern:@"<base\\b[^>]*>" options:NSRegularExpressionCaseInsensitive error:nil];
@@ -456,7 +471,7 @@ static BOOL RDIsHTTPURL(NSString *value) { NSURL *url=[NSURL URLWithString:value
     // 大量新闻与 CMS 站点只在这里声明真实视频地址。
     NSRegularExpression *jsonldRe = [NSRegularExpression
         regularExpressionWithPattern:@"<script\\b[^>]*type\\s*=\\s*[\"']?application/ld\\+json[\"']?[^>]*>(.*?)</script>"
-                             options:NSRegularExpressionCaseInsensitive | NSRegularExpressionDotMatchesLineSeparators
+                             options:NSRegularExpressionCaseInsensitive
                                error:nil];
     for (NSTextCheckingResult *jm in [jsonldRe matchesInString:html options:0 range:NSMakeRange(0, html.length)]) {
         if (jm.numberOfRanges < 2) continue;
@@ -526,7 +541,57 @@ static BOOL RDIsHTTPURL(NSString *value) { NSURL *url=[NSURL URLWithString:value
     // 正确处理（不当视频）；全文正则若无条件开扫会把它们按字面捞成视频。
     // 因此仅在 found 为空（视频与图片结构化路径全部零命中）时启用——
     // 兜底位于全部结构化扫描之后，图片语义先于字面正则成立。
-    if (found.count == 0) {
+    // 触发条件（第 47 轮修）：原为 `found.count == 0`——只要页面里有**任意**图片
+    // （logo / 统计像素 / 缩略图），兜底就永不执行。实测 javclan 播放页：
+    // 结构化路径只找到 logo.svg 与 yandex 统计像素 2 张图，而真正的 m3u8 藏在
+    // 解包后的内联脚本里，于是「有结果」把兜底挡在门外，播放页探不到任何视频。
+    // 现改为「尚无视频类或清单类结果」——图片不算命中，兜底照常扫描。
+    // BUG-005 的原始顾虑仍然成立：兜底位于全部结构化扫描**之后**，图片语义已经
+    // 先行成立，故把 data-srcset 里带 .mp4 的懒加载图片字面捞成视频的风险不变
+    // （那些候选在结构化阶段已按图片正确归类，这里只是补上「真视频一个都没有」时
+    //  的最后一层网）。
+    // 全文扫描的触发条件（第 47 轮二次修正）。
+    // 原条件「尚无视频或清单」有个实测致命的漏洞：javclan 页里有 **三条** 清单
+    // （hls4 相对路径 / hls2 CDN / hls3 镜像），结构化路径只要先抓到其中**任意一条**
+    // （hls4，且它是广告伪装的 797 张 PNG），`hasVideoOrManifest` 就变真，全文扫描被
+    // 跳过 —— 真正的视频（hls2）从此看不见。用户看到的就是「探到一条下不了的东西」。
+    // 改为：**只要页面里出现过 m3u8/mpd 字面量就扫全文**，让同一页的多条清单全部进入
+    // 结果，由后续的画质归一化/去重挑选。反复扫同一页的代价很小（单次 0.03s），
+    // 而漏掉真视频的代价是整站不可用。
+    BOOL htmlMentionsManifest =
+        [html rangeOfString:@".m3u8" options:NSCaseInsensitiveSearch].location != NSNotFound
+        || [html rangeOfString:@".mpd" options:NSCaseInsensitiveSearch].location != NSNotFound
+        || [html rangeOfString:@"mpegurl" options:NSCaseInsensitiveSearch].location != NSNotFound;
+    BOOL hasVideoOrManifest = NO;
+    for (DetectedMedia *m in found) {
+        if (m.resourceKind == RDResourceKindVideo || m.resourceKind == RDResourceKindManifest) {
+            hasVideoOrManifest = YES;
+            break;
+        }
+    }
+    if (!hasVideoOrManifest || htmlMentionsManifest) {
+        // BUG-005 防线（与上面的条件放宽配套，第 47 轮）：
+        // 放宽触发条件后，页面可能只有图片，此时兜底会扫到 srcset / data-srcset
+        // 属性值里带 .mp4 的懒加载**图片**候选（`<img data-srcset=".../c.mp4 2x">`），
+        // 把它们按字面捞成视频——这正是 BUG-005 的原始事故。
+        // 修法：先从 HTML 里收集「出现在 srcset/data-srcset 属性值中」的 URL 集合，
+        // 兜底命中这些 URL 时一律跳过。语义上仍然保留原设计（结构化阶段已按图片
+        // 正确归类），只是在放宽触发条件后补回这层排除。
+        NSMutableSet<NSString *> *imageContextURLs = [NSMutableSet set];
+        NSRegularExpression *srcsetAttrRe = [NSRegularExpression
+            regularExpressionWithPattern:@"(?:^|[^a-zA-Z0-9_-])((?:data-)?srcset)[[:space:]]*=[[:space:]]*([\"'])([^\"']*)\\2"
+                                 options:NSRegularExpressionCaseInsensitive
+                                   error:nil];
+        for (NSTextCheckingResult *sa in [srcsetAttrRe matchesInString:html options:0 range:NSMakeRange(0, html.length)]) {
+            if (sa.numberOfRanges < 4) continue;
+            NSString *value = [html substringWithRange:[sa rangeAtIndex:3]];
+            for (NSString *chunk in [value componentsSeparatedByString:@","]) {
+                NSString *cand = [[chunk stringByTrimmingCharactersInSet:
+                                   NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                                  componentsSeparatedByString:@" "].firstObject;
+                if (cand.length) [imageContextURLs addObject:cand];
+            }
+        }
         NSRegularExpression *plainRe = [NSRegularExpression
             regularExpressionWithPattern:@"https?://[^\\s\"'<>\\\\)]+?\\.(?:m3u8|mpd|mp4|webm|mov|mkv|ts|flv|m4v)(?:\\?[^\\s\"'<>\\\\)]*)?"
                                      options:NSRegularExpressionCaseInsensitive error:nil];
@@ -534,6 +599,15 @@ static BOOL RDIsHTTPURL(NSString *value) { NSURL *url=[NSURL URLWithString:value
         for (NSTextCheckingResult *pm in [plainRe matchesInString:html options:0 range:NSMakeRange(0, html.length)]) {
             if (plainBudget == 0) break;
             NSString *raw = [html substringWithRange:pm.range];
+            // BUG-005：srcset/data-srcset 里的候选是图片语义，不得按字面捞成视频。
+            BOOL fromImageContext = NO;
+            for (NSString *ic in imageContextURLs) {
+                if ([raw isEqualToString:ic] || [ic containsString:raw] || [raw containsString:ic]) {
+                    fromImageContext = YES;
+                    break;
+                }
+            }
+            if (fromImageContext) continue;
             NSString *absolute = [self absoluteURLString:raw baseURL:baseURL];
             if (!absolute.length) continue;
             NSString *format = [self formatFromURL:absolute];
@@ -681,6 +755,11 @@ static BOOL RDIsHTTPURL(NSString *value) { NSURL *url=[NSURL URLWithString:value
     }
     // ── 同族画质变体聚合（2026-10-10 真实网址回归）──
     [RDProbeAnalyzer groupQualityVariantFamilies:ordered];
+    // ── HLS/DASH 分片收口（第 47 轮，双保险）──
+    // 主收口在 RDHybridPageProbe.mergedMediaForContext:（两腿合并后统一裁），
+    // 这里再兜一次：某些站的播放器配置把分片名直接写进 HTML，静态腿会各收一条。
+    // 判据与主收口同一份（RDIsHLSPlaylistFragment），不会产生两套口径。
+    [RDProbeAnalyzer dropPlaylistFragments:ordered];
     // Blob/MediaSource 只能证明播放器已经产生了播放线索，不能伪造一个可下载 URL。
     // 生产桥把它编码成 meta，结果仍然可解释且不会进入下载列表。
     NSRegularExpression *clueRe = [NSRegularExpression regularExpressionWithPattern:@"<meta\\b[^>]*\\bname\\s*=\\s*[\\\"']rd-unresolved-clue[\\\"'][^>]*>"
@@ -780,6 +859,36 @@ static BOOL RDIsHTTPURL(NSString *value) { NSURL *url=[NSURL URLWithString:value
     }
 }
 
+
+// 从一组结果里剔除「某个清单的分片」（第 47 轮）。
+// 判据：本组存在清单（m3u8/mpd）时，与清单同 host 同目录、且文件名呈序号尾缀的
+// .ts/.m4s 视为分片并剔除。清单本身保留（点它下载的是完整流）。
+// 单独的 .ts 直链（无清单在场）不受影响 —— 那是真正的整段媒体。
++ (void)dropPlaylistFragments:(NSMutableArray<DetectedMedia *> *)ordered {
+    if (!ordered.count) return;
+    NSMutableArray<NSURL *> *manifests = [NSMutableArray array];
+    for (DetectedMedia *m in ordered) {
+        NSURL *u = [NSURL URLWithString:m.mediaURL ?: @""];
+        NSString *ext = u.path.pathExtension.lowercaseString ?: @"";
+        if (ext.length && RDIsManifestExtension(ext)) [manifests addObject:u];
+    }
+    if (!manifests.count) return;             // 没有清单：一条都不动
+    NSMutableArray<DetectedMedia *> *kept = [NSMutableArray arrayWithCapacity:ordered.count];
+    NSUInteger dropped = 0;
+    for (DetectedMedia *m in ordered) {
+        if (RDIsHLSPlaylistFragment([NSURL URLWithString:m.mediaURL ?: @""], manifests)) {
+            dropped++;
+            continue;
+        }
+        [kept addObject:m];
+    }
+    if (dropped > 0) {
+        RDLogWrite(@"probe", @"静态腿分片收口 清单=%lu 剔除=%lu 保留=%lu",
+                   (unsigned long)manifests.count, (unsigned long)dropped,
+                   (unsigned long)kept.count);
+        [ordered setArray:kept];
+    }
+}
 @end
 
 #pragma mark - RDBridgeEventSynthesizer
@@ -1195,7 +1304,27 @@ static NSUInteger RDProbeNextTaskID(void) {
     session.webView = [self.factory makeWebViewWithConfiguration:cfg];     // 主线程创建
     session.webView.navigationDelegate = self;                             // 主线程设置
     self.session = session;
-    [session.webView loadRequest:[NSURLRequest requestWithURL:ctx.url]];   // 主线程发起
+    // ── 导航请求的 Referer（第 47 轮）──
+    // 背景（实测）：javclan.com/e/<id> 这类播放页在**顶层导航完全不带 Referer** 时
+    // 只返回 39 字节空壳（DOM 里没有播放器），带任意 https 来源则返回完整页面
+    // （DOM 130KB+，含 master.m3u8）。而 WKWebView 的顶帧导航默认不带 Referer，
+    // 于是密流的动态腿在该站永远只等到空壳，45s 超时——这是「探不到视频」的直接原因。
+    // 行为按现有档位决定，默认档（仅域名）**不改变任何既有行为**：
+    //   · 默认/完整地址/不发送 → 与改前完全一致（不发 Referer）；
+    //   · 含跨域档 → 发目标自身 origin（最小必要信息：只让站点知道"有来源"，
+    //     不泄露任何其它站点或路径）。用户显式选了这一档才生效。
+    NSMutableURLRequest *navReq = [NSMutableURLRequest requestWithURL:ctx.url];
+    if ([HTTPPrivacyPolicy refererMode] == HTTPRefererModeCrossOrigin && ctx.url.host.length) {
+        NSURLComponents *c = [NSURLComponents new];
+        c.scheme = ctx.url.scheme ?: @"https";
+        c.host = ctx.url.host;
+        c.port = ctx.url.port;
+        if (c.URL.absoluteString.length) {
+            [navReq setValue:c.URL.absoluteString forHTTPHeaderField:@"Referer"];
+            RDLogWrite(@"probe", @"导航请求带来源头（含跨域档）referer=%@", c.URL.absoluteString);
+        }
+    }
+    [session.webView loadRequest:navReq];   // 主线程发起
 }
 
 // 作废当前会话并安全清理其 WebKit 对象（仅主线程）。
@@ -1219,6 +1348,34 @@ static NSUInteger RDProbeNextTaskID(void) {
 - (void)cancelActiveLoad {
     dispatch_async(dispatch_get_main_queue(), ^{
         [self invalidateActiveSessionOnMainThread];
+    });
+}
+
+// 超时抢救（第 47 轮）：在作废会话**之前**先取一次已渲染的 DOM。
+// 只读 outerHTML，不注入、不改页面；取不到就回调 nil，调用方按原逻辑报超时。
+- (void)salvageRenderedHTMLWithCompletion:(void (^)(NSString * _Nullable))completion {
+    if (!completion) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        RDWebProbeSession *sess = self.session;
+        if (!sess || sess.cancelled || sess.completionDelivered) {
+            completion(nil);
+            return;
+        }
+        id<RDProbeWebView> wv = sess.webView;
+        if (![wv respondsToSelector:@selector(evaluateJavaScript:completionHandler:)]) {
+            completion(nil);
+            return;
+        }
+        [(WKWebView *)wv evaluateJavaScript:@"document.documentElement.outerHTML"
+                          completionHandler:^(id _Nullable html, NSError * _Nullable err) {
+            if (err || ![html isKindOfClass:[NSString class]] || ![html length]) {
+                completion(nil);
+                return;
+            }
+            NSString *out = [NSString stringWithFormat:@"%@%@", (NSString *)html, sess.dynamicHTML ?: @""];
+            RDLogWrite(@"probe", @"超时抢救 取到 DOM %lu 字节（原等 load 事件）", (unsigned long)out.length);
+            completion(out);
+        }];
     });
 }
 
@@ -1273,12 +1430,35 @@ static NSUInteger RDProbeNextTaskID(void) {
                 htmlError || ![html isKindOfClass:NSString.class]) return;
             NSString *out = [NSString stringWithFormat:@"%@%@", (NSString *)html, mine2.dynamicHTML ?: @""];
             if (out.length == 0 || [out lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > mine2.context.maxHTMLBytes) return;
+            // 轮询期廉价预判（第 47 轮性能修复）：
+            // 本方法会被 didCommitNavigation 的轮询最多调用 41 次。此前每次都对整页
+            // （实测 javclan 页 132KB）跑一遍 analyzeHTML——含 packer 解包与全文正则，
+            // 于是 9 秒就能拿到的页面被拖到 45s 硬超时（实测日志里同一页被解包 5 次仍在
+            // 增长）。现在先用**字符串级**判据挡一道：DOM 里连一个媒体特征都没有就直接
+            // 返回，一次解析都不做；只有出现特征才付一次完整解析的代价。
+            BOOL looksLikeMedia = [out rangeOfString:@".m3u8" options:NSCaseInsensitiveSearch].location != NSNotFound
+                || [out rangeOfString:@".mp4" options:NSCaseInsensitiveSearch].location != NSNotFound
+                || [out rangeOfString:@"<video" options:NSCaseInsensitiveSearch].location != NSNotFound
+                || [out rangeOfString:@"mpegurl" options:NSCaseInsensitiveSearch].location != NSNotFound;
+            if (!looksLikeMedia) return;
             RDProbeResult *preview = [RDProbeAnalyzer analyzeHTML:out baseURL:mine2.context.url];
             BOOL grouped = NO;
+            BOOL hasRealMedia = NO;
             for (DetectedMedia *m in preview.media) {
-                if (m.resourceKind != RDResourceKindImage && m.videoFamilyID.length) { grouped = YES; break; }
+                if (m.resourceKind == RDResourceKindImage) continue;
+                if (m.videoFamilyID.length) grouped = YES;
+                // 第 47 轮加固：必须真的存在可下载的视频/清单 URL。
+                // 实测 javclan：jwplayer 在 interactive 阶段已建出 <video> 元素，
+                // 但 src 还是空的 —— 旧判据只看「有 family 归组」就投递，
+                // 于是把只有 4.5KB 的空壳页面当成结果交出去（真正渲染完是 16KB，
+                // 里面的 m3u8 一个字都没进来），后续 SDK 等到的全是废数据。
+                // 现在要求至少一个 mediaURL 非空且格式可下载，才允许提前投递。
+                NSString *u = m.mediaURL ?: @"";
+                if (u.length > 8 && [RDProbeAnalyzer isDownloadableMediaFormat:m.format ?: @""]) {
+                    hasRealMedia = YES;
+                }
             }
-            if (!grouped) return;   // 播放器结构尚未成形：交给 didFinish 路径
+            if (!grouped || !hasRealMedia) return;   // 播放器结构/媒体地址尚未成形：交给 didFinish
             [mine2 deliverCompletionWithHTML:out error:nil];
         }];
     }];
@@ -1502,6 +1682,8 @@ static AppError *RDWebProbeErrorFromNavigationError(NSError *error) {
 @property (nonatomic, assign) NSUInteger currentGen;
 @property (nonatomic, assign) BOOL finished;
 @property (nonatomic, strong) dispatch_queue_t syncQueue;
+// 本次探测的页面地址（超时抢救时用它作为 analyzeHTML 的 baseURL）
+@property (nonatomic, copy, nullable) NSURL *lastProbeURL;
 @end
 
 @implementation WebProbe
@@ -1544,8 +1726,33 @@ static AppError *RDWebProbeErrorFromNavigationError(NSError *error) {
         [s cancelTimer];
         s.currentGen = [s.gen nextGeneration];     // 使迟到的真实回调失效
         [s.inFlight cancel];
-        // 真实 WebView loader：同步让在途会话失效（异步到主线程停止加载）
         id<RDProbeLoader> loader = s.loader;
+        NSURL *pageURL = s.lastProbeURL;            // 抢救回来的 HTML 仍按原 baseURL 解析
+        // ── 超时前抢救已渲染的 DOM（第 47 轮）──
+        // 实测 javclan 类站点：广告脚本把 load 事件拖到 65s+，45s 硬超时先到，
+        // 而此刻 DOM 里播放器与清单地址往往已经在了。先取一次 outerHTML：
+        // 拿到就按**成功**收尾（照常走 analyzeHTML），拿不到才退回「超时」。
+        if ([loader respondsToSelector:@selector(salvageRenderedHTMLWithCompletion:)]) {
+            [(id)loader salvageRenderedHTMLWithCompletion:^(NSString * _Nullable salvaged) {
+                if (salvaged.length) {
+                    RDProbeResult *r = [RDProbeAnalyzer analyzeHTML:salvaged baseURL:pageURL];
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (completion) completion(r, nil, g);
+                    });
+                    return;
+                }
+                if ([loader respondsToSelector:@selector(cancelActiveLoad)]) {
+                    [(id)loader cancelActiveLoad];   // 抢救失败才真正作废会话
+                }
+                if (completion) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        completion(nil, [AppError errorWithType:AppErrorTimeout message:@"探测超时"], g);
+                    });
+                }
+            }];
+            return;
+        }
+        // 真实 WebView loader：同步让在途会话失效（异步到主线程停止加载）
         if ([loader respondsToSelector:@selector(cancelActiveLoad)]) {
             [(id)loader cancelActiveLoad];
         }
@@ -1583,6 +1790,7 @@ static AppError *RDWebProbeErrorFromNavigationError(NSError *error) {
         });
         return;
     }
+    self.lastProbeURL = url;   // 超时抢救用（第 47 轮）
     [self cancelTimer];
     __weak typeof(self) w = self;
     // 资源耗尽防护：HTML 上限随任务上下文逐次传入 loader，
@@ -1599,7 +1807,11 @@ static AppError *RDWebProbeErrorFromNavigationError(NSError *error) {
             [s cancelTimer];
             s.inFlight = nil;
             RDProbeResult *r = error ? nil : [RDProbeAnalyzer analyzeHTML:html baseURL:url];
-            if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(r, error, g); });
+            RDLogWrite(@"probe", @"即将派发 completion（结果 %lu 条）", (unsigned long)(r.media.count));
+            if (completion) dispatch_async(dispatch_get_main_queue(), ^{
+                RDLogWrite(@"probe", @"completion 已到达主线程（结果 %lu 条）", (unsigned long)(r.media.count));
+                completion(r, error, g);
+            });
         });
     };
     HTTPTask *task = nil;

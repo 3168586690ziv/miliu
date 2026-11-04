@@ -108,6 +108,116 @@ static void RDCollectJSONStrings(id value, NSMutableArray<NSString *> *out) {
     }
     return decoded;
 }
+#pragma mark - Dean Edwards packer 解包（第 47 轮）
+
+// 36 进制字符 → 值；非法返回 -1。
+static NSInteger RDPackerDigit(unichar c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'z') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'Z') return 10 + (c - 'A');
+    return -1;
+}
+
+// 从 pos 起读一个「词」并按其 36 进制值查字典。命中返回字典项，未命中返回 nil。
+static NSString *RDPackerWord(NSString *src, NSUInteger *pos, NSInteger base,
+                              NSArray<NSString *> *dict) {
+    NSUInteger i = *pos, start = i;
+    while (i < src.length) {
+        if (RDPackerDigit([src characterAtIndex:i]) < 0) break;
+        i++;
+    }
+    if (i == start) return nil;                     // 不是字母数字词
+    NSString *word = [src substringWithRange:NSMakeRange(start, i - start)];
+    // 逐位累加（支持 base 11..62）
+    long long v = 0; BOOL ok = YES;
+    for (NSUInteger k = 0; k < word.length; k++) {
+        NSInteger d = RDPackerDigit([word characterAtIndex:k]);
+        if (d < 0 || d >= base) { ok = NO; break; }
+        v = v * base + d;
+        if (v > 1 << 24) { ok = NO; break; }
+    }
+    if (!ok || v >= (long long)dict.count || !dict[(NSUInteger)v].length) return nil;
+    *pos = i;
+    return dict[(NSUInteger)v];
+}
+
++ (NSString *)unpackDeanEdwardsPacker:(NSString *)source maxBytes:(NSUInteger)maxBytes {
+    if (!source.length) return source;
+    NSString *current = source;
+    // 最多解两层：实测该站点两层足够；限制层数防嵌套炸弹。
+    for (NSInteger depth = 0; depth < 2; depth++) {
+        NSRange head = [current rangeOfString:@"eval(function(p,a,c,k,e,"];
+        if (head.location == NSNotFound) break;
+        // 只处理 head 之后的部分（整页里可能有多段脚本）
+        NSString *tail = [current substringFromIndex:head.location];
+        // 定位参数表： ... }('payload',BASE,COUNT,'k1|k2|...'.split('|')))
+        NSRange payloadStart = [tail rangeOfString:@"}('"];
+        if (payloadStart.location == NSNotFound) break;
+        NSUInteger scan = NSMaxRange(payloadStart);
+        // payload：单引号字符串，处理 ' 与 \ 转义
+        NSMutableString *payload = [NSMutableString string];
+        BOOL closed = NO;
+        while (scan < tail.length) {
+            unichar c = [tail characterAtIndex:scan];
+            if (c == '\\' && scan + 1 < tail.length) {
+                [payload appendFormat:@"%C", [tail characterAtIndex:scan + 1]];
+                scan += 2; continue;
+            }
+            if (c == '\'') { closed = YES; scan++; break; }
+            [payload appendFormat:@"%C", c];
+            scan++;
+        }
+        if (!closed) break;
+        // ,BASE,COUNT,
+        NSRange comma = [tail rangeOfString:@"," options:0
+                                      range:NSMakeRange(scan, MIN((NSUInteger)64, tail.length - scan))];
+        if (comma.location == NSNotFound) break;
+        NSUInteger p = NSMaxRange(comma);
+        NSUInteger baseStart = p;
+        while (p < tail.length && RDPackerDigit([tail characterAtIndex:p]) >= 0) p++;
+        if (p == baseStart) break;
+        NSInteger base = [[tail substringWithRange:NSMakeRange(baseStart, p - baseStart)] integerValue];
+        if (base < 2 || base > 62) break;
+        if (p >= tail.length || [tail characterAtIndex:p] != ',') break;
+        p++;
+        NSUInteger cntStart = p;
+        while (p < tail.length && RDPackerDigit([tail characterAtIndex:p]) >= 0) p++;
+        if (p == cntStart) break;
+        NSInteger count = [[tail substringWithRange:NSMakeRange(cntStart, p - cntStart)] integerValue];
+        if (count <= 0 || count > 100000) break;
+        if (p >= tail.length || [tail characterAtIndex:p] != ',') break;
+        p++;
+        if (p >= tail.length || [tail characterAtIndex:p] != '\'') break;
+        p++;
+        // 字典串：到 '.split(' 之前
+        NSRange splitRange = [tail rangeOfString:@"'.split('|')" options:0
+                                           range:NSMakeRange(p, MIN((NSUInteger)1 << 20, tail.length - p))];
+        if (splitRange.location == NSNotFound) break;
+        NSString *dictRaw = [tail substringWithRange:NSMakeRange(p, splitRange.location - p)];
+        NSArray<NSString *> *dict = [dictRaw componentsSeparatedByString:@"|"];
+        if ((NSInteger)dict.count < count) break;    // 字典不完整：不敢解
+
+        // 按词替换
+        NSMutableString *out = [NSMutableString stringWithCapacity:payload.length * 2];
+        NSUInteger k = 0;
+        BOOL overflow = NO;
+        while (k < payload.length) {
+            if (out.length > maxBytes) { overflow = YES; break; }
+            NSUInteger wordStart = k;
+            NSString *rep = RDPackerWord(payload, &k, base, dict);
+            if (rep) { [out appendString:rep]; continue; }
+            [out appendFormat:@"%C", [payload characterAtIndex:wordStart]];
+            k = wordStart + 1;
+        }
+        if (overflow) break;                          // 解压超限：放弃，保留原文
+        // 把原文里这段替换成解包结果，继续找下一段 packer
+        NSString *before = [current substringToIndex:head.location];
+        NSString *after = [tail substringFromIndex:NSMaxRange(splitRange)];
+        current = [before stringByAppendingString:[out stringByAppendingString:after]];
+    }
+    return current;
+}
+
 + (NSArray<NSString *> *)mediaURLStringsInJSONText:(NSString *)text {
     if (!text.length) return @[];
     NSMutableArray<NSString *> *out = [NSMutableArray array];

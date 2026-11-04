@@ -14,6 +14,8 @@
 #import "IPAddressPolicy.h"
 #import "DownloadCapabilityProbe.h"
 #import "AdaptiveTransferScheduler.h"
+#import "RDQueueWAL.h"
+#import "RDFailureDiagnosis.h"
 #import "RDTLSTrust.h"
 #import <fcntl.h>
 #import <sys/file.h>
@@ -548,6 +550,37 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
 
 @implementation DownloadManager
 
+// 队列 WAL **只在生产实例上装配**（sharedManager 里注入）。
+// 这条规则是实测踩出来的：首版让每个 DownloadManager 惰性落到
+// Application Support/Miliu/queue.wal，结果隔离测试（各自有独立 NSUserDefaults
+// suite）共享同一个 WAL 文件，A 套件留下的任务会被 B 套件「恢复」出来，
+// RepairTests 的 RD-18 因此看到 7 个任务而不是 1 个——既污染测试，也会污染
+// 真实用户的队列。现在 nil 即「本实例不写 WAL」，所有调用点自然变成空操作。
+// 一条能独立重放的任务记录。字段名与恢复端一一对应；漏一个字段，
+// 恢复出来的任务就会少一个用户当初的选择（这正是旧「中断记录」的病根）。
+- (NSDictionary *)walRecordForJob:(DownloadJob *)job {
+    NSMutableDictionary *record = [NSMutableDictionary dictionary];
+    record[@"id"] = job.identifier ?: @"";
+    record[@"url"] = job.sourceURL.absoluteString ?: @"";
+    record[@"title"] = job.fileName ?: @"";
+    record[@"platform"] = job.resourceKind == DownloadResourceManifest ? @"manifest" : @"direct";
+    record[@"output_dir"] = job.destinationURL.URLByDeletingLastPathComponent.path ?: @"";
+    record[@"fileName"] = job.fileName ?: @"";
+    if (job.qualityHint.length) record[@"quality"] = job.qualityHint;
+    if (job.sourcePageURL.length) record[@"source_page"] = job.sourcePageURL;
+    if (job.referer.length) record[@"referer"] = job.referer;
+    if (job.streamMasterURL.length) record[@"stream_master"] = job.streamMasterURL;
+    if (job.resourceTitle.length) record[@"resource_title"] = job.resourceTitle;
+    record[@"resource_kind"] = @(job.resourceKind);
+    record[@"expected_length"] = @(MAX((int64_t)0, job.expectedContentLength));
+    if (job.etag.length) record[@"etag"] = job.etag;
+    if (job.lastModified.length) record[@"last_modified"] = job.lastModified;
+    record[@"accept_ranges"] = @(job.acceptRanges);
+    record[@"enqueued_at"] = @([(job.enqueuedAt ?: [NSDate date]) timeIntervalSince1970]);
+    record[@"percent"] = @(MAX(0.0, MIN(100.0, job.progress * 100.0)));
+    return record;
+}
+
 + (NSString *)sourceIdentityForURL:(NSURL *)url {
     return RDCanonicalResourceURL(url);
 }
@@ -573,11 +606,19 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
 - (instancetype)initWithBackend:(id<RDDownloadBackend>)backend
                        tempRoot:(NSURL *)tempRoot
                           store:(DownloadStore *)store {
+    return [self initWithBackend:backend tempRoot:tempRoot store:store queueWAL:nil];
+}
+
+- (instancetype)initWithBackend:(id<RDDownloadBackend>)backend
+                       tempRoot:(NSURL *)tempRoot
+                          store:(DownloadStore *)store
+                       queueWAL:(RDQueueWAL *)queueWAL {
     self = [super init];
     if (self) {
         _backend = backend;
         _tempRoot = tempRoot;
         _store = store;
+        _queueWAL = queueWAL;
         _jobs = [NSMutableDictionary dictionary];
         _latestEnqueuedJobIdentifier = [store latestEnqueuedJobIdentifier];
         _activeTasks = [NSMutableDictionary dictionary];
@@ -639,6 +680,12 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
                 RDDownloadLog(@"恢复冲突 id=%@ 目录由另一实例持有，本实例仅展示不操作", identifier);
             }
         }];
+        // WAL 重放：把「上次进程没有正常退出」时留下的任务补回来。
+        // 与上面的中断记录互补——
+        //  · 中断记录来自正常退出路径（markInterruptedOnTerminate），字段少、整表重写；
+        //  · WAL 来自每一次状态迁移，能补回顺序、画质、Referer、目标目录与进度。
+        // 两者都存在的同一 identifier，以中断记录为准（它带有更新的临时目录状态）。
+        [self recoverJobsFromWALExcluding:saved];
         // 孤儿清理必须在中断恢复**之后**：旧实现把清理放在恢复之前，此时 self.jobs 还是空的，
         // 会把所有历史任务目录（含即将恢复的中断任务目录）一并删除。
         [self cleanupOrphanTempDirs];
@@ -691,9 +738,11 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
         // 独立 App 的完成/中断记录写入自身 bundle id 的 standard defaults，
         // 与 SevenZZ 主 App 完全解耦，换机后从空白记录开始。
         DownloadStore *store = [[DownloadStore alloc] initWithUserDefaults:[NSUserDefaults standardUserDefaults]];
+        // 生产实例才装配 WAL（隔离测试不传，天然不会共享同一文件）。
         mgr = [[DownloadManager alloc] initWithBackend:effectiveBackend
                                              tempRoot:[NSURL fileURLWithPath:tmp]
-                                                store:store];
+                                                store:store
+                                             queueWAL:[RDQueueWAL shared]];
     });
     return mgr;
 }
@@ -881,6 +930,10 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
 
     [self.jobs setObject:job forKey:job.identifier];
     [self.queuedJobIdentifiers addObject:job.identifier];
+    // WAL：入队即落一行，把「重放一个任务所需的全部决定」一次写全——
+    // URL、来源页、画质提示、Referer、目标路径、文件名、长度、类型、位置。
+    [self.queueWAL appendEnqueuedRecord:[self walRecordForJob:job] position:(self.queuedJobIdentifiers.count - 1)];
+    [self.queueWAL compactIfNeeded];
     RDDownloadLog(@"入队 id=%@ url=%@ referer=%@ 目标目录=%@ 文件名=%@ 预期=%lld 字节",
                   job.identifier, RDRedactedURL(url), RDRedactedURL([NSURL URLWithString:job.referer ?: @""]),
                   destinationFolder.path ?: @"", unique, length);
@@ -1193,6 +1246,7 @@ static const NSTimeInterval kRDQueueStarvationGrace = 20.0;
 
             [self removeQueuedJobIdentifier:identifier];
             [job transitionTo:DownloadJobStateRunning];
+            [self.queueWAL appendStarted:job.identifier];
             [self beginJob:job plannedTransfers:required];
             if (job.state == DownloadJobStateRunning) [self notifyUpdate:job];
         }
@@ -1763,6 +1817,11 @@ static const NSTimeInterval kRDQueueStarvationGrace = 20.0;
     job.bytesPerSecond = MAX(0, rate);
     job.estimatedRemainingSeconds = (job.bytesPerSecond > 0 && expectedTotal > transferred)
         ? ((double)(expectedTotal - transferred) / job.bytesPerSecond) : 0;
+    // WAL 进度按 5% 节流（内部判断），崩溃后最多回退 5% 的**显示**进度；
+    // 已经写入磁盘的分片不受影响，恢复时仍按布局逐段复用。
+    if (expectedTotal > 0) {
+        [self.queueWAL appendProgress:job.identifier percent:(100.0 * (double)transferred / (double)expectedTotal)];
+    }
 }
 
 - (BOOL)checkRuntimeLimitsForJob:(DownloadJob *)job {
@@ -2056,7 +2115,7 @@ static const NSTimeInterval kRDQueueStarvationGrace = 20.0;
         // 让上层单资源刷新能拿到新长度重启，而不是永远卡在“不是有效视频”。
         if (![DownloadJob isLikelyHTMLErrorFileAtURL:written] &&
             [self bodyIntegrityProblem:resp writtenURL:written job:job]) linkExpired = YES;
-        [self failJob:job reason:reason linkExpired:linkExpired];
+        [self failJob:job reason:reason statusCode:resp.statusCode linkExpired:linkExpired];
         return;
     }
     [self.shortBodyRetryAttempts removeObjectForKey:job.identifier];
@@ -2406,6 +2465,7 @@ static const NSTimeInterval kRDQueueStarvationGrace = 20.0;
     [self stopProgressWatchdogForJob:job];
     [self.store recordCompletedURL:job.sourceURL]; // 仅验证通过后记录
     [self storeFinishedRecordForJob:job];
+    [self.queueWAL appendTerminal:job.identifier state:job.state];
     [self removeTempRootForJob:job];
     [self.activeTasks removeObjectForKey:job.identifier];
     [self removeQueuedJobIdentifier:job.identifier];
@@ -2415,17 +2475,23 @@ static const NSTimeInterval kRDQueueStarvationGrace = 20.0;
 }
 
 - (void)failJob:(DownloadJob *)job reason:(NSString *)reason {
-    [self failJob:job reason:reason linkExpired:NO];
+    [self failJob:job reason:reason statusCode:0 linkExpired:NO];
+}
+
+- (void)failJob:(DownloadJob *)job reason:(NSString *)reason linkExpired:(BOOL)linkExpired {
+    [self failJob:job reason:reason statusCode:0 linkExpired:linkExpired];
 }
 
 // linkExpired=YES 表示失败原因是“远程链接失效类”（401/403/404/410、
 // 伪媒体 HTML 响应等）。只有这类失败才允许上层做单资源重新探测；
 // 本地磁盘不足、权限、用户取消等绝不触发链接刷新。
-- (void)failJob:(DownloadJob *)job reason:(NSString *)reason linkExpired:(BOOL)linkExpired {
+- (void)failJob:(DownloadJob *)job reason:(NSString *)reason statusCode:(NSInteger)statusCode linkExpired:(BOOL)linkExpired {
     if (job.state == DownloadJobStateFailed || job.state == DownloadJobStateCompleted ||
         job.state == DownloadJobStateCancelled) return;
     [job transitionTo:DownloadJobStateFailed];
-    job.errorText = reason ?: @"未知错误";
+    // 原因 → 一个可点的动作：识别得出就追加一句「建议：…」，识别不出就原样保留，
+    // 绝不编造原因（这条纪律来自「不猜」原则：错的动作比没有动作更浪费时间）。
+    job.errorText = RDFailureMessageWithAdvice(reason, statusCode);
     RDDownloadLog(@"失败 id=%@ state=%@ url=%@ 目标=%@ 原因：%@%@",
                   job.identifier, RDStateNameForJob(job), RDRedactedURL(job.sourceURL),
                   job.destinationURL.path ?: @"（未预留目标路径）", reason ?: @"未知错误",
@@ -2446,6 +2512,7 @@ static const NSTimeInterval kRDQueueStarvationGrace = 20.0;
     // 临时目录（-rf / -fb），不受此处清理影响。
     [self removeTempRootForJob:job];
     [self storeFinishedRecordForJob:job];
+    [self.queueWAL appendTerminal:job.identifier state:job.state];
     [self notifyUpdate:job];
     [self notifyChange];
     // 链接失效回调只在任务真正停在 Failed 终态时触发；用户若在此之前
@@ -2558,6 +2625,7 @@ static const NSTimeInterval kRDQueueStarvationGrace = 20.0;
     [self stopProgressWatchdogForJob:job];
     [self removeTempRootForJob:job];
     [self storeFinishedRecordForJob:job];
+    [self.queueWAL appendTerminal:job.identifier state:job.state];
     [self.activeTasks removeObjectForKey:job.identifier];
     [self removeQueuedJobIdentifier:job.identifier];
     [self notifyUpdate:job];
@@ -2712,6 +2780,68 @@ static const NSTimeInterval kRDQueueStarvationGrace = 20.0;
     for (NSString *id in [self.jobs.allKeys copy]) [self cancelJob:id];
     self.queuePumpSuppressed = NO;
     [self startQueuedJobs];
+}
+
+// 从 WAL 重放补回任务。只补「原记录里没有」的 identifier，绝不覆盖
+// 中断记录已经写好的临时目录状态（两者对同一任务可能不同代次）。
+// 恢复出来的任务一律停在 Interrupted：不自动开始下载——是否续下由用户点「继续」，
+// 与中断记录恢复的语义保持一致（第 36 轮定案）。
+- (void)persistJobMetadataToQueueWAL:(DownloadJob *)job {
+    if (!job.identifier.length) return;
+    NSUInteger position = [self.queuedJobIdentifiers indexOfObject:job.identifier];
+    if (position == NSNotFound) position = 0;
+    [self.queueWAL appendEnqueuedRecord:[self walRecordForJob:job] position:position];
+}
+
+- (void)recoverJobsFromWALExcluding:(NSDictionary<NSString *, id> *)existingRecords {
+    NSArray<NSDictionary *> *items = [self.queueWAL recoveredItems];
+    if (!items.count) return;
+    NSUInteger recovered = 0;
+    for (NSDictionary *item in items) {
+        NSString *identifier = [item[@"id"] isKindOfClass:[NSString class]] ? item[@"id"] : nil;
+        NSString *sourceString = [item[@"url"] isKindOfClass:[NSString class]] ? item[@"url"] : nil;
+        if (!identifier.length || !sourceString.length) continue;
+        if ([existingRecords objectForKey:identifier]) continue;   // 中断记录优先
+        if (self.jobs[identifier]) continue;
+
+        NSURL *source = [NSURL URLWithString:sourceString];
+        NSString *outputDir = [item[@"output_dir"] isKindOfClass:[NSString class]] ? item[@"output_dir"] : nil;
+        NSString *fileName = [item[@"fileName"] isKindOfClass:[NSString class]] ? item[@"fileName"] : nil;
+        if (!source || !source.host.length || !outputDir.length || !fileName.length) continue;
+
+        DownloadJob *job = [DownloadJob new];
+        job.identifier = identifier;
+        job.sourceURL = source;
+        job.destinationURL = [NSURL fileURLWithPath:[outputDir stringByAppendingPathComponent:fileName]];
+        job.fileName = fileName;
+        job.tempRootURL = [self.tempRoot URLByAppendingPathComponent:identifier];
+        job.referer = [item[@"referer"] isKindOfClass:[NSString class]] ? item[@"referer"] : nil;
+        job.sourcePageURL = [item[@"source_page"] isKindOfClass:[NSString class]] ? item[@"source_page"] : nil;
+        job.resourceTitle = [item[@"resource_title"] isKindOfClass:[NSString class]] ? item[@"resource_title"] : nil;
+        job.qualityHint = [item[@"quality"] isKindOfClass:[NSString class]] ? item[@"quality"] : nil;
+        job.streamMasterURL = [item[@"stream_master"] isKindOfClass:[NSString class]] ? item[@"stream_master"] : nil;
+        job.resourceKind = (DownloadResourceKind)[item[@"resource_kind"] integerValue];
+        job.expectedContentLength = [item[@"expected_length"] longLongValue];
+        job.authoritativeExpectedLength = job.expectedContentLength;
+        job.etag = [item[@"etag"] isKindOfClass:[NSString class]] ? item[@"etag"] : @"";
+        job.lastModified = [item[@"last_modified"] isKindOfClass:[NSString class]] ? item[@"last_modified"] : @"";
+        job.acceptRanges = [item[@"accept_ranges"] boolValue];
+        NSNumber *stamp = [item[@"enqueued_at"] isKindOfClass:[NSNumber class]] ? item[@"enqueued_at"] : nil;
+        job.enqueuedAt = stamp ? [NSDate dateWithTimeIntervalSince1970:stamp.doubleValue] : [NSDate date];
+        double percent = [item[@"percent"] isKindOfClass:[NSNumber class]] ? [item[@"percent"] doubleValue] : 0.0;
+        job.progress = MAX(0.0, MIN(0.999, percent / 100.0));
+        [job transitionTo:DownloadJobStateInterrupted];
+        self.jobs[identifier] = job;
+        if (job.fileName.length) [self.reservedNames addObject:job.fileName];
+        [self claimTempDirectoryForJob:job];
+        if (![self ownsTempDirectoryAtPath:job.tempRootURL.path]) {
+            job.errorText = @"该下载正由另一个实例处理，本实例不会改动它";
+            continue;
+        }
+        recovered += 1;
+        RDDownloadLog(@"WAL 恢复 id=%@ url=%@ 进度=%.0f%%", identifier, RDRedactedURL(source), percent);
+    }
+    if (recovered) RDDownloadLog(@"WAL 重放：补回 %lu 个任务（日志 %lu 条）", (unsigned long)recovered, (unsigned long)items.count);
 }
 
 - (void)markInterruptedOnTerminate {
@@ -3252,6 +3382,7 @@ static BOOL RDTempDirLockPinsPath(int fd, NSString *lockPath) {
     }
     [self.jobs removeObjectsForKeys:remove];
     [self.store clearAllDownloadRecords];
+    [self.queueWAL truncate];
     [self.delegate downloadManagerDidChange:self];
 }
 

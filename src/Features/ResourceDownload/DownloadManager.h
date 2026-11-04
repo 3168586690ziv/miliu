@@ -12,6 +12,8 @@
 #import "DownloadStore.h"
 #import "URLPolicy.h"
 
+@class RDQueueWAL;
+
 NS_ASSUME_NONNULL_BEGIN
 
 /// 单个传输任务（由后端实现，可取消/挂起/恢复）。
@@ -64,6 +66,14 @@ NS_ASSUME_NONNULL_BEGIN
                        tempRoot:(NSURL *)tempRoot
                           store:(DownloadStore *)store;
 
+/// 带队列 WAL 的初始化。WAL 必须在 init 内就位：恢复要发生在
+/// cleanupOrphanTempDirs 之前，否则刚恢复出来的任务目录会被当成孤儿删掉。
+/// 传 nil 表示本实例不写/不读 WAL（隔离测试用，天然不会污染真实用户队列）。
+- (instancetype)initWithBackend:(id<RDDownloadBackend>)backend
+                       tempRoot:(NSURL *)tempRoot
+                          store:(DownloadStore *)store
+                       queueWAL:(nullable RDQueueWAL *)queueWAL;
+
 + (instancetype)sharedManager; // 真实 NSURLSession 后端
 
 @property (nonatomic, weak, nullable) id<DownloadManagerDelegate> delegate;
@@ -79,6 +89,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 持久化存储（测试可读取中断记录等）。
 @property (nonatomic, readonly) DownloadStore *store;
+
+/// 队列追加日志。默认 Application Support/Miliu/queue.wal；测试可注入独立文件，
+/// 让「崩溃恢复」用例不触碰真实用户队列。
+@property (nonatomic, strong, nullable) RDQueueWAL *queueWAL;
 
 /// SSRF 防护：URL 安全策略（默认新建实例）。入队与完成阶段均以
 /// 同一策略做文本 + DNS 解析后全 IP 校验（网络层与下载层双重防线）。
@@ -140,6 +154,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// 调用 end（建议 @try/@finally 包裹入队循环）。
 - (void)beginBatchEnqueue;
 - (void)endBatchEnqueue;
+
+/// 入队后补齐的元数据（画质提示 / 标题 / 主清单 URL）必须再写一行 WAL，
+/// 否则崩溃恢复出来的任务会丢掉用户当初选的画质——这正是旧「中断记录」的老毛病。
+/// 重放时同一 identifier 的最后一行为准，因此这里是一次覆盖式更新。
+- (void)persistJobMetadataToQueueWAL:(DownloadJob *)job;
 
 /// 退出时调用：运行中的任务记为 interrupted 并持久化原因（不承诺系统级续传）。
 - (void)markInterruptedOnTerminate;

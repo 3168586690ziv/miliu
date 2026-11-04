@@ -8,6 +8,7 @@
 #import "DetectedMedia.h"
 #import "RDMetadataRecoveryCoordinator.h"   // 第 38 轮接线：元数据恢复编排（标题/封面防退化 + 标题翻译 + 封面恢复）
 #import "DownloadManager.h"
+#import "RDFailureDiagnosis.h"
 #import "ResourceDownloadSettings.h"
 #import "PreferencesStore.h"
 #import "PerformancePolicy.h"
@@ -190,6 +191,29 @@ static id<RDMetadataTransporting> RDProductionMetadataTransport(void) {
 // 不得显示"探测完成"；全部就绪后在同一轮主线程更新中一次性呈现。
 static const NSUInteger kRDPresentationPreviewBudget = 12;   // 首屏缩略图行数上限
 static const NSTimeInterval kRDPresentationSafetyDeadline = 60.0;
+
+// 探测模式三个档位与偏好整数的一一映射（第 46 轮：把「智能」接到 UI）。
+// 偏好值即分段控件的段索引，顺序不可随意调整（会影响已存偏好）。
+//   0 = 当前页（只探 seed，不读 HTML、不扩展）
+//   1 = 总站（读 HTML → 子页面 → 串行探测，无候选时回退当前页）
+//   2 = 智能（先探当前页，有资源就直接返回；无资源才读 HTML 扩展子页面）
+// 非法值一律回退 0，与 PreferencesStore 的 migrationRule 同一口径。
+static ZZResourceDiscoveryMode RDModeFromPreferenceIndex(NSInteger idx) {
+    switch (idx) {
+        case 1: return ZZResourceDiscoveryModeSite;
+        case 2: return ZZResourceDiscoveryModeSmart;
+        default: return ZZResourceDiscoveryModeCurrentPage;
+    }
+}
+
+static NSInteger RDPreferenceIndexFromMode(ZZResourceDiscoveryMode mode) {
+    switch (mode) {
+        case ZZResourceDiscoveryModeSite: return 1;
+        case ZZResourceDiscoveryModeSmart:
+        case ZZResourceDiscoveryModeSmartExpansion: return 2;   // 扩展阶段同属「智能」
+        default: return 0;
+    }
+}
 
 @class RDSlashWindow;
 
@@ -594,9 +618,11 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     NSApp.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
     [self buildMainMenu];  // 关键：提供 ⌘C/⌘V/⌘X/⌘Z/⌘A 的执行者（AppKit 中这些快捷键由菜单项分发）
     self.results = [NSMutableArray array];
-    // 探测模式：从持久化偏好读取（0=当前页，1=总站），非法值回退当前页
+    // 探测模式：0=当前页，1=总站，2=智能（非法值回退当前页）。
+    // 「智能」自第 44 轮起在协调器里就是完整实现（先探当前页，无资源才扩展子页面），
+    // 但一直**没有任何 UI 入口** ⇒ 那两条分支曾是不可达死代码（第 46 轮接线）。
     NSInteger persistedMode = [PreferencesStore.shared integerForKey:SevenZZKeyProbeMode defaultValue:0];
-    self.mode = (persistedMode == 1) ? ZZResourceDiscoveryModeSite : ZZResourceDiscoveryModeCurrentPage;
+    self.mode = RDModeFromPreferenceIndex(persistedMode);
     NSInteger persistedPages = [PreferencesStore.shared integerForKey:SevenZZKeySitePages defaultValue:3];
     self.sitePages = (NSUInteger)MAX(1, persistedPages);
     // Referer 强度档位（0=仅 origin 默认 / 1=完整来源页 URL / 2=不发）：
@@ -605,7 +631,7 @@ static CGEventRef RDSpaceTapCallback(CGEventTapProxy proxy, CGEventType type, CG
     // download-integrity 三个套件会 Undefined symbols 链接失败）。
     // 非法值回退 0，与 PreferencesStore 的 migrationRule 同一口径。
     NSInteger persistedRefererMode = [PreferencesStore.shared integerForKey:SevenZZKeyRefererMode defaultValue:0];
-    if (persistedRefererMode < 0 || persistedRefererMode > 2) persistedRefererMode = 0;
+    if (persistedRefererMode < 0 || persistedRefererMode > 3) persistedRefererMode = 0;
     [HTTPPrivacyPolicy setRefererModeOverride:@(persistedRefererMode)];
     // 内容过滤开关（可叠加，持久化在独立 App 自己的 defaults 中）
     NSUserDefaults *def = [NSUserDefaults standardUserDefaults];
@@ -2253,9 +2279,13 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
 #pragma mark - 总站页数（模式切换已移至设置页）
 
 - (void)updatePagesFieldVisibility {
-    BOOL site = (self.mode == ZZResourceDiscoveryModeSite);
-    self.pagesField.hidden = !site;
-    self.pagesUnitButton.hidden = !site;
+    // 页数只在「会翻页」的模式下有意义：总站必翻；智能模式在首屏无资源时会扩展子页面，
+    // 那时页数同样生效，故一并显示。当前页模式不读 HTML、不翻页，隐藏。
+    BOOL pagesApply = (self.mode == ZZResourceDiscoveryModeSite
+                       || self.mode == ZZResourceDiscoveryModeSmart
+                       || self.mode == ZZResourceDiscoveryModeSmartExpansion);
+    self.pagesField.hidden = !pagesApply;
+    self.pagesUnitButton.hidden = !pagesApply;
 }
 
 - (void)commitPages:(id)sender {
@@ -2383,12 +2413,13 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     // 中途改变会导致 UI 显示的模式与实际在跑的会话不一致。
     // 呈现阶段（缩略图/元数据加载）同样禁止，与旧 modeButton.hidden 守卫范围一致。
     if (self.scanning || self.presentationPreparing) {
-        sender.selectedSegment = (self.mode == ZZResourceDiscoveryModeSite) ? 1 : 0;
+        sender.selectedSegment = RDPreferenceIndexFromMode(self.mode);
         return;
     }
-    BOOL site = (sender.selectedSegment == 1);
-    self.mode = site ? ZZResourceDiscoveryModeSite : ZZResourceDiscoveryModeCurrentPage;
-    [PreferencesStore.shared setInteger:site ? 1 : 0 forKey:SevenZZKeyProbeMode];
+    NSInteger idx = sender.selectedSegment;
+    if (idx < 0 || idx > 2) idx = 0;
+    self.mode = RDModeFromPreferenceIndex(idx);
+    [PreferencesStore.shared setInteger:idx forKey:SevenZZKeyProbeMode];
     [self updatePagesFieldVisibility];
 }
 
@@ -2397,7 +2428,7 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     // 与探测模式不同，这里**允许在探测/下载进行中切换**——档位只影响
     // 之后发出的请求，不改变已入队任务的身份；立即生效，无需重启。
     NSInteger mode = sender.selectedSegment;
-    if (mode < 0 || mode > 2) mode = 0;
+    if (mode < 0 || mode > 3) mode = 0;
     [PreferencesStore.shared setInteger:mode forKey:SevenZZKeyRefererMode];
     [HTTPPrivacyPolicy setRefererModeOverride:@(mode)];
 }
@@ -2550,35 +2581,39 @@ static BOOL RDPresentationSnapshotSettled(RDMetadataSnapshot *snapshot, BOOL inc
     addSeparator();
     // 探测模式：当前页 / 总站（持久化，与原主页「总/单」按钮功能一致）
     NSSegmentedControl *probeModeControl =
-        [NSSegmentedControl segmentedControlWithLabels:@[@"当前页", @"总站"]
+        [NSSegmentedControl segmentedControlWithLabels:@[@"当前页", @"总站", @"智能"]
                                           trackingMode:NSSegmentSwitchTrackingSelectOne
                                                 target:self
                                                 action:@selector(changeProbeMode:)];
     probeModeControl.identifier = @"RDProbeModeControl";
-    probeModeControl.frame = NSMakeRect(0, 0, 120, 26);
+    probeModeControl.frame = NSMakeRect(0, 0, 172, 26);
     probeModeControl.segmentStyle = NSSegmentStyleRounded;
     probeModeControl.font = [NSFont systemFontOfSize:11.5];
-    probeModeControl.selectedSegment = (self.mode == ZZResourceDiscoveryModeSite) ? 1 : 0;
+    probeModeControl.selectedSegment = RDPreferenceIndexFromMode(self.mode);
     self.settingsProbeModeControl = probeModeControl;
-    addRow(@"探测模式", @"探测当前网页或整个站点的资源", @[probeModeControl]);
+    addRow(@"探测模式", @"当前页＝只探这一页；总站＝读列表页再逐页探；智能＝先探当前页，没资源才扩展", @[probeModeControl]);
     addSeparator();
-    // Referer 强度三档（热链保护站点救回）：0=仅 origin（默认，最保护隐私）；
-    // 1=完整来源页 URL（带 path/query，救回校验完整 Referer 的 CDN）；2=不发。
-    // 跨域在 0/1 档一律不发（绝不把来源路径泄露给别的域）。
+    // 来源说明（Referer）四档。**界面用白话，不用专业术语**（第 47 轮用户要求：
+    // 「随便拎一个初中生或小学生就能使用」）。括号里是该档的技术含义，仅供开发者对照：
+    //   0「一般」      = 仅 origin（默认，最保护隐私）
+    //   1「带完整页面」= 同域发完整来源页 URL（带 path/query）
+    //   2「不带说明」  = 一律不发
+    //   3「跨站也带」  = 跨域也发来源 origin（仅 scheme+host+port，不含路径）
+    // 默认档仍是 0，旧三档行为逐字未变。
     NSSegmentedControl *refererModeControl =
-        [NSSegmentedControl segmentedControlWithLabels:@[@"仅域名", @"完整地址", @"不发送"]
+        [NSSegmentedControl segmentedControlWithLabels:@[@"一般", @"带完整页面", @"不带说明", @"跨站也带"]
                                           trackingMode:NSSegmentSwitchTrackingSelectOne
                                                 target:self
                                                 action:@selector(changeRefererMode:)];
     refererModeControl.identifier = @"RDRefererModeControl";
-    refererModeControl.frame = NSMakeRect(0, 0, 186, 26);
+    refererModeControl.frame = NSMakeRect(0, 0, 236, 26);
     refererModeControl.segmentStyle = NSSegmentStyleRounded;
     refererModeControl.font = [NSFont systemFontOfSize:11.5];
     NSInteger refererIdx = [PreferencesStore.shared integerForKey:SevenZZKeyRefererMode defaultValue:0];
-    if (refererIdx < 0 || refererIdx > 2) refererIdx = 0;
+    if (refererIdx < 0 || refererIdx > 3) refererIdx = 0;
     refererModeControl.selectedSegment = refererIdx;
     self.settingsRefererModeControl = refererModeControl;
-    addRow(@"Referer 强度", @"热链保护的站点下不了时切「完整地址」；跨域始终不发", @[refererModeControl]);
+    addRow(@"来源说明（Referer）", @"网站用它可以判断「你是从哪一页点进来的」。大多数网站不用管；下不动或播不出时，按下面的顺序往右试一格。", @[refererModeControl]);
 
     // 卡片 1：布局 —— 左右栏比例三档平铺（点哪档切哪档）。
     // identifier 故意沿用 "RDPaneRatioPopup"：它是 build/ui-probe/accept2.sh 的黑盒定位锚点，
@@ -4048,6 +4083,9 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
         && media.parentMediaURL.length && ![media.parentMediaURL isEqual:media.mediaURL])
         job.streamMasterURL = media.parentMediaURL;
     job.resourceTitle = media.title; job.qualityHint = media.quality;
+    // 入队时这三项还不存在（画质/标题/主清单是探测结果），必须补写一行 WAL，
+    // 否则崩溃恢复出的任务会丢掉用户选的画质与来源页。
+    [self.downloadManager persistJobMetadataToQueueWAL:job];
     self.statusNote.stringValue = job.state == DownloadJobStateFailed ? [NSString stringWithFormat:@"无法下载：%@",job.errorText ?: @"未知错误"] : @"已提交下载任务";
     [self refreshDownloadsList];
 }
@@ -4243,8 +4281,25 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
     self.fileNameLabel.frame = NSMakeRect(12, 50, MAX(80, width - 12 - 200), 18);
     self.stateLabel.stringValue = [app stateLabelForJob:job];
     self.stateLabel.frame = NSMakeRect(12, 34, 90, 16);
-    self.errorLabel.stringValue = job.state == DownloadJobStateFailed ? (job.errorText.length ? job.errorText : @"下载失败") : @"";
-    self.errorLabel.frame = NSMakeRect(110, 34, MAX(80, width - 110 - 200), 16);
+    // 失败原因 + 建议的可用宽度。左边界 110（状态文字栏），右侧 200 留给操作按钮。
+    CGFloat errorWidth = MAX(80, width - 110 - 200);
+    self.errorLabel.frame = NSMakeRect(110, 34, errorWidth, 16);
+    if (job.state == DownloadJobStateFailed) {
+        // 建议在末尾，而 NSTextField 是尾部截断 —— 最小窗口（760 宽 → 行 712 →
+        // 可用 402px）下被切掉的正好是建议，引导等于不存在。这里按实际字宽
+        // 自适应：放不下就保住建议、把原因按字素截断（2026-11-05 实测修正）。
+        NSString *reason = job.errorText.length ? job.errorText : @"下载失败";
+        NSFont *font = self.errorLabel.font ?: [NSFont systemFontOfSize:10];
+        NSString *fitted = RDFailureTextFitted(reason, 0, errorWidth, ^CGFloat(NSString *text) {
+            return [text sizeWithAttributes:@{NSFontAttributeName: font}].width;
+        });
+        self.errorLabel.stringValue = fitted;
+        // 完整文案仍进 tooltip 与辅助功能值：截断只影响视觉，信息不丢。
+        self.errorLabel.toolTip = reason;
+    } else {
+        self.errorLabel.stringValue = @"";
+        self.errorLabel.toolTip = nil;
+    }
 
     // 操作按钮（右侧）
     CGFloat bx = width - 12;
@@ -4299,7 +4354,10 @@ static NSString *RDVerificationTitleFromHTML(NSString *html) {
     // 逐项同步辅助功能值，便于 UI 自动化核对"状态 / 指标 / 失败原因"的实时变化。
     self.stateLabel.accessibilityValue = self.stateLabel.stringValue;
     self.metricsLabel.accessibilityValue = self.metricsLabel.stringValue;
-    self.errorLabel.accessibilityValue = self.errorLabel.stringValue;
+    // 截断只影响视觉：辅助功能值保留完整文案（含建议），读屏用户与 tooltip 都能拿到全文。
+    self.errorLabel.accessibilityValue = job.state == DownloadJobStateFailed
+        ? (job.errorText.length ? job.errorText : @"下载失败")
+        : self.errorLabel.stringValue;
 }
 
 // 窗口缩放时按新宽度重排：NSTableView 不会因 resize 重新询问数据源，
@@ -4360,6 +4418,43 @@ static void RDUncaughtExceptionHandler(NSException *exception) {
 int main(int argc, const char *argv[]) { @autoreleasepool {
     RDLogInstallCrashHandlers();   // SIGSEGV/SIGABRT/SIGBUS/… 硬崩溃兜底（异步信号安全落盘）
     NSSetUncaughtExceptionHandler(RDUncaughtExceptionHandler);
+
+    // ── 单实例门（第 46 轮补回）──
+    // 第 20 轮做过单实例闭环，但它住在 src/Helpers/RDWatchAgentController.m 里；
+    // 第 43 轮剥离「追更」模块时整个 src/Helpers 被删除，主 App 的单实例保护**随之丢失**
+    // （实测 `open -n Miliu.app` 能并存两个进程，各自写同一份偏好与下载记录）。
+    // 这里用最小、不依赖任何模块的方式补回：一个按 bundle id 命名的 flock 独占锁。
+    //  · 持有期间第二实例拿不到锁 → 交给 LaunchServices 激活已在跑的那个后退出；
+    //  · 进程崩溃/被杀时内核自动释放 flock，不会留下需要人工清理的陈旧锁文件；
+    //  · 测试静默窗口模式（RDTestSilentWindow）与显式 RD_ALLOW_MULTI_INSTANCE=1 放行，
+    //    套件需要并行起多个替身实例时不被打断。
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"com.sevenzz.resource-detector";
+    NSString *lockPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                          [NSString stringWithFormat:@"%@.single-instance.lock", bundleID]];
+    int lockFD = open(lockPath.fileSystemRepresentation, O_CREAT | O_RDWR, 0600);
+    BOOL alreadyRunning = NO;
+    if (lockFD >= 0) {
+        // LOCK_EX|LOCK_NB：拿不到即为「已有实例」。
+        alreadyRunning = (flock(lockFD, LOCK_EX | LOCK_NB) != 0);
+    }
+    BOOL allowMulti = [NSUserDefaults.standardUserDefaults boolForKey:@"RDTestSilentWindow"]
+                      || [NSProcessInfo.processInfo.environment[@"RD_ALLOW_MULTI_INSTANCE"] isEqualToString:@"1"];
+    if (alreadyRunning && !allowMulti) {
+        RDLogWrite(@"app", @"检测到已有实例在运行，激活它并退出本进程（单实例门）");
+        // 激活已在运行的同一 bundle 实例（不新起进程），然后安静退出。
+        NSArray<NSRunningApplication *> *same = [NSRunningApplication
+            runningApplicationsWithBundleIdentifier:bundleID];
+        for (NSRunningApplication *other in same) {
+            if (other.processIdentifier != NSProcessInfo.processInfo.processIdentifier) {
+                [other activateWithOptions:NSApplicationActivateAllWindows];
+                break;
+            }
+        }
+        if (lockFD >= 0) close(lockFD);   // 未持锁，关掉即可
+        return 0;
+    }
+    // 拿到锁（或显式放行）：锁 fd 故意不关，随进程存活——这正是「持有」的表达。
+
     RDLogRotateIfNeeded();
     RDLogWrite(@"app", @"启动 DISPLAY_VERSION=%@ CODE_LINES=%ld FIX_ROUND=%ld", RD_GENERATED_VERSION_STRING, (long)RD_GENERATED_CODE_LINES, (long)RD_GENERATED_FIX_ROUND);
     NSApplication *app = [NSApplication sharedApplication];

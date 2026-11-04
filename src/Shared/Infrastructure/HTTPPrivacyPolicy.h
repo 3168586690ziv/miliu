@@ -22,6 +22,15 @@ typedef NS_ENUM(NSInteger, HTTPRefererMode) {
     HTTPRefererModeOrigin = 0,      ///< 仅 origin（默认，现状行为）
     HTTPRefererModeFullPath = 1,    ///< 同源时发送完整来源页 URL（含 path/query，去 fragment）
     HTTPRefererModeNone = 2,        ///< 一律不发 Referer
+    /// 跨域也发来源页 origin（**逐站防盗链救回**，非默认）。
+    /// 背景（第 47 轮实测）：javclan.com 这类播放页在**缺少任意 Referer** 时
+    /// 只返回 3.5KB 精简页（无播放器地址），带任一 https 来源即返回完整 16KB
+    /// 页面。而密流原策略「跨域一律不发」把它挡在门外。
+    /// 隐私代价：向目标域暴露「你是从哪个页面点进来的」。故：
+    ///   · 只发 origin（scheme+host+port），**不发 path/query**（不泄露具体页面）；
+    ///   · 默认关闭，必须用户在设置页显式选择；
+    ///   · 与 Origin/FullPath 两档一样，绝不发 userinfo 与 fragment。
+    HTTPRefererModeCrossOrigin = 3,
 };
 
 @interface HTTPPrivacyPolicy : NSObject

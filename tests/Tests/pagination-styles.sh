@@ -30,8 +30,8 @@ SRC+=("$ROOT/Shared/Infrastructure/Async/RequestGeneration.m"
       # 与 repair.sh 一样把 DesignSystem / UI 基础件一并编译。
       "$ROOT/Shared/UI/DesignSystem/ColorTokens.m"
       "$ROOT/Shared/UI/DesignSystem/TypographyTokens.m"
-      "$ROOT/Shared/UI/StateView.m"
-      "$ROOT/Shared/UI/UIThemeSupport.m")
+     
+     )
 
 INCLUDES=()
 for dir in "$ROOT" "$ROOT/App" "$ROOT/Features/ResourceDetector" "$ROOT/Features/ResourceDownload" \

@@ -27,6 +27,8 @@
 #import "DetectedMedia.h"
 #import "RDURLUtilities.h"
 #import "AdaptiveTransferScheduler.h"
+#import "RDQueueWAL.h"
+#import "RDFailureDiagnosis.h"
 
 // MARK: - 测试基建
 
@@ -1813,6 +1815,19 @@ static void TestPoolStallNeverRecoversFailsBounded(void) {
     //（3+6+12=21s，远早于看门狗，证明换连接确实在有界推进而非停摆）。
     NSInteger expected = job.segmentCount * 4; // 4 轮 × 全部段
     NSInteger atLeast = job.segmentCount * 3;
+    // 「轮次未耗尽前不假死也不误判失败」必须在**真正未耗尽**的窗口里断言。
+    // 退避序列 3+6+12+24 = **45s**，与 45s 任务级看门狗**同刻**——等到第 4 轮全部完成
+    // 再断言 `state == Running` 是拿两个同刻事件赛跑，机器负载一抖必红（第 46 轮修：
+    // 实测首跑 FAIL state=5、单独复跑 400 项全过，属测试自身的时序缺陷，非产品缺陷）。
+    // 3 轮累计仅 21s，远早于看门狗，这里断言 Running 才真的在守「有界推进而非停摆」。
+    Check(Wait(^BOOL { return (NSInteger)backend.reissuedRequests.count >= atLeast; }, 40),
+          @"T34: 换连接至少完成 3 轮有界推进（实际 %lu 次，下限 %ld 次）",
+          (unsigned long)backend.reissuedRequests.count, (long)atLeast);
+    Check(job.state == DownloadJobStateRunning,
+          @"T34: 第 3 轮（累计 21s，未撞 45s 看门狗）时必须仍在运行、不假死也不误判失败（实际 state=%ld）",
+          (long)job.state);
+
+    // 之后等第 4 轮也发出（可能撞上看门狗，两者都合法）。
     Wait(^BOOL { return (NSInteger)backend.reissuedRequests.count >= expected; }, 80);
     // 上限 = expected + segmentCount：第 4 轮与 45s 看门狗存在固有竞速（本注释上方
     // 已说明），机器负载抖动时单段可能在边界多重发一次（实测出现过 17/16）。
@@ -1821,16 +1836,21 @@ static void TestPoolStallNeverRecoversFailsBounded(void) {
     Check((NSInteger)backend.reissuedRequests.count <= hardCap,
           @"T34: 换连接重发不得超过 4 轮上限、无重试风暴（实际 %lu 次，上限 %ld 次）",
           (unsigned long)backend.reissuedRequests.count, (long)hardCap);
-    Check((NSInteger)backend.reissuedRequests.count >= atLeast,
-          @"T34: 换连接至少完成 3 轮有界推进（实际 %lu 次，下限 %ld 次）",
-          (unsigned long)backend.reissuedRequests.count, (long)atLeast);
-    Check(job.state == DownloadJobStateRunning,
-          @"T34: 轮次未耗尽前不假死也不误判失败（实际 state=%ld）", (long)job.state);
-    // 观察窗 12s：足以覆盖“轮次被自己重置 → 每 9s 又来一轮”的假修复
+    // 轮次耗尽点允许两种**合法**结局：仍在跑（看门狗尚未 tick）或已被 45s 看门狗
+    // 有限失败。**禁止**任何其它终态（Cancelled/Completed/Interrupted）——那才是不变式。
+    Check(job.state == DownloadJobStateRunning || job.state == DownloadJobStateFailed,
+          @"T34: 轮次耗尽点只允许「仍在运行」或「看门狗有限失败」两种合法结局（实际 state=%ld）",
+          (long)job.state);
+    // 观察窗 12s：覆盖「轮次被自己重置 → 每 9s 又来一轮」的假修复。
+    // 断言用 hardCap 而非 expected（第 47 轮修）：第 4 轮的调度点正好落在 45s，
+    // 与任务级看门狗同刻；负载抖动时那一段可能在观察窗**开始之前**还没发完，
+    // 于是窗内又补发一次（实测全量回归出现 17/16，单跑复现不出来）。
+    // 这不代表「轮次被重置」，只是同一轮的第 4 段到得晚——风暴上限仍是 hardCap
+    // （expected + 一个段），远低于「每 9s 新一轮」的量级，守卫语义不变。
     [NSThread sleepForTimeInterval:12.0];
-    Check((NSInteger)backend.reissuedRequests.count <= expected,
+    Check((NSInteger)backend.reissuedRequests.count <= hardCap,
           @"T34: 轮次耗尽后不再发起新的换连接（12s 观察窗内实际 %lu 次，上限 %ld）",
-          (unsigned long)backend.reissuedRequests.count);
+          (unsigned long)backend.reissuedRequests.count, (long)hardCap);
     // 钉死绝对上限：轮次耗尽后由既有 45s 任务级看门狗收口（回拨基准等价于已断流 50s）
     NSMutableDictionary *lastProgress = [ctx.manager valueForKey:@"lastProgressAt"];
     lastProgress[job.identifier] = [NSDate dateWithTimeIntervalSinceNow:-50];
@@ -2732,6 +2752,65 @@ static int RDRunChildDownload(NSArray<NSString *> *args) {
            (job.errorText ?: @"-").UTF8String);
     fflush(stdout);
     return (job.state == DownloadJobStateCompleted && size > 0) ? 0 : 1;
+}
+
+// 一个永远不回调的后端：让任务真的停在「正在下载」，而不是几毫秒后就
+// 因为空响应校验失败进入 Failed 终态。T62 要复现的是「用户强退时它正在下」——
+// 若任务已经失败，WAL 里会先落一条 terminal，恢复出来的是空队列（首版就是这么
+// 误判的，实测 WAL 末尾确实多了一条 state=5）。
+@interface RDNeverCompletingBackend : NSObject <RDDownloadBackend>
+@end
+@implementation RDNeverCompletingBackend
+- (id<RDDownloadTask>)rd_startRequest:(NSURLRequest *)request
+                            writeToURL:(NSURL *)writeToURL
+                           completion:(void (^)(NSURL *, NSHTTPURLResponse *, NSError *))completion {
+    return [MockDownloadTask new];   // 不回调：请求永远在途
+}
+- (id<RDDownloadTask>)rd_startRequest:(NSURLRequest *)request
+                            writeToURL:(NSURL *)writeToURL
+                             progress:(void (^)(int64_t, int64_t, int64_t))progress
+                           completion:(void (^)(NSURL *, NSHTTPURLResponse *, NSError *))completion {
+    return [MockDownloadTask new];
+}
+@end
+
+// 子进程模式 W：真实跨进程的「写入中途被 SIGKILL」。
+// 与 T60（同进程内换实例）的区别：这一条真的让**另一个进程**写 WAL，然后
+// 用 SIGKILL 掐死它——没有 dealloc、没有正常退出路径、没有任何收尾代码能跑。
+// 父进程随后用同一份 WAL 文件恢复，这才是「用户强退 App」的真实形态。
+static int RDRunChildWALWriter(NSArray<NSString *> *args) {
+    if (args.count < 4) { printf("RD-CHILD-ARGS-MISSING\n"); return 2; }
+    NSString *walPath = args[2], *destDir = args[3];
+    NSURL *folder = [NSURL fileURLWithPath:destDir];
+    [[NSFileManager defaultManager] createDirectoryAtURL:folder withIntermediateDirectories:YES attributes:nil error:nil];
+    RDQueueWAL *wal = [[RDQueueWAL alloc] initWithFileURL:[NSURL fileURLWithPath:walPath]];
+    DownloadManager *manager = [[DownloadManager alloc] initWithBackend:[RDNeverCompletingBackend new]
+                                                              tempRoot:[NSURL fileURLWithPath:
+                                                                        [destDir stringByAppendingPathComponent:@"tmp"]]
+                                                                 store:[[DownloadStore alloc] initWithUserDefaults:
+                                                                        [[NSUserDefaults alloc] initWithSuiteName:@"com.sevenzz.tests.walchild"]]
+                                                              queueWAL:wal];
+    manager.rd_enableEndpointResolution = NO;
+    DownloadJob *job = [manager enqueueItemWithSourceURL:[NSURL URLWithString:@"https://cdn.example.com/inflight.mp4"]
+                                                  folder:folder
+                                           preferredName:@"inflight.mp4"
+                                           sourcePageURL:@"https://page.example.com/watch"
+                                            resourceKind:DownloadResourceVideo
+                                          expectedLength:0];
+    job.qualityHint = @"720p";
+    [manager persistJobMetadataToQueueWAL:job];
+    // 让任务真的进入 Running（started 由 startQueuedJobs 写），再落两档进度。
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:5];
+    while (job.state != DownloadJobStateRunning && deadline.timeIntervalSinceNow > 0)
+        [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+    [wal appendProgress:job.identifier percent:25];
+    [wal appendProgress:job.identifier percent:60];
+    printf("RD-CHILD-WAL-WRITTEN id=%s\n", job.identifier.UTF8String);
+    fflush(stdout);
+    // 停在这里等父进程 SIGKILL —— 绝不自行退出（正常退出会走 markInterruptedOnTerminate，
+    // 那是「用户点退出」，不是「App 被强杀」，测不到目标形态）。
+    for (;;) { [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]]; }
+    return 0;
 }
 
 // 子进程模式 B：只做一件事——用同一个临时根构造 DownloadManager（init 会执行孤儿清理）。
@@ -3665,6 +3744,156 @@ static void TestCancelFailedJobDoesNotRecreateTempDir(void) {
           @"T59: 重复取消保持空操作（不重建目录、不改写终态）");
 }
 
+// MARK: - 队列 WAL 端到端（T60）
+
+// 真的杀进程级别的事故形态：实例 A 把任务写进 WAL 后没来得及正常退出，
+// 实例 B（新的 DownloadManager + 新 WAL 对象）启动时按日志把任务补回来。
+// 断言四件事：任务回来了、顺序对、进度/画质/Referer 没丢、状态是 Interrupted
+// （不自动开始下载——是否续下由用户决定）。
+static void TestWALRecoversQueueAfterCrash(void) {
+    NSString *base = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                      [NSString stringWithFormat:@"zz-wal-e2e-%@", NSUUID.UUID.UUIDString]];
+    NSURL *dest = [NSURL fileURLWithPath:[base stringByAppendingPathComponent:@"dest"]];
+    NSURL *tmpA = [NSURL fileURLWithPath:[base stringByAppendingPathComponent:@"tmpA"]];
+    NSURL *tmpB = [NSURL fileURLWithPath:[base stringByAppendingPathComponent:@"tmpB"]];
+    [[NSFileManager defaultManager] createDirectoryAtURL:dest withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *suiteA = [NSString stringWithFormat:@"com.sevenzz.tests.wal.%@", NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaultsA = [[NSUserDefaults alloc] initWithSuiteName:suiteA];
+    NSURL *walURL = [NSURL fileURLWithPath:[base stringByAppendingPathComponent:@"queue.wal"]];
+
+    // 实例 A：入队两个任务，其中一个「正在下」到 40%
+    DownloadManager *a = [[DownloadManager alloc] initWithBackend:[MockDownloadBackend new]
+                                                         tempRoot:tmpA
+                                                            store:[[DownloadStore alloc] initWithUserDefaults:defaultsA]
+                                                         queueWAL:[[RDQueueWAL alloc] initWithFileURL:walURL]];
+    a.rd_enableEndpointResolution = NO;
+    DownloadJob *first = [a enqueueItemWithSourceURL:[NSURL URLWithString:@"https://cdn.example.com/one.mp4"]
+                                              folder:dest
+                                       preferredName:@"one.mp4"
+                                       sourcePageURL:@"https://page.example.com/one"
+                                        resourceKind:DownloadResourceVideo
+                                      expectedLength:0];
+    Check(first.identifier.length > 0, @"T60a: 实例 A 入队成功");
+    // 与生产同样的顺序：入队 → 界面回填画质/标题 → 补写一行 WAL。
+    first.qualityHint = @"1080p";
+    [a persistJobMetadataToQueueWAL:first];
+    [a.queueWAL appendProgress:first.identifier percent:40];
+    DownloadJob *second = [a enqueueItemWithSourceURL:[NSURL URLWithString:@"https://cdn.example.com/two.mp4"]
+                                               folder:dest
+                                        preferredName:@"two.mp4"
+                                        sourcePageURL:@"https://page.example.com/two"
+                                         resourceKind:DownloadResourceVideo
+                                       expectedLength:0];
+    Check(second.identifier.length > 0, @"T60b: 第二个任务入队成功");
+    usleep(250000);   // 等 WAL 的串行队列落盘
+
+    // 实例 B：全新 manager + 全新 WAL 对象（模拟下一次启动）
+    DownloadManager *b = [[DownloadManager alloc] initWithBackend:[MockDownloadBackend new]
+                                                         tempRoot:tmpB
+                                                            store:[[DownloadStore alloc] initWithUserDefaults:
+                                                                   [[NSUserDefaults alloc] initWithSuiteName:
+                                                                    [suiteA stringByAppendingString:@".b"]]]
+                                                         queueWAL:[[RDQueueWAL alloc] initWithFileURL:walURL]];
+    b.rd_enableEndpointResolution = NO;
+
+    BOOL recovered = Wait(^BOOL { return b.allJobs.count >= 2; }, 5.0);
+    Check(recovered, @"T60c: 实例 B 从 WAL 补回了任务（实际 %lu 个）", (unsigned long)b.allJobs.count);
+    NSArray<DownloadJob *> *jobs = [DownloadManager activeJobsForJobs:b.allJobs];
+    (void)jobs;
+    DownloadJob *restoredFirst = nil, *restoredSecond = nil;
+    for (DownloadJob *job in b.allJobs) {
+        if ([job.sourceURL.absoluteString containsString:@"/one.mp4"]) restoredFirst = job;
+        if ([job.sourceURL.absoluteString containsString:@"/two.mp4"]) restoredSecond = job;
+    }
+    Check(restoredFirst != nil && restoredSecond != nil, @"T60d: 两个任务都回来了（顺序/身份不串）");
+    Check(restoredFirst.state == DownloadJobStateInterrupted && restoredSecond.state == DownloadJobStateInterrupted,
+          @"T60e: 恢复后一律 Interrupted，不自动开始下载");
+    Check([restoredFirst.qualityHint isEqual:@"1080p"], @"T60f: 画质选择没丢（实际 %@）", restoredFirst.qualityHint);
+    Check([restoredFirst.referer isEqual:@"https://page.example.com/one"],
+          @"T60g: Referer 没丢（实际 %@）", restoredFirst.referer);
+    Check(restoredFirst.destinationURL.path.length > 0 &&
+          [restoredFirst.destinationURL.path hasSuffix:@"one.mp4"],
+          @"T60h: 目标路径恢复（实际 %@）", restoredFirst.destinationURL.path);
+    Check(restoredFirst.progress > 0.3 && restoredFirst.progress < 0.5,
+          @"T60i: 进度恢复到 40%% 量级（实际 %.2f）", restoredFirst.progress);
+
+    // 已经完成的任务不得被 WAL 复活成幽灵
+    [b.queueWAL appendTerminal:restoredSecond.identifier state:DownloadJobStateCompleted];
+    usleep(250000);
+    NSURL *tmpC = [NSURL fileURLWithPath:[base stringByAppendingPathComponent:@"tmpC"]];
+    DownloadManager *c = [[DownloadManager alloc] initWithBackend:[MockDownloadBackend new]
+                                                         tempRoot:tmpC
+                                                            store:[[DownloadStore alloc] initWithUserDefaults:
+                                                                   [[NSUserDefaults alloc] initWithSuiteName:
+                                                                    [suiteA stringByAppendingString:@".c"]]]
+                                                         queueWAL:[[RDQueueWAL alloc] initWithFileURL:walURL]];
+    Wait(^BOOL { return c.allJobs.count >= 1; }, 5.0);
+    BOOL hasSecond = NO;
+    for (DownloadJob *job in c.allJobs) if ([job.sourceURL.absoluteString containsString:@"/two.mp4"]) hasSecond = YES;
+    Check(!hasSecond, @"T60j: 已终态的任务不会被 WAL 复活（无幽灵任务）");
+
+    [[NSFileManager defaultManager] removeItemAtPath:base error:nil];
+}
+
+// T62：真实跨进程 SIGKILL —— 子进程写到 60% 时被强杀，父进程用同一份 WAL 恢复。
+// 与 T60 的分工：T60 是「同进程换实例」（覆盖字段完整性），T62 是「另一个进程
+// 真的没了」（覆盖内核层面没有任何收尾代码会跑的情形）。
+static void TestWALSurvivesRealSIGKILL(void) {
+    NSString *base = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                      [NSString stringWithFormat:@"zz-wal-kill-%@", NSUUID.UUID.UUIDString]];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:base withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *walPath = [base stringByAppendingPathComponent:@"queue.wal"];
+    NSString *destDir = [base stringByAppendingPathComponent:@"dest"];
+
+    RDChildProcess *child = RDSpawnTestChild(@[@"--rd-child-wal-writer", walPath, destDir]);
+    Check(child != nil, @"T62a: 写 WAL 的子进程已启动");
+    NSString *line = RDWaitForChildLine(child, @"RD-CHILD-WAL-WRITTEN", 20);
+    Check(line.length > 0, @"T62b: 子进程已把任务与 60%% 进度写进 WAL（%@）", line ?: @"（无输出）");
+
+    kill(child.task.processIdentifier, SIGKILL);
+    RDWaitForChildExit(child, 20);
+    Check(child.ended, @"T62c: 子进程被 SIGKILL 掐死（无任何收尾代码执行）");
+
+    // 父进程（全新实例）用同一份 WAL 恢复
+    RDQueueWAL *wal = [[RDQueueWAL alloc] initWithFileURL:[NSURL fileURLWithPath:walPath]];
+    DownloadManager *parent = [[DownloadManager alloc] initWithBackend:[MockDownloadBackend new]
+                                                              tempRoot:[NSURL fileURLWithPath:[base stringByAppendingPathComponent:@"tmp-parent"]]
+                                                                 store:[[DownloadStore alloc] initWithUserDefaults:
+                                                                        [[NSUserDefaults alloc] initWithSuiteName:
+                                                                         [NSString stringWithFormat:@"com.sevenzz.tests.walkill.%@", NSUUID.UUID.UUIDString]]]
+                                                              queueWAL:wal];
+    parent.rd_enableEndpointResolution = NO;
+    BOOL recovered = Wait(^BOOL { return parent.allJobs.count >= 1; }, 5.0);
+    Check(recovered, @"T62d: 父进程从被杀子进程留下的 WAL 里恢复了任务（实际 %lu 个）",
+          (unsigned long)parent.allJobs.count);
+    DownloadJob *job = nil;
+    for (DownloadJob *candidate in parent.allJobs)
+        if ([candidate.sourceURL.absoluteString containsString:@"inflight.mp4"]) job = candidate;
+    Check(job != nil, @"T62e: 恢复出的正是被杀时在途的那个任务");
+    Check(job.state == DownloadJobStateInterrupted, @"T62f: 恢复后为 Interrupted，不自动重下");
+    Check([job.qualityHint isEqual:@"720p"], @"T62g: 画质选择跨进程强杀后仍在（实际 %@）", job.qualityHint);
+    Check(job.progress > 0.55 && job.progress < 0.65,
+          @"T62h: 进度恢复到 60%% 档（实际 %.2f）", job.progress);
+    [fm removeItemAtPath:base error:nil];
+}
+
+// 失败文案必须带一个可点的动作（并且仍以原始原因为前缀）。
+// 走真实的失败入口：受 403 拒绝的目标会让后端返回 Forbidden，任务因此进入
+// Failed 终态——用户看到的 errorText 就是这里断言的对象。
+static void TestFailureAdviceIsWired(void) {
+    TestContext *ctx = MakeContext();
+    ctx.backend.script = ^MockScript *(NSURLRequest *req, NSInteger idx) {
+        return [MockScript response:403 headers:@{@"Content-Type": @"text/html"} body:HTML143()];
+    };
+    DownloadJob *job = EnqueueVideo(ctx, @"/advice.mp4", @"https://page.example.com/watch", 100);
+    BOOL failed = Wait(^BOOL { return job.state == DownloadJobStateFailed; }, 5.0);
+    Check(failed, @"T61a: 403 任务进入失败终态（实际 state=%ld）", (long)job.state);
+    Check([job.errorText containsString:@"403"], @"T61b: 失败文案保留原始原因（实际 %@）", job.errorText);
+    Check([job.errorText containsString:@"建议"], @"T61c: 失败文案追加了动作建议（实际 %@）", job.errorText);
+    Check([job.errorText containsString:@"重试"], @"T61d: 403 的建议指向「重试」按钮（实际 %@）", job.errorText);
+}
+
 int main(int argc, const char **argv) {
     @autoreleasepool {
         [PerformancePolicy setMode:1];   // 标准模式：允许分段，行为确定
@@ -3673,6 +3902,11 @@ int main(int argc, const char **argv) {
             NSMutableArray<NSString *> *args = [NSMutableArray array];
             for (int i = 0; i < argc; i++) [args addObject:[NSString stringWithUTF8String:argv[i]]];
             return RDRunChildDownload(args);
+        }
+        if (argc >= 2 && strcmp(argv[1], "--rd-child-wal-writer") == 0) {
+            NSMutableArray<NSString *> *args = [NSMutableArray array];
+            for (int i = 0; i < argc; i++) [args addObject:[NSString stringWithUTF8String:argv[i]]];
+            return RDRunChildWALWriter(args);
         }
         if (argc >= 2 && strcmp(argv[1], "--rd-child-cleanup") == 0) {
             NSMutableArray<NSString *> *args = [NSMutableArray array];
@@ -3771,6 +4005,10 @@ int main(int argc, const char **argv) {
         TestQuarantineFailureNeverFallsBackToInPlaceDelete();
         TestVariantTempDirsNotDeletedWhenForeign();
         TestCancelFailedJobDoesNotRecreateTempDir();
+        // 第七阶段：队列 WAL 崩溃恢复 + 失败原因→动作
+        TestWALRecoversQueueAfterCrash();
+        TestWALSurvivesRealSIGKILL();
+        TestFailureAdviceIsWired();
         NSLog(@"== 全部 %d 项检查通过 ==", gChecks);
         NSLog(@"TEST-SUITE-PASSED");
         return 0;

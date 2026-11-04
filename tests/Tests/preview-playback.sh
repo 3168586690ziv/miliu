@@ -56,7 +56,27 @@ fi
 
 # ── 段 3：夹具生成 + 服务器自检 ──
 export PREVIEW_PORT="$PORT"   # pinned-http.m3u8 里的绝对 URL 必须指向本次服务器端口
+# 夹具生成需要带编码器的完整版 ffmpeg。环境缺失时**降级跳过**依赖真实媒体的段，
+# 而不是把环境缺失报成产品缺陷（第 46 轮修：此前必然失败且提示误导）。
+set +e
 bash "$FIX/make-fixtures.sh" "$FIX/build"
+FIX_RC=$?
+set -e
+case "$FIX_RC" in
+  0) ;;
+  3)
+    echo "SKIP: 段 3/4 跳过（本机无带编码器的完整版 ffmpeg，夹具无法生成）"
+    echo "SKIP: 纯函数段已全部通过；依赖真实 HLS/mp4 的端到端段需装 ffmpeg 后复跑"
+    echo "PASS: 预览套件纯函数段全部通过（端到端降级跳过）"
+    exit 0 ;;
+  *)
+    echo "FAIL: 夹具生成失败（exit=$FIX_RC，环境具备造流能力但产物不合格）"; exit 1 ;;
+esac
+
+# ⚠ server.log 必须**每次截断**（第 46 轮修）：段 4 断言「钉选后 480p 零请求」是从本文件数行数，
+#   而 server.py 以追加模式写。任一历史遗留的 480p 请求都会让该断言**永久失败**
+#   （第 43 轮实测：时间戳 23:53:39 的一条旧记录导致 3/3 FAIL）。截断后计数窗口才只含本次。
+: > "$OUT/server.log"
 python3 "$FIX/server.py" --port "$PORT" --root "$FIX/build" --log "$OUT/server.log" > "$OUT/server.stdout" 2>&1 &
 SRV_PID=$!
 cleanup() { kill "$SRV_PID" 2>/dev/null || true; wait "$SRV_PID" 2>/dev/null || true; }

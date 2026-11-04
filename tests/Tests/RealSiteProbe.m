@@ -344,6 +344,16 @@ static int RSRunProbeChain(NSString *mode, NSString *urlString) {
     // 时行为与生产完全一致。
     URLPolicy *probePolicy = [[[NSProcessInfo processInfo] environment][@"RD_PROBE_ALLOW_LOOPBACK"] isEqualToString:@"1"]
         ? (URLPolicy *)[RDProbeLoopbackFixturePolicy new] : [URLPolicy new];
+    // 手动验收用：RD_PROBE_REFERER_MODE=0..3 覆盖「来源说明」档位（第 47 轮）。
+    // 仅在设置了该变量时生效；不设时与生产默认（档 0）完全一致。
+    // 用途：验证「含跨域(3)」档能否救回只认 Referer 的播放页（javclan 类站点）。
+    NSString *refEnv = [NSProcessInfo processInfo].environment[@"RD_PROBE_REFERER_MODE"];
+    if (refEnv.length) {
+        NSInteger rm = refEnv.integerValue;
+        if (rm < 0 || rm > 3) rm = 0;
+        [HTTPPrivacyPolicy setRefererModeOverride:@(rm)];
+        printf("RS-NOTE 来源说明档位=%ld（RD_PROBE_REFERER_MODE）\n", (long)rm);
+    }
     __block NSArray<DetectedMedia *> *result = nil;
     double t0 = RSTicks();
     if ([mode isEqualToString:@"static"]) {

@@ -313,6 +313,58 @@ if ! rg -q 'kRDQueueStarvationGrace' "$ROOT/Features/ResourceDownload/DownloadMa
   exit 1
 fi
 
+# 4e-2. 队列 WAL 接线（本轮新增）。纯逻辑正确不等于生产在用：
+#       三个调用点缺任意一个，WAL 就退化成「写了个文件但没人读」的死代码。
+for _pair in \
+  "src/Features/ResourceDownload/DownloadManager.m|appendEnqueuedRecord" \
+  "src/Features/ResourceDownload/DownloadManager.m|appendTerminal" \
+  "src/Features/ResourceDownload/DownloadManager.m|recoverJobsFromWALExcluding" \
+  "src/Features/ResourceDownload/DownloadManager.m|appendProgress"; do
+  _f="${_pair%%|*}"; _sym="${_pair##*|}"
+  if ! rg -q "$_sym" "$REPO/$_f"; then
+    echo "FAIL: WAL 未接线（$_f 缺少 $_sym，崩溃恢复会退化成死代码）" >&2
+    exit 1
+  fi
+done
+# 恢复必须先于孤儿清理：顺序反了会把即将恢复的任务目录当孤儿删掉（同一类事故已出现过一次）。
+# 只看**调用点**（消息发送形式），不看方法定义——定义在文件后半部分，
+# 首版按裸符号匹配，把方法定义当成了「调用」，实测误报。
+if ! awk '/\[self recoverJobsFromWALExcluding:/{w=NR} /\[self cleanupOrphanTempDirs\]/{c=NR} END{exit !(w>0 && c>0 && w<c)}' \
+     "$ROOT/Features/ResourceDownload/DownloadManager.m"; then
+  echo "FAIL: WAL 恢复必须发生在孤儿清理之前（否则恢复的任务目录会被当孤儿删除）" >&2
+  exit 1
+fi
+
+# 4e-2b. WAL 只能在生产路径装配（本轮实测踩过：首版让每个 DownloadManager
+#        惰性落到共享文件，隔离测试写进去的任务会被真实 App 恢复出来，
+#        用户凭空多出 "cdn.example.com" 的下载行）。sharedManager 之外
+#        任何位置都不得 new/shared 出 WAL。
+# 只看生产源码（tests/ 里用独立临时文件是刻意的隔离手段，不算违规）。
+# 判据：允许装配的文件只能是 DownloadManager.m（生产实例在 sharedManager 内装配），
+# 其它任何源文件出现装配即违规。
+_WAL_OFFENDERS=$(rg -l 'RDQueueWAL (shared|alloc)' "$ROOT" 2>/dev/null \
+  | grep -v '/RDQueueWAL\.m$' | grep -v '/DownloadManager\.m$' || true)
+if [ -n "$_WAL_OFFENDERS" ]; then
+  echo "FAIL: WAL 在 DownloadManager 之外被装配（隔离测试/其它模块会污染真实队列）：$_WAL_OFFENDERS" >&2
+  exit 1
+fi
+# DownloadManager 内也只允许一处装配（sharedManager 里给生产实例）。
+_WAL_SITES=$(rg -c 'RDQueueWAL shared\]' "$ROOT/Features/ResourceDownload/DownloadManager.m" 2>/dev/null | tr -dc '0-9')
+[ "${_WAL_SITES:-0}" = "1" ] || {
+  echo "FAIL: WAL 装配点应恰好 1 处（实际 ${_WAL_SITES:-0}）" >&2; exit 1; }
+
+# 4e-3. 失败原因必须带一个可点的动作（本轮新增）。
+if ! rg -q 'RDFailureMessageWithAdvice' "$ROOT/Features/ResourceDownload/DownloadManager.m"; then
+  echo "FAIL: 失败路径未接 RDFailureMessageWithAdvice（用户只会看到一句原因，不知道点哪儿）" >&2
+  exit 1
+fi
+
+# 4e-4. HLS 分片图片外壳必须在合流前剥掉（本轮新增）。
+if ! rg -q 'RDImageWrapperPayloadOffset' "$ROOT/Features/ResourceDownload/RDStreamDownloadTask.m"; then
+  echo "FAIL: 流任务未剥分片图片外壳（防盗链站点会「分片全齐、合流必炸」）" >&2
+  exit 1
+fi
+
 # 4f. 链接依赖纪律（2026-10-12 第 36 轮核查新增）。
 #     本项目的复发型失效：生产文件新增框架依赖后，**编译它们的脚本没跟着补**——
 #     脚本从此编译不过，等于它自那一刻起再没真正跑过，而日志里还留着旧日的 PASS。
@@ -429,4 +481,74 @@ grep -q 'touch "$ROOT/build/.metadata_never_index"' "$REPO/scripts/build.sh" \
 [ -f "$BUILD/.metadata_never_index" ] \
   || { echo "FAIL: build/.metadata_never_index 缺失（构建产物会被 Spotlight 索引）" >&2; exit 1; }
 
-echo "PASS: build, universal binary, macOS 13 target, bundle signing, app icon packaged and decodable, machine independence, no radar, view-based rows, slash-line UI with thin progress, download progress, site-mode, TLS trust tolerance, download-row uniform tint, and download wiring checks"
+# ── 偏好键无死键（第 46 轮）：规格表里的每个键必须真有消费者 ──
+# 历史问题：26 个 Seven zz 时代遗留键（MarketCache*/Delta*/Mood*/AppTheme…）只存在于
+# allKeySpecs、零消费者，仍被当作在用偏好维护。本断言对每个「已登记键」反查 src/
+# 非规格表引用，为零即判死键。新增键时若不接消费者，这里会立刻红。
+_PS_H="$ROOT/Shared/Infrastructure/PreferencesStore.h"
+_PS_M="$ROOT/Shared/Infrastructure/PreferencesStore.m"
+_dead=0
+for _k in $(grep -oE 'specWithKey:SevenZZKey[A-Za-z]+' "$_PS_M" | sed 's/specWithKey://' | sort -u); do
+  _hits=$(grep -rl -- "$_k" "$ROOT" 2>/dev/null | grep -v 'PreferencesStore' | wc -l | tr -d ' ')
+  if [ "$_hits" = "0" ]; then
+    echo "FAIL: 偏好键 $_k 已登记规格表但零消费者（死键）" >&2
+    _dead=$((_dead + 1))
+  fi
+done
+[ "$_dead" = "0" ] || { echo "FAIL: 共 $_dead 个死偏好键（清理或接入消费者后再登记）" >&2; exit 1; }
+# 反向：规格表审计必须真实存在，否则「审计」又退化成零调用死方法（本轮修掉的老毛病）。
+grep -q 'specAuditAgainstLiveKeys' "$_PS_M" \
+  || { echo "FAIL: 缺 specAuditAgainstLiveKeys（规格表审计不可断言）" >&2; exit 1; }
+grep -q 'specAuditAgainstLiveKeys' "$_PS_H" \
+  || { echo "FAIL: specAuditAgainstLiveKeys 未在头文件公开" >&2; exit 1; }
+
+# 键值分叉防线（第 46 轮）：PerformancePolicy 不链接 PreferencesStore（套件依赖约束），
+# 故它只能写字面量。此处核对两侧取值一致——任一侧改动而另一侧没跟，立刻红。
+_PS_MODE_VAL=$(grep -oE 'SevenZZKeyPerformanceMode *= *@"[^"]+"' "$_PS_M" | sed 's/.*@"\(.*\)"/\1/')
+_PP_MODE_VAL=$(grep -oE 'objectForKey:@"[^"]+"' "$ROOT/Shared/Infrastructure/Performance/PerformancePolicy.m" | head -1 | sed 's/.*@"\(.*\)"/\1/')
+{ [ -n "$_PS_MODE_VAL" ] && [ "$_PS_MODE_VAL" = "$_PP_MODE_VAL" ]; } \
+  || { echo "FAIL: 性能模式键值分叉（PreferencesStore=$_PS_MODE_VAL / PerformancePolicy=$_PP_MODE_VAL）" >&2; exit 1; }
+# ── 设置页文案必须是白话，不得回退成专业术语（第 47 轮用户要求）──
+# 原话：「他现在太像专业术语了，而不是像随便拎一个普通初中生或者是小学生就能使用的工具」。
+# 断言两层：① 档位标签用白话；② 行标题/说明里不得再出现裸露的「强度/热链」这类词。
+grep -q 'segmentedControlWithLabels:@\[@"一般", @"带完整页面", @"不带说明", @"跨站也带"\]' \
+    "$ROOT/App/ResourceDetectorApp.m" \
+  || { echo "FAIL: Referer 档位标签不是白话（应为一一般/带完整页面/不带说明/跨站也带）" >&2; exit 1; }
+grep -q 'addRow(@"来源说明（Referer）"' "$ROOT/App/ResourceDetectorApp.m" \
+  || { echo "FAIL: 该行标题应为「来源说明（Referer）」而非专业术语" >&2; exit 1; }
+grep -q '你是从哪一页点进来的' "$ROOT/App/ResourceDetectorApp.m" \
+  || { echo "FAIL: 该行说明缺白话解释" >&2; exit 1; }
+! grep -q 'addRow(@"Referer 强度"' "$ROOT/App/ResourceDetectorApp.m" \
+  || { echo "FAIL: 仍在用「Referer 强度」这种术语做行标题" >&2; exit 1; }
+
+# ── 单实例门必须存在（第 46 轮补回）──
+# 历史：第 20 轮的单实例闭环住在 src/Helpers/，第 43 轮剥离追更时整目录被删，
+# 主 App 从此可并存两个进程（实测 `open -n` 成功）。本断言守住它不被再次丢掉。
+grep -q 'single-instance.lock' "$ROOT/App/ResourceDetectorApp.m" \
+  || { echo "FAIL: 缺少单实例锁（open -n 会并存两个进程写同一份偏好与下载记录）" >&2; exit 1; }
+grep -q 'flock(lockFD, LOCK_EX | LOCK_NB)' "$ROOT/App/ResourceDetectorApp.m" \
+  || { echo "FAIL: 单实例锁未用 flock 独占（拿不到锁必须判为已有实例）" >&2; exit 1; }
+grep -q 'RD_ALLOW_MULTI_INSTANCE' "$ROOT/App/ResourceDetectorApp.m" \
+  || { echo "FAIL: 缺 RD_ALLOW_MULTI_INSTANCE 逃生口（套件并行起替身会被误杀）" >&2; exit 1; }
+
+# ── 三种探测模式都必须有 UI 入口（第 46 轮）──
+# 历史问题：Smart / SmartExpansion 在协调器里是完整实现，但设置页只暴露两段
+#（当前页/总站），那两条分支**用户永远走不到** = 死代码。本断言要求三段控件存在，
+# 且映射函数真的把索引 2 映射到 Smart。
+grep -q 'segmentedControlWithLabels:@\[@"当前页", @"总站", @"智能"\]' "$ROOT/App/ResourceDetectorApp.m" \
+  || { echo "FAIL: 探测模式控件缺「智能」档（Smart 分支不可达 = 死代码）" >&2; exit 1; }
+grep -q 'case 2: return ZZResourceDiscoveryModeSmart;' "$ROOT/App/ResourceDetectorApp.m" \
+  || { echo "FAIL: 模式映射未把索引 2 接到 ZZResourceDiscoveryModeSmart" >&2; exit 1; }
+grep -q 'case ZZResourceDiscoveryModeSmart:' "$ROOT/App/ResourceDetectorApp.m" \
+  || { echo "FAIL: RDPreferenceIndexFromMode 未处理 Smart（切档后选中态会错位）" >&2; exit 1; }
+
+# DownloadStore 的已下载键必须与 PreferencesStore 常量**取值一致**。
+# 为什么不用「绑定常量」而用「取值比对」：download-integrity 等套件只编译
+# DownloadStore.m、不链接 PreferencesStore.m，引用 extern 常量会 Undefined symbols
+# （本轮实测踩到并已回退）。故两侧各留字面量，但在这里把「值必须相同」钉死。
+_DS_DONE=$(grep -oE 'kCompletedKey *= *@"[^"]+"' "$ROOT/Features/ResourceDownload/DownloadStore.m" | sed 's/.*@"\(.*\)"/\1/')
+_PS_DONE=$(grep -oE 'SevenZZKeyCompletedResourceURLs *= *@"[^"]+"' "$_PS_M" | sed 's/.*@"\(.*\)"/\1/')
+{ [ -n "$_DS_DONE" ] && [ "$_DS_DONE" = "$_PS_DONE" ]; } \
+  || { echo "FAIL: 已下载键值分叉（DownloadStore=$_DS_DONE / PreferencesStore=$_PS_DONE）" >&2; exit 1; }
+
+echo "PASS: build, universal binary, macOS 13 target, bundle signing, app icon packaged and decodable, machine independence, no radar, view-based rows, slash-line UI with thin progress, download progress, site-mode, TLS trust tolerance, download-row uniform tint, download wiring, and no-dead-preference-key checks"

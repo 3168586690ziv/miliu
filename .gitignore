@@ -46,4 +46,3 @@ secrets.json
 
 # 真实站点语料库（含真实域名与实测数据，不进公开仓库）
 /tests/corpus/
-build/

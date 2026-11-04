@@ -2,23 +2,74 @@
 # make-fixtures.sh — 预览功能测试夹具生成（第 35 轮）
 # 产物：带音轨双档 HLS（明文）+ AES-128 加密单档 + 直链 mp4 + 环回钉选 master
 # 用法：bash tests/fixtures/preview/make-fixtures.sh [输出目录]
-# ffmpeg 探测顺序：MILIU_FFMPEG → 影像站 runtime（完整版）→ PATH → 项目内置（裁剪版不支持 HLS muxer，仅报错兜底）
+#
+# ⚠ 能力要求（第 46 轮修）：本脚本需要**带编码器**的完整 ffmpeg
+#   （libx264 / aac / hls muxer / lavfi 输入）。项目内置的
+#   `resources/Resources/MediaTools/ffmpeg` 是**只读裁剪版**——`-demuxers` 有 hls、
+#   `-muxers` 只有 adts/mp4/mpegts，`-encoders` 与 `-filters` **全空**、无 lavfi 输入，
+#   因此它**永远无法**造夹具。此前脚本只检查 `-muxers | grep " hls "`，报错文案却写
+#   「设 MILIU_FFMPEG 指向完整版」——实测把 MILIU_FFMPEG 指向内置版必然失败，属误导。
+#   现改为按「编码器 + lavfi + hls muxer」三项实测判定，并把内置版明确排除。
+#
+# 退出码约定（第 46 轮新增，供套件分支）：
+#   0 = 夹具生成成功
+#   3 = 环境不具备（找不到带编码器的完整版 ffmpeg）——**降级而非失败**，
+#       调用方应跳过依赖真实媒体的端到端段，纯函数段照常运行。
+#   1 = 真实失败（找到了合适的 ffmpeg 但产物不合格）
 set -euo pipefail
 
 DIR="${1:-$(cd "$(dirname "$0")" && pwd)/build}"
 FF="${MILIU_FFMPEG:-}"
+BUILTIN="$(cd "$(dirname "$0")/../../.." && pwd)/resources/Resources/MediaTools/ffmpeg"
+
+# 判定某 ffmpeg 是否具备造流能力：编码器（h264/aac）+ lavfi 输入 + hls muxer。
+ff_can_encode() {
+  local exe="$1"
+  [ -n "$exe" ] && [ -x "$exe" ] || return 1
+  "$exe" -hide_banner -muxers   2>/dev/null | grep -q " hls "       || return 1
+  "$exe" -hide_banner -demuxers 2>/dev/null | grep -q " lavfi"      || return 1
+  "$exe" -hide_banner -encoders 2>/dev/null | grep -qE " (libx264|h264) " || return 1
+  "$exe" -hide_banner -encoders 2>/dev/null | grep -qE " aac "      || return 1
+  return 0
+}
 
 find_ff() {
-  if [ -n "$FF" ] && [ -x "$FF" ]; then echo "$FF"; return 0; fi
-  local cand="/Volumes/SEVEN/资料库/_sys/seven-影像站/runtime/bin/ffmpeg"
-  [ -x "$cand" ] && { echo "$cand"; return 0; }
-  if command -v ffmpeg >/dev/null 2>&1 && ffmpeg -hide_banner -muxers 2>/dev/null | grep -q " hls "; then
-    command -v ffmpeg; return 0
+  local cand
+  # 1) 显式指定（但必须真能编码，否则给出准确原因而不是让它在后面炸）
+  if [ -n "$FF" ]; then
+    if ff_can_encode "$FF"; then echo "$FF"; return 0; fi
+    echo "WARN: MILIU_FFMPEG=$FF 不具备造流能力（需 hls muxer + lavfi + h264 + aac 四者齐备）" >&2
+    case "$FF" in
+      "$BUILTIN"|*MediaTools/ffmpeg)
+        echo "WARN: 该路径是项目内置只读裁剪版（无编码器、无 lavfi），用它造夹具必然失败——" >&2
+        echo "WARN: 内置版只服务生产合流（demux → -c copy → mp4），不是造流工具。" >&2 ;;
+    esac
   fi
+  # 2) 影像站 runtime（历史完整版）
+  cand="/Volumes/SEVEN/资料库/_sys/seven-影像站/runtime/bin/ffmpeg"
+  ff_can_encode "$cand" && { echo "$cand"; return 0; }
+  # 3) PATH 上的 ffmpeg / ffmpeg-full（Homebrew 常见名）
+  for cand in ffmpeg ffmpeg-full; do
+    cand="$(command -v "$cand" 2>/dev/null || true)"
+    ff_can_encode "$cand" && { echo "$cand"; return 0; }
+  done
+  # 4) Homebrew 常见安装位置（非交互 shell 的 PATH 可能没有）
+  for cand in /opt/homebrew/bin/ffmpeg /usr/local/bin/ffmpeg; do
+    ff_can_encode "$cand" && { echo "$cand"; return 0; }
+  done
   return 1
 }
 
-FF="$(find_ff)" || { echo "FAIL: 找不到带 hls muxer 的完整版 ffmpeg（设 MILIU_FFMPEG 指向完整版）"; exit 1; }
+if ! FF="$(find_ff)"; then
+  cat >&2 <<'MSG'
+SKIP: 找不到带编码器的完整版 ffmpeg，无法生成预览夹具（环境缺失，非产品缺陷）。
+      需要：hls muxer + lavfi 输入 + h264 编码器 + aac 编码器。
+      安装任一即可：brew install ffmpeg
+      或设 MILIU_FFMPEG=/path/to/full-ffmpeg
+      注意：项目内置 resources/Resources/MediaTools/ffmpeg 是只读裁剪版，不能用于造流。
+MSG
+  exit 3
+fi
 
 rm -rf "$DIR"
 mkdir -p "$DIR"

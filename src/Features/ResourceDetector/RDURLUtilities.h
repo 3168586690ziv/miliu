@@ -316,6 +316,73 @@ static inline BOOL RDIsManifestExtension(NSString *ext) {
     return [ext isEqualToString:@"m3u8"] || [ext isEqualToString:@"mpd"];
 }
 
+// ── HLS/DASH 分片识别（第 47 轮：修「一个视频被拆成几十个碎片」）──
+// 现象：HLS 播放时 hls.js 会逐个 fetch 分片（seg-000.ts、seg-001.ts…）。
+// 动态腿把每个分片的请求都当成独立媒体上报，列表里于是出现几十上百个「视频」，
+// 点任何一个下载到的都只是一个片段（用户实测 jav.guru 上就是这样）。
+// 判据必须同时满足两条「结构性」条件，不依赖具体站点的命名习惯：
+//   ① 扩展名是分片形态：.ts / .m4s（HLS 分片；.m4s 也可能是 fMP4 分片）；
+//   ② 文件名主干**末尾带纯数字序号**（seg-000 / chunk_12 / 3 / out5 …），
+//      或主干本身就是纯数字。
+// 刻意**不**把裸 .ts 一律当分片：项目既有用例要求 `ep01.ts`（整段 MPEG-TS 直链）
+// 与 `live.ts` 必须能被发现，那是真正的媒体文件。它们的主干末尾虽也可能带数字，
+// 但下述 `RDIsHLSPlaylistFragment` 还要求「同一批里存在清单」才判分片——
+// 单独出现的 .ts 永远不当分片。
+static inline BOOL RDIsSegmentExtension(NSString *ext) {
+    return [ext isEqualToString:@"ts"] || [ext isEqualToString:@"m4s"];
+}
+
+// 文件名主干是否呈「序号尾缀」形态：out5 / seg-000 / chunk_12 / a_1 / 0
+static inline BOOL RDSegmentStemHasOrdinalTail(NSString *stem) {
+    if (!stem.length) return NO;
+    NSUInteger n = stem.length, i = n;
+    while (i > 0) {
+        unichar c = [stem characterAtIndex:i - 1];
+        if (c >= '0' && c <= '9') { i--; continue; }
+        break;
+    }
+    if (i == n) return NO;                 // 末尾没有数字
+    if (i == 0) return YES;                // 整段都是数字：0 / 12 / 000
+    unichar sep = [stem characterAtIndex:i - 1];
+    // 序号前必须是**明确的分隔符**（- _ . =），不能只是「字母紧接数字」。
+    // 反例（必须留住）：ep01 / live1 / ep1080 —— 这些是完整的整段媒体文件名，
+    //   字母与数字连写属作品编号，不是「段序号」；早期实现把字母也算作边界，
+    //   导致 ep01.ts 被判成分片（自测当场抓到，已收紧）。
+    // 正例：seg-000 / chunk_12 / part.3 / out=5 / 0
+    return sep == '-' || sep == '_' || sep == '.' || sep == '=';
+}
+
+// 该 URL 是否「看起来像 HLS/DASH 分片」：只看 URL 自身形态，不看上下文。
+// 注意：这是**必要不充分**条件。真正判定还要结合「同批是否存在清单」，
+// 由 RDIsHLSPlaylistFragment 完成——单独的 .ts 直链不得被它否掉。
+static inline BOOL RDURLResemblesSegment(NSURL *url) {
+    if (!url) return NO;
+    NSString *ext = url.path.pathExtension.lowercaseString ?: @"";
+    if (!RDIsSegmentExtension(ext)) return NO;
+    NSString *stem = url.path.lastPathComponent.stringByDeletingPathExtension ?: @"";
+    return RDSegmentStemHasOrdinalTail(stem);
+}
+
+// 完整判据：segmentURL 是否应被当作「某个清单的分片」而不是独立媒体。
+// manifestURLs 是同一批发现里已出现的清单地址集合。
+//   · 同 host 且目录前缀相同（分片与清单同目录，这是 HLS 的常规布局）；
+//   · 该 URL 自身呈分片形态。
+// 两条同时成立才判为分片。任一不满足（例如跨域分片、或压根没有清单）→ 保留为媒体。
+static inline BOOL RDIsHLSPlaylistFragment(NSURL *segmentURL,
+                                           NSArray<NSURL *> *manifestURLs) {
+    if (!RDURLResemblesSegment(segmentURL)) return NO;
+    if (!manifestURLs.count) return NO;          // 没有清单在场：不敢判分片
+    NSString *host = segmentURL.host.lowercaseString ?: @"";
+    NSString *dir = segmentURL.URLByDeletingLastPathComponent.absoluteString ?: @"";
+    for (NSURL *m in manifestURLs) {
+        if (!m) continue;
+        if (![m.host.lowercaseString ?: @"" isEqualToString:host]) continue;
+        NSString *mdir = m.URLByDeletingLastPathComponent.absoluteString ?: @"";
+        if (mdir.length && [mdir isEqualToString:dir]) return YES;
+    }
+    return NO;
+}
+
 static inline BOOL RDSameQualityVariantFamily(NSString *urlA, NSString *urlB) {
     NSURL *ua = [NSURL URLWithString:urlA ?: @""];
     NSURL *ub = [NSURL URLWithString:urlB ?: @""];

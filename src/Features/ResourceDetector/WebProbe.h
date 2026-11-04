@@ -49,6 +49,10 @@ NS_ASSUME_NONNULL_BEGIN
 // 清单与直链（同媒体 ID 前缀 ≥2 段）同族。已有 videoFamilyID 的成员不动。
 // 分桶实现（O(n)），大页面不退化成 O(n²)。
 + (void)groupQualityVariantFamilies:(NSMutableArray<DetectedMedia *> *)ordered;
+// HLS/DASH 分片收口（第 47 轮）：本组存在清单时，把它的分片（同 host 同目录、
+// 文件名呈序号尾缀的 .ts/.m4s）从结果里剔除，清单本身保留。
+// 单独的 .ts 直链（无清单在场）不受影响。
++ (void)dropPlaylistFragments:(NSMutableArray<DetectedMedia *> *)ordered;
 // 纯函数：URL → 归一化格式名（mp4/webm/hls/dash/mkv/ts/mp3/flac/…；不认识返回 unknown）。
 + (NSString *)formatFromURL:(NSString *)url;
 // 纯函数：该格式是否属于可下载媒体（视频/清单/音频统一白名单）。静态腿各路径共用。
@@ -73,6 +77,12 @@ NS_ASSUME_NONNULL_BEGIN
                           completion:(void (^)(NSString * _Nullable html, AppError * _Nullable error))completion;
 // 任意线程可调：异步失效当前在途任务（不触发其 completion），主线程停止加载。
 - (void)cancelActiveLoad;
+// 任意线程可调：在**放弃任务之前**尽量抢救已渲染的 DOM（第 47 轮）。
+// 背景：部分站点被广告脚本拖慢，load 事件 60s+ 才到，硬超时先触发；但此时
+// DOM 里往往已经有播放器与清单地址，直接判超时等于白等一场。
+// 实现方应停止加载并取一次 outerHTML，回调在主线程；取不到就回调 nil。
+// 超时路径调用它：拿到 HTML 就按**成功**收尾，拿不到才报超时。
+- (void)salvageRenderedHTMLWithCompletion:(void (^_Nullable)(NSString * _Nullable html))completion;
 @end
 
 #pragma mark - 给 ViewModel 的探测入口（含 generation）

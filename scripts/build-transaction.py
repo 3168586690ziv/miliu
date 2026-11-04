@@ -13,6 +13,7 @@ from contextlib import contextmanager
 import fcntl
 import os
 from pathlib import Path
+import shutil
 import signal
 import stat
 import subprocess
@@ -77,7 +78,11 @@ def transaction(root, extra_paths=()):
             (evidence / 'status.txt').write_text('FAILED: version state restored\n')
             raise
         else:
-            (evidence / 'status.txt').write_text('SUCCESS\n')
+            # 成功路径必须清理证据目录：失败证据才是要保留的取证材料，成功快照
+            # 没有任何价值。此前无条件保留 SUCCESS 目录，实测累积 216 个
+            # （共 236 个 version-transaction-*，7.6MB）——每次构建都留一份永不
+            # 清理的目录，属无界增长。失败路径（except 分支）照旧完整保留。
+            shutil.rmtree(evidence, ignore_errors=True)
 
 
 def main():

@@ -304,6 +304,14 @@ static BOOL SLEPathHasExcludedSegment(NSString *path,
         regularExpressionWithPattern:@"<a\\b[^>]*?\\s+href\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)')"
                              options:NSRegularExpressionCaseInsensitive
                                error:nil];
+    // 内嵌框架候选（第 47 轮）：部分站点把播放器放进 <iframe>（jav.guru 的
+    // 「STREAM xx」按钮最终就是往页面里插一个 iframe）。只取**静态写出**的
+    // src —— JS 动态插入的 iframe 静态腿看不到，那属于动态腿的职责。
+    // 与 <a href> 走同一套绝对化 / 同源 / 去重 / 凭据过滤规则，不另立口径。
+    NSRegularExpression *iframeRe = [NSRegularExpression
+        regularExpressionWithPattern:@"<iframe\\b[^>]*?\\s+src\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)')"
+                             options:NSRegularExpressionCaseInsensitive
+                               error:nil];
     if (!hrefRe) return @[];
 
     // 种子页自身的规范化 key（种子页不是候选子页面）
@@ -357,6 +365,34 @@ static BOOL SLEPathHasExcludedSegment(NSString *path,
         [seenKeys addObject:key];
         [results addObject:normalized];
     }];
+
+    // iframe src：与上面完全相同的绝对化/同源/去重/凭据规则（第 47 轮）。
+    // 只处理静态写出的 src；JS 动态插入的 iframe 交由动态腿。
+    if (iframeRe && results.count < maxCount) {
+        [iframeRe enumerateMatchesInString:html
+                                   options:0
+                                     range:NSMakeRange(0, html.length)
+                                usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
+            if (results.count >= maxCount) { *stop = YES; return; }
+            NSRange vr = [match rangeAtIndex:1];
+            if (vr.location == NSNotFound) vr = [match rangeAtIndex:2];
+            if (vr.location == NSNotFound) return;
+            NSString *rawv = SLEDecodeBasicEntities([html substringWithRange:vr]);
+            if (rawv.length == 0) return;
+            NSURL *res = [NSURL URLWithString:rawv relativeToURL:baseURL];
+            if (!res) return;
+            NSString *sch = res.scheme.lowercaseString;
+            if (![sch isEqualToString:@"http"] && ![sch isEqualToString:@"https"]) return;
+            if (res.host.length == 0) return;
+            if (res.user.length > 0 || res.password.length > 0) return;
+            NSURL *norm = SLEURLByStrippingFragment(res);
+            if (!norm) return;
+            NSString *k = SLEDedupKeyForURL(norm);
+            if (k.length == 0 || [k isEqualToString:seedKey] || [seenKeys containsObject:k]) return;
+            [seenKeys addObject:k];
+            [results addObject:norm];
+        }];
+    }
 
     return [results array];
 }

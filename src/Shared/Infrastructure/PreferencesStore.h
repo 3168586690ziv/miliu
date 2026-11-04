@@ -8,41 +8,17 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-// ── 偏好键常量（来源：Docs/Baseline/USER_DATA_MAP.md）──
+// ── 偏好键常量 ──
+// 历史来源文档 Docs/Baseline/USER_DATA_MAP.md 已不存在（2026-10-26 核实），
+// 故不再引用。键的权威定义就是本文件 + 实现文件里的字符串值；新增/删除键时
+// 必须同步 allKeySpecs（见文件末尾），否则审计断言会失败。
 extern NSString *const SevenZZKeyPerformanceMode;
-extern NSString *const SevenZZKeyAppTheme;
-extern NSString *const SevenZZKeyWhiteInterfaceRefreshV1;
-extern NSString *const SevenZZKeySourceURLBookmark;
-extern NSString *const SevenZZKeyConversionOutputURLBookmark;
-extern NSString *const SevenZZKeyLastMainPage;
-extern NSString *const SevenZZKeyLastWorkspace;
-extern NSString *const SevenZZKeyDeltaNativePayloadJSON;
-extern NSString *const SevenZZKeyDeltaNativePayloadRefreshedAt;
-extern NSString *const SevenZZKeyDeltaProfitSnapshot;
-extern NSString *const SevenZZKeyDeltaNativePayloadDay;
-extern NSString *const SevenZZKeyDeltaFavoriteItems;
-extern NSString *const SevenZZKeyMarketIndex;
-extern NSString *const SevenZZKeyMarketRange;
-extern NSString *const SevenZZKeyMarketIntradayDefaultV1;
-extern NSString *const SevenZZKeyMarketRangeOrderV2;
-extern NSString *const SevenZZKeyMarketCacheNdx;
-extern NSString *const SevenZZKeyMarketCacheNdxUpdated;
-extern NSString *const SevenZZKeyMarketCacheSpx;
-extern NSString *const SevenZZKeyMarketCacheSpxUpdated;
 extern NSString *const SevenZZKeyCompletedResourceURLs;
-extern NSString *const SevenZZKeyResourceSelectAllScope;
 extern NSString *const SevenZZKeyResourceDownloadDestination;
 extern NSString *const SevenZZKeyResourceDownloadCustomDirectory;   // 2026-09-03 自选下载目录（U 盘等）
 extern NSString *const SevenZZKeyMainPaneRatio;                    // 主界面左右栏比例：0=3:7，1=2:8，2=2.5:7.5
 extern NSString *const SevenZZKeyProbeMode;                       // 探测模式：0=当前页，1=总站
 extern NSString *const SevenZZKeySitePages;                       // 总站模式页数（正整数，默认 3）
-extern NSString *const SevenZZKeyLastMood;
-extern NSString *const SevenZZKeyLastMoodLabel;
-extern NSString *const SevenZZKeyRecentMoodQuoteIDs;
-extern NSString *const SevenZZKeyMoodHistoryRecords;
-extern NSString *const SevenZZKeyMoodHistoryDeletedSnapshot;
-extern NSString *const SevenZZKeyMoodHistoryDeletedSnapshotDate;
-extern NSString *const SevenZZKeySchemaVersion;
 extern NSString *const SevenZZKeyDisplayMetadataHistory;   // 展示元数据历史（按来源页存标题/封面，防 token 刷新后退化；第 38 轮接线）
 extern NSString *const SevenZZKeyRefererMode;              // Referer 强度：0=仅 origin（默认），1=完整来源页 URL，2=不发
 
@@ -100,6 +76,10 @@ typedef NS_ENUM(NSInteger, SevenZZPreferenceType) {
 
 // 全量键规范（用于审计与迁移）
 + (NSArray<SevenZZPreferenceKeySpec *> *)allKeySpecs;
+
+// 键规范自检：返回规格表与「真实在用键集合」两个方向的全部偏差
+// （登记但无消费者 / 在用但未登记）。空数组 = 一致。
++ (NSArray<NSString *> *)specAuditAgainstLiveKeys:(NSSet<NSString *> *)liveKeys;
 
 @end
 

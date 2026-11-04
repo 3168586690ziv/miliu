@@ -3,7 +3,15 @@
 #import "StaticHTMLDiscoveryPageProbe.h"
 #import "ProductionDiscoveryHTMLProvider.h"
 #import "RDNetworkValidation.h"
+#import "RDURLUtilities.h"
 @interface RDHybridContext : NSObject
+// ctx 强持有发起探测的 probe（第 47 轮修 90s 超时）。
+// 背景：动态腿的 completion 里用 `__weak` 取 owner，等它几秒后回来时 owner 已被释放，
+// 于是 `if(callbackOwner) [callbackOwner finishIfBothLegsDone:ctx];` **整句被跳过**——
+// 两腿其实都成功了（实测 2 秒拿到 133KB 页面、4 条媒体），但永远没人收尾，
+// 调用方等满 90s 拿到「超时无结果」。ctx 本来就活到收尾，让它强持有 probe 即可，
+// 不引入循环引用（publish final:YES 会把 ctx 从 contexts 移除，随后一起释放）。
+@property (nonatomic, strong) id ownerProbe;
 @property BOOL cancelled;
 @property BOOL hasDynamicSlot;
 @property WebProbe *dynamic;
@@ -65,6 +73,7 @@
     dispatch_async(dispatch_get_main_queue(),^{
         if(ctx.cancelled)return;
         [self.contexts addObject:ctx];
+        ctx.ownerProbe = self;   // 见 RDHybridContext 注释：保证回调期 owner 存活
         // ── 腿 1：静态 HTML 取页（纯 HTTP）──
         ctx.staticToken=[self.statik probePageURL:url completion:^(NSArray *media,NSError *error){
             if(ctx.cancelled)return;
@@ -136,6 +145,9 @@
                         if(callbackOwner) [callbackOwner pump];
                         if(ctx.cancelled)return;
                         ctx.dynamicResult=result;ctx.dynamicError=dynamicError;ctx.dynamicDone=YES;
+                        RDLogWrite(@"probe", @"动态腿完成 done=%d 结果=%lu 消费端=%d",
+                                   (int)ctx.dynamicDone, (unsigned long)(result.media.count),
+                                   (int)(ctx.completion != nil));
                         if(callbackOwner) [callbackOwner finishIfBothLegsDone:ctx];
                     });
                 }];
@@ -149,9 +161,16 @@
 // 绝不能让先到的“信息更少”的条目顶掉静态侧的 family 与画质声明——否则同一
 // 影片会以两行出现，且选中那行没有 poster，详情只能走视频抽帧而变慢。
 - (void)finishIfBothLegsDone:(RDHybridContext *)ctx {
+    RDLogWrite(@"probe", @"finishIfBothLegsDone 进入 cancelled=%d hasConsumer=%d",
+               (int)ctx.cancelled, (int)[self contextHasConsumer:ctx]);
     if(ctx.cancelled || ![self contextHasConsumer:ctx])return;
-    if(!ctx.staticDone || !ctx.dynamicDone)return;
+    if(!ctx.staticDone || !ctx.dynamicDone){
+        RDLogWrite(@"probe", @"收尾等待 staticDone=%d dynamicDone=%d", (int)ctx.staticDone, (int)ctx.dynamicDone);
+        return;
+    }
+    RDLogWrite(@"probe", @"收尾开始：两腿均完成，准备合并");
     NSArray *merged=[self mergedMediaForContext:ctx];
+    RDLogWrite(@"probe", @"收尾合并完成 media=%lu", (unsigned long)merged.count);
     AppError *dynamicError=ctx.dynamicError;
     BOOL staticBad = [ctx.staticError.domain isEqual:ZZResourceDiscoveryErrorDomain] && ctx.staticError.code == ZZResourceDiscoveryErrorUnrecognizedPage;
     BOOL dynamicBad = ctx.dynamicResult.isBadPage;
@@ -177,7 +196,28 @@
     NSMutableArray *merged=[NSMutableArray array];
     NSMutableDictionary<NSString *,NSNumber *> *indexByKey=[NSMutableDictionary dictionary];
     NSArray *dynamicMedia=ctx.dynamicResult.media ?: @[];
-    for(DetectedMedia *m in [dynamicMedia arrayByAddingObjectsFromArray:ctx.staticMedia]){
+    NSArray *allMedia=[dynamicMedia arrayByAddingObjectsFromArray:ctx.staticMedia];
+    // ── HLS/DASH 分片收口（第 47 轮：一个视频被拆成几十个碎片的根因修复）──
+    // 播放 HLS 时 hls.js 逐片 fetch（seg-000.ts、seg-001.ts…），动态腿把每个分片
+    // 请求都当独立媒体上报 → 列表出现几十上百个「视频」，点任何一个下载到的只是片段。
+    // 收口规则：本批若存在清单，则把「与清单同 host 同目录、且文件名呈序号尾缀」的
+    // 分片整体剔除；清单本身（m3u8/mpd）保留，用户点它下载的是完整流。
+    // 单独的 .ts 直链（无清单在场）**不受影响**，仍是合法媒体。
+    NSMutableArray<NSURL *> *manifestURLs=[NSMutableArray array];
+    for(DetectedMedia *m in allMedia){
+        NSString *ext=[[NSURL URLWithString:m.mediaURL ?: @""].path.pathExtension.lowercaseString copy];
+        if(ext.length && RDIsManifestExtension(ext)){
+            NSURL *u=[NSURL URLWithString:m.mediaURL];
+            if(u) [manifestURLs addObject:u];
+        }
+    }
+    NSUInteger droppedFragments=0;
+    for(DetectedMedia *m in allMedia){
+        if(manifestURLs.count
+           && RDIsHLSPlaylistFragment([NSURL URLWithString:m.mediaURL ?: @""], manifestURLs)){
+            droppedFragments++;
+            continue;   // 分片：不进入结果列表（清单才是完整视频）
+        }
         // 用"同一资源"身份（忽略 CDN 签名参数）合并：两次取页的签名不同，
         // 但资源是同一个。
         NSString *key=[DetectedMedia groupingKeyForURL:m.mediaURL];
@@ -191,11 +231,19 @@
         indexByKey[key]=@(merged.count);
         [merged addObject:m];
     }
+    if(droppedFragments>0){
+        RDLogWrite(@"probe", @"分片收口 清单=%lu 剔除分片=%lu 保留媒体=%lu",
+                   (unsigned long)manifestURLs.count, (unsigned long)droppedFragments,
+                   (unsigned long)merged.count);
+    }
     return merged;
 }
 // 发布一次结果。final=NO 时保留消费者（稍后还会发布动态腿合并后的最终结果，
 // 调用方必须按「更新」而非「结论」处理）；final=YES 时消费回调并释放上下文。
 - (void)publish:(RDHybridContext *)ctx media:(NSArray *)media error:(NSError *)error final:(BOOL)isFinal {
+    RDLogWrite(@"probe", @"publish final=%d media=%lu cancelled=%d inc=%d one=%d",
+               (int)isFinal, (unsigned long)media.count, (int)ctx.cancelled,
+               (int)(ctx.incrementalCompletion != nil), (int)(ctx.completion != nil));
     if(ctx.cancelled)return;
     void (^incremental)(NSArray *,NSError *,BOOL)=ctx.incrementalCompletion;
     void (^oneShot)(NSArray *,NSError *)=ctx.completion;
