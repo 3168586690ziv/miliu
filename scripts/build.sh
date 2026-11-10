@@ -80,7 +80,7 @@ codesign --force --sign - "$OUT/Contents/Resources/MediaTools/ffmpeg"
 # 稳定身份签名（优先）：固定证书让 TCC 授权（辅助功能等）跨构建仍有效；
 # 正式身份下启用 hardened runtime + 最小 entitlements（JIT/网络客户端/用户自选文件读写）。
 # 证书不存在时回退 ad-hoc（每次重建授权失效）。
-SIG_ID="$(security find-identity -p codesigning -v 2>/dev/null | grep 'SevenZZDev' | awk '{print $2}' | head -1)"
+SIG_ID="$(security find-identity -p codesigning -v 2>/dev/null | grep 'SevenZZDev' | awk '{print $2}' | head -1 || true)"
 ENTITLEMENTS="$SRCROOT/Packaging/ResourceDetector.entitlements"
 if [ -n "$SIG_ID" ]; then
   codesign --force --deep --options runtime --entitlements "$ENTITLEMENTS" --sign "$SIG_ID" "$OUT"

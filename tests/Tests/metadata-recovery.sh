@@ -6,7 +6,7 @@
 #   ② 静态：App 层确实调用了这些接线点（否则组件仍可能「代码里写了、运行时走不到」）。
 # 无网络、无窗口、无 NSApplication。
 set -euo pipefail
-REPO="$(cd "$(dirname "$0")/../.." && pwd)"; ROOT="$REPO/src"; OUT="$REPO/build/metadata-recovery-tests"
+REPO="$(cd "$(dirname "$0")/../.." && pwd)"; ROOT="$REPO/src"; OUT="${RD_METADATA_OUT:-$REPO/build/metadata-recovery-tests}"
 mkdir -p "$OUT"
 # 日志隔离：本测试驱动生产类（含 RDLog 调用），绝不能污染用户真实日志。
 export RD_LOG_PATH="$OUT/test-ResourceDetector.log"
@@ -31,7 +31,12 @@ if grep -E "error:|warning:" "$OUT/compile.log" >/dev/null; then
   cat "$OUT/compile.log"; echo "FAIL: MetadataRecoveryTests 编译失败"; exit 1
 fi
 
-"$OUT/MetadataRecoveryTests"
+RD_TITLE_TRANSLATION_NETWORK=0 "$OUT/MetadataRecoveryTests"
+# Each configuration is a fresh process; no production preference is read/written.
+env -u RD_TITLE_TRANSLATION_NETWORK "$OUT/MetadataRecoveryTests" --translation-permission
+for permission in 1 0 true yes 01 ' 1'; do
+  RD_TITLE_TRANSLATION_NETWORK="$permission" "$OUT/MetadataRecoveryTests" --translation-permission
+done
 
 # ── 静态接线断言：三个组件在生产代码里必须有真实调用点 ──
 # 若将来有人把接线拆掉，组件会重新变回「代码完整但永不执行」，这里必须变红。

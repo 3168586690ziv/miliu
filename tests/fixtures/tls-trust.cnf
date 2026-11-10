@@ -1,0 +1,13 @@
+# Offline self-signed fixture. Its key is generated under build/, never a user keychain.
+[req]
+distinguished_name = dn
+x509_extensions = fixture
+prompt = no
+[dn]
+CN = good.tls.fixture
+[fixture]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,digitalSignature,keyEncipherment,keyCertSign
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:good.tls.fixture
+subjectKeyIdentifier = hash

@@ -8,7 +8,14 @@
 //  安全契约（两条链共用，绝不可绕）：
 //    · 不加 -L 盲跟：每一跳先做与原生传输同一策略的校验（URLPolicy 文本校验 +
 //      DNS 解析后全 IP 校验），再独立起一个 curl 进程；
-//    · 进程用 argv 数组直传（无 shell 拼接），请求头经 -H 逐个透传；
+//    · 仅支持匿名请求：含 Cookie / Authorization / Proxy-Authorization 的输入
+//      （含空值、不区分大小写）在建文件/argv 前拒绝；不支持认证 curl；
+//    · 进程用 argv 数组直传（无 shell 拼接），匿名头经 -H 逐个透传；每跳按
+//      当前有效上一跳净化 Referer，不恢复已剥离的完整来源；
+//    · 本接口只有 headers，看不到 NSURLRequest 的内存 native-only 标记，
+//      接收该标记的请求包装层必须先拒绝回退，见 RDNativeOnlyRequest.h；
+//    · 匿名响应头仍临时落盘，可能含 Set-Cookie；URL 签名仍在 argv，并非
+//      所有秘密都已改成内存管道（认证请求不得借这条腿传输）；
 //    · 响应体只认本跳临时文件，超出预算判 BudgetExceeded；
 //    · curl 层失败（DNS/连接/超时/不可执行）返回 Unresolved，由调用方决定是否
 //      保留原生结果——引擎绝不伪造成功。

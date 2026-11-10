@@ -22,8 +22,8 @@
 //       一律照常拒绝，绝不放行。
 //    3. 放行前额外用 SecCertificateCopyDNSNames 手工复核 SAN 是否涵盖目标
 //       host（不依赖评估器给不给 hostname error），双保险。
-//    4. 放行必须显式开关（偏好键 SevenZZKeyAllowRevokedCertificate，默认开），
-//       关掉即回到严格模式。
+//    4. 放行必须显式开启（偏好键 SevenZZKeyAllowRevokedCertificate，默认关），
+//       未配置或关闭均使用系统严格信任。
 //    5. 每次放行都写日志（含 host 与判定依据），可追溯。
 //
 //  为什么是 header-only：本层要被 App 层（元数据/下载回退传输）与 Features 层
@@ -43,7 +43,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// 容错开关的偏好键（默认开）。关掉即严格模式，仅用于排查与回归对照。
+/// 容错开关的偏好键。缺省严格；只有显式开启才允许既有窄容错。
 static NSString * const RDTLSAllowRevokedCertificateKey = @"SevenZZKeyAllowRevokedCertificate";
 
 /// 评估结论。
@@ -53,12 +53,20 @@ typedef NS_ENUM(NSInteger, RDTLSTrustVerdict) {
     RDTLSTrustVerdictReject,          ///< 拒绝（含容错关闭、非吊销类失败）
 };
 
-/// 容错是否开启。读标准偏好，缺省视为**开**（该站不可用是主人的实测报障）。
-/// 测试要切严格模式时直接改这个偏好键即可（测试进程独立，不污染用户偏好）。
+/// 隔离配置入口：仅明确真值开启；缺失、畸形值均严格拒绝容错。
+/// NSNumber 1 与常用偏好字符串 YES/true/1 兼容；不把任意非零数字当许可。
+static inline BOOL RDTLSAllowRevokedCertificateForValue(id _Nullable value) {
+    if ([value isKindOfClass:NSNumber.class]) return [value doubleValue] == 1.0;
+    if ([value isKindOfClass:NSString.class]) {
+        NSString *text = [value lowercaseString];
+        return [@[@"yes", @"true", @"1"] containsObject:text];
+    }
+    return NO;
+}
+
+/// 真实调用仍读现有偏好键，但不写偏好；测试直接注入值或替换读取边界。
 static inline BOOL RDTLSAllowRevokedCertificateEnabled(void) {
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    if ([ud objectForKey:RDTLSAllowRevokedCertificateKey] == nil) return YES;
-    return [ud boolForKey:RDTLSAllowRevokedCertificateKey];
+    return RDTLSAllowRevokedCertificateForValue([[NSUserDefaults standardUserDefaults] objectForKey:RDTLSAllowRevokedCertificateKey]);
 }
 
 /// 从系统错误里取出「出错的是链上第几张证书」。
@@ -304,8 +312,10 @@ static inline BOOL RDTLSTrustHostCoveredByCertificate(SecTrustRef _Nullable trus
 /// 统一评估：给 NSURLSession 的挑战处理用。返回结论并（放行时）填充理由。
 /// 调用方在 RDTLSTrustVerdictUseDefault 时应当走 `PerformDefaultHandling`，
 /// 在 AcceptRevoked 时用 `credentialForTrust:` 放行，在 Reject 时取消挑战。
-static inline RDTLSTrustVerdict RDTLSEvaluateServerTrust(SecTrustRef _Nullable trust,
+/// 显式配置入口供隔离测试使用，SecTrust/SAN/leaf/index 判据与真实调用共用。
+static inline RDTLSTrustVerdict RDTLSEvaluateServerTrustWithRevocationAllowed(SecTrustRef _Nullable trust,
                                                          NSString *_Nullable host,
+                                                         BOOL allowRevoked,
                                                          NSString *_Nullable *_Nullable reason) {
     if (!trust) return RDTLSTrustVerdictReject;
     CFErrorRef cfError = NULL;
@@ -317,7 +327,7 @@ static inline RDTLSTrustVerdict RDTLSEvaluateServerTrust(SecTrustRef _Nullable t
     // 的归属（它会把中间证书的吊销错误写到第 0 项、title 记成 leaf）。
     NSError *trustError = cfError ? (__bridge_transfer NSError *)cfError : nil;
     NSString *failure = trustError.localizedDescription;
-    if (!RDTLSAllowRevokedCertificateEnabled()) {
+    if (!allowRevoked) {
         if (reason) *reason = [NSString stringWithFormat:@"严格模式：%@", failure ?: @"证书不受信任"];
         return RDTLSTrustVerdictReject;
     }
@@ -333,6 +343,12 @@ static inline RDTLSTrustVerdict RDTLSEvaluateServerTrust(SecTrustRef _Nullable t
     }
     if (reason) *reason = [NSString stringWithFormat:@"%@（域名匹配已复核，按容错放行）", why];
     return RDTLSTrustVerdictAcceptRevoked;
+}
+
+static inline RDTLSTrustVerdict RDTLSEvaluateServerTrust(SecTrustRef _Nullable trust,
+                                                         NSString *_Nullable host,
+                                                         NSString *_Nullable *_Nullable reason) {
+    return RDTLSEvaluateServerTrustWithRevocationAllowed(trust, host, RDTLSAllowRevokedCertificateEnabled(), reason);
 }
 
 /// 挑战处理一键封装。返回 YES 表示已接管（调用方不要再调用默认处理），

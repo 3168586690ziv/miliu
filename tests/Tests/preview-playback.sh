@@ -1,112 +1,88 @@
 #!/bin/bash
-# preview-playback.sh — 预览播放专项（第 35 轮）
-# 结构：判定纯函数测试（子智能体 A）+ 钉选改写纯函数测试（子智能体 C）
-#       + 夹具生成与服务器自检 + 端到端段（TODO：主智能体波次 2 填充）
+# Real-controller, no-window, muted AVPlayer preview acceptance. Never builds/starts App.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"; ROOT="$REPO/src"
-OUT="$REPO/build/preview-tests"
+OUT="${RD_PREVIEW_OUT:-$REPO/build/preview-tests}"
 FIX="$REPO/tests/fixtures/preview"
-RD="${RD_LOG_PATH:-$OUT/test.log}"
-
-export RD_LOG_PATH="$OUT/test.log"
 mkdir -p "$OUT"
 exec > >(tee "$OUT/test.log") 2>&1
-PORT="${PREVIEW_PORT:-8911}"
-
-compile_component() { # $1=测试名 $2=Tests.m $3=其余 .m 文件列表…
-  local name="$1" test_m="$2"; shift 2
-  local bin="$OUT/$name"
-  xcrun clang -fobjc-arc -g -O1 -mmacosx-version-min=13.0 \
-    -framework Foundation -framework AVFoundation -framework CoreMedia -framework Security \
-    -I"$ROOT/Features/ResourceDetector" -I"$ROOT" \
-    "$REPO/$test_m" "$@" \
-    -o "$bin" > "$OUT/$name.compile.log" 2>&1 || return 1
-  if grep -E "error:|warning:" "$OUT/$name.compile.log" >/dev/null; then
-    cat "$OUT/$name.compile.log"; return 1
-  fi
-  return 0
+stage=setup; SRV_PID=""
+cleanup() {
+  if [ -n "$SRV_PID" ]; then kill "$SRV_PID" 2>/dev/null || true; wait "$SRV_PID" 2>/dev/null || true; fi
 }
-
-echo "== 预览套件（第 35 轮）=="
-
-# ── 段 1：判定纯函数（RDPreviewEligibility，子智能体 A 产出）──
-if [ -f "$REPO/tests/Tests/PreviewEligibilityTests.m" ] && [ -f "$ROOT/Features/ResourceDetector/RDPreviewEligibility.m" ]; then
-  if compile_component PreviewEligibilityTests tests/Tests/PreviewEligibilityTests.m \
-       "$ROOT/Features/ResourceDetector/RDPreviewEligibility.m" \
-       "$ROOT/Features/ResourceDetector/DetectedMedia.m"; then
-    "$OUT/PreviewEligibilityTests"
-  else
-    echo "FAIL: PreviewEligibilityTests 编译失败（不改对方文件，主智能体协调）"; exit 1
-  fi
-else
-  echo "SKIP: PreviewEligibilityTests 未就绪（并行施工中）"
-fi
-
-# ── 段 2：钉选改写纯函数（RDPreviewPlaylistRewrite，子智能体 C 产出）──
-if [ -f "$REPO/tests/Tests/PreviewRewriteTests.m" ] && [ -f "$ROOT/Features/ResourceDetector/RDPreviewPlaylistRewrite.m" ]; then
-  if compile_component PreviewRewriteTests tests/Tests/PreviewRewriteTests.m \
-       "$ROOT/Features/ResourceDetector/RDPreviewPlaylistRewrite.m"; then
-    "$OUT/PreviewRewriteTests"
-  else
-    echo "FAIL: PreviewRewriteTests 编译失败（不改对方文件，主智能体协调）"; exit 1
-  fi
-else
-  echo "SKIP: PreviewRewriteTests 未就绪（并行施工中）"
-fi
-
-# ── 段 3：夹具生成 + 服务器自检 ──
-export PREVIEW_PORT="$PORT"   # pinned-http.m3u8 里的绝对 URL 必须指向本次服务器端口
-# 夹具生成需要带编码器的完整版 ffmpeg。环境缺失时**降级跳过**依赖真实媒体的段，
-# 而不是把环境缺失报成产品缺陷（第 46 轮修：此前必然失败且提示误导）。
-set +e
-bash "$FIX/make-fixtures.sh" "$FIX/build"
-FIX_RC=$?
-set -e
-case "$FIX_RC" in
-  0) ;;
-  3)
-    echo "SKIP: 段 3/4 跳过（本机无带编码器的完整版 ffmpeg，夹具无法生成）"
-    echo "SKIP: 纯函数段已全部通过；依赖真实 HLS/mp4 的端到端段需装 ffmpeg 后复跑"
-    echo "PASS: 预览套件纯函数段全部通过（端到端降级跳过）"
-    exit 0 ;;
-  *)
-    echo "FAIL: 夹具生成失败（exit=$FIX_RC，环境具备造流能力但产物不合格）"; exit 1 ;;
-esac
-
-# ⚠ server.log 必须**每次截断**（第 46 轮修）：段 4 断言「钉选后 480p 零请求」是从本文件数行数，
-#   而 server.py 以追加模式写。任一历史遗留的 480p 请求都会让该断言**永久失败**
-#   （第 43 轮实测：时间戳 23:53:39 的一条旧记录导致 3/3 FAIL）。截断后计数窗口才只含本次。
-: > "$OUT/server.log"
-python3 "$FIX/server.py" --port "$PORT" --root "$FIX/build" --log "$OUT/server.log" > "$OUT/server.stdout" 2>&1 &
-SRV_PID=$!
-cleanup() { kill "$SRV_PID" 2>/dev/null || true; wait "$SRV_PID" 2>/dev/null || true; }
 trap cleanup EXIT
-
-for i in $(seq 1 50); do
-  grep -q "LISTEN $PORT" "$OUT/server.stdout" 2>/dev/null && break
-  [ "$i" = "50" ] && { echo "FAIL: 服务器未就绪"; exit 1; }
+trap 'rc=$?; echo "TEST_RESULT stage=$stage status=FAIL reason=command-exit-$rc"; exit 1' ERR
+result() { echo "TEST_RESULT stage=$1 status=$2 reason=$3"; }
+compile_component() {
+  local name="$1"; shift
+  echo "COMMAND xcrun clang $name (sources: $*)"
+  xcrun clang -fobjc-arc -fblocks -g -O1 -mmacosx-version-min=13.0 \
+    -framework Cocoa -framework AVFoundation -framework CoreMedia -framework Security \
+    -I"$ROOT/Features/ResourceDetector" -I"$ROOT/Shared/Infrastructure" -I"$ROOT" \
+    "$@" -o "$OUT/$name" > "$OUT/$name.compile.log" 2>&1 || return 1
+  if grep -E 'error:|warning:' "$OUT/$name.compile.log"; then return 1; fi
+  echo "COMPILE $name exit=0 warnings=0"
+}
+stage=eligibility
+compile_component PreviewEligibilityTests "$REPO/tests/Tests/PreviewEligibilityTests.m" \
+  "$ROOT/Features/ResourceDetector/RDPreviewEligibility.m" "$ROOT/Features/ResourceDetector/DetectedMedia.m"
+"$OUT/PreviewEligibilityTests"
+result "$stage" PASS complete
+stage=rewrite
+compile_component PreviewRewriteTests "$REPO/tests/Tests/PreviewRewriteTests.m" "$ROOT/Features/ResourceDetector/RDPreviewPlaylistRewrite.m"
+"$OUT/PreviewRewriteTests"
+result "$stage" PASS complete
+stage=controller-guards
+RD_PHASE1_OUT="$OUT/controller-guards" bash "$REPO/tests/Tests/phase-one.sh"
+RD_LIFECYCLE_OUT="$OUT/lifecycle-guards" bash "$REPO/tests/Tests/preview-lifecycle.sh"
+result "$stage" PASS real-production-orchestration-with-boundary-fixtures
+stage=e2e-compile
+# Compile even on machines without an encoder: missing media must not hide broken wiring.
+compile_component PreviewE2E -DRD_PREVIEW_TESTING=1 "$REPO/tests/Tests/PreviewE2E.m" \
+  "$ROOT/Features/ResourceDetector/RDPreviewController.m" "$ROOT/Features/ResourceDetector/RDPreviewEligibility.m" \
+  "$ROOT/Features/ResourceDetector/RDPreviewPlaylistRewrite.m" "$ROOT/Features/ResourceDetector/DetectedMedia.m" \
+  "$ROOT/Shared/Infrastructure/HTTPPrivacyPolicy.m"
+result e2e-compile PASS real-controller-linked
+stage=fixtures
+# A new per-run directory avoids destructive fixture cleanup and stale server/media logs.
+MEDIA="$(mktemp -d "$OUT/media.XXXXXX")"
+if bash "$FIX/make-fixtures.sh" "$MEDIA"; then rc=0; else rc=$?; fi
+case "$rc" in
+  0) result fixtures PASS generated ;;
+  3) result fixtures ENVIRONMENT encoder-ffmpeg-unavailable
+     result real-avplayer ENVIRONMENT fixture-generation-unavailable
+     result suite ENVIRONMENT incomplete
+     exit 78 ;;
+  *) result fixtures FAIL "generation-exit-$rc"; exit 1 ;;
+esac
+stage=server
+: > "$OUT/server.log"
+python3 "$FIX/server.py" --port 0 --root "$MEDIA" --log "$OUT/server.log" > "$OUT/server.stdout" 2>&1 &
+SRV_PID=$!
+# Managed child: only this PID, cleanup trap always terminates and reaps it.
+for ((i=0;i<50;i++)); do
+  if grep -q '^LISTEN [0-9]' "$OUT/server.stdout"; then break; fi
+  if ! kill -0 "$SRV_PID" 2>/dev/null; then result server FAIL server-exited; exit 1; fi
   sleep 0.1
 done
-
-c1=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/av-master.m3u8")
-[ "$c1" = "200" ] || { echo "FAIL: av-master.m3u8 期望 200 实际 $c1"; exit 1; }
-
-curl -s -o /tmp/miliu-preview-range.bin -D "$OUT/range.headers" -r 0-99 "http://127.0.0.1:$PORT/direct.mp4"
+PORT="$(awk '/^LISTEN / {print $2; exit}' "$OUT/server.stdout")"
+[[ "$PORT" =~ ^[0-9]+$ ]] || { result server FAIL no-listen-port; exit 1; }
+# Never allow shell proxy environment/system proxy to route local fixtures externally.
+export NO_PROXY='127.0.0.1,localhost'; export no_proxy="$NO_PROXY"
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy || true
+base="http://127.0.0.1:$PORT"
+c1=$(curl --noproxy '*' -fsS -o /dev/null -w '%{http_code}' "$base/av-master.m3u8")
+[ "$c1" = 200 ]
+curl --noproxy '*' -fsS -o "$OUT/range.bin" -D "$OUT/range.headers" -r 0-99 "$base/direct.mp4"
 c2=$(head -1 "$OUT/range.headers" | awk '{print $2}')
-cr=$(grep -i "^Content-Range" "$OUT/range.headers" | tr -d '\r')
-[ "$c2" = "206" ] || { echo "FAIL: Range 请求期望 206 实际 $c2"; exit 1; }
-[ "$cr" = "Content-Range: bytes 0-99/$(stat -f %z "$FIX/build/direct.mp4")" ] || { echo "FAIL: Content-Range 不符：$cr"; exit 1; }
-
-c3=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/av-enc.m3u8")
-[ "$c3" = "200" ] || { echo "FAIL: av-enc.m3u8 期望 200 实际 $c3"; exit 1; }
-echo "OK: 服务器自检 3/3（200 / 206+Content-Range / 200）"
-
-# ── 段 4：端到端（与 RDPreviewController 播放管线等价：真 AVPlayer + 同款 Referer options）──
-if compile_component PreviewE2E tests/Tests/PreviewE2E.m; then
-  # 服务器沿用段 3 的实例（日志含 Referer 全量记录）
-  "$OUT/PreviewE2E" "$PORT" "$OUT/server.log"
-else
-  echo "FAIL: PreviewE2E 编译失败"; exit 1
-fi
-
-echo "PASS: 预览套件通过"
+cr=$(grep -i '^Content-Range' "$OUT/range.headers" | tr -d '\r')
+[ "$c2" = 206 ]
+[ "$cr" = "Content-Range: bytes 0-99/$(stat -f %z "$MEDIA/direct.mp4")" ]
+c3=$(curl --noproxy '*' -fsS -o /dev/null -w '%{http_code}' "$base/av-enc.m3u8")
+[ "$c3" = 200 ]
+echo 'OK: server selfcheck 3/3 (200 / 206+Content-Range / 200)'
+result server PASS http-selfcheck-3-of-3
+stage=real-avplayer
+"$OUT/PreviewE2E" "$PORT" "$OUT/server.log"
+result real-avplayer PASS real-controller-decoding-origin-headers-and-pinning
+result suite PASS all-selected-stages-complete

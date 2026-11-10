@@ -64,7 +64,10 @@ static const NSUInteger kRDCoverMemoryCapacity = 32;
         _reprobeHandler = [reprobeHandler copy];
         _preferences = preferences ?: PreferencesStore.shared;
         _store = [RDDisplayMetadataRecoveryStore new];
-        _translator = [[ResourceTitleTranslator alloc] initWithSessionConfiguration:nil];
+        // Technical opt-in only; absent/other values keep all titles local.
+        BOOL allowsNetwork = [NSProcessInfo.processInfo.environment[@"RD_TITLE_TRANSLATION_NETWORK"] isEqualToString:@"1"];
+        _translator = [[ResourceTitleTranslator alloc] initWithSessionConfiguration:nil
+                                                          allowsNetworkTranslation:allowsNetwork];
         _engine = [RDCoverRecoveryEngine new];
         _coverMemory = [NSMutableDictionary dictionary];
         _coverMemoryOrder = [NSMutableArray array];

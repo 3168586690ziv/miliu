@@ -4,6 +4,7 @@
 
 #import "RDCurlFallbackBackend.h"
 #import "HTTPPrivacyPolicy.h"
+#import "RDNativeOnlyRequest.h"
 #import "RDLog.h"
 #import "RDCurlHopper.h"
 
@@ -18,7 +19,11 @@ static const NSTimeInterval kRDCurlFallbackSegmentDeadline = 3600.0;
 @property (nonatomic, copy) void (^onCancel)(void);
 @end
 @implementation RDCurlFallbackTask
-- (void)rd_cancel { if (self.onCancel) self.onCancel(); }
+- (void)rd_cancel {
+    void (^action)(void);
+    @synchronized (self) { action = self.onCancel; self.onCancel = nil; }
+    if (action) action(); // Invalidate before synchronous cancellation/reentry.
+}
 @end
 
 @implementation RDCurlFallbackBackend {
@@ -70,31 +75,51 @@ static const NSTimeInterval kRDCurlFallbackSegmentDeadline = 3600.0;
                             progress:(nullable void (^)(int64_t, int64_t, int64_t))progress
                           completion:(void (^)(NSURL * _Nullable, NSHTTPURLResponse * _Nullable, NSError * _Nullable))completion
                             reissue:(BOOL)reissue {
+    // Snapshot both identity and transport requirement at acceptance. Never let
+    // later caller mutations erase a credential/context gate or add new secrets.
+    request = [request copy];
+    BOOL requiresNative = RDRequestRequiresNativeTransport(request);
     RDCurlFallbackTask *task = [RDCurlFallbackTask new];
+    NSObject *state = [NSObject new];
     __block RDCurlHopper *hopper = nil;
     __block NSTimer *poller = nil;
-    __block BOOL cancelled = NO;
-    void (^stopPoller)(void) = ^{ [poller invalidate]; poller = nil; };
+    __block BOOL cancelled = NO, nativeCompleted = NO, curlFinished = NO;
+    void (^stopPoller)(void) = ^{
+        NSTimer *old;
+        @synchronized (state) { old = poller; poller = nil; }
+        [old invalidate];
+    };
     task.onCancel = ^{
-        cancelled = YES;
-        [hopper cancel];
+        RDCurlHopper *current;
+        @synchronized (state) { cancelled = YES; current = hopper; }
+        [current cancel];
         stopPoller();
     };
 
     void (^nativeBlock)(NSURL *, NSHTTPURLResponse *, NSError *) = ^(NSURL *written, NSHTTPURLResponse *resp, NSError *err) {
-        // 取消先于原生完成：绝不进入回退（否则 curl 子进程在已取消的下载上白跑）。
-        if (cancelled) { completion(written, resp, err); return; }
-        if (![self shouldFallbackForNativeResult:written response:resp error:err]) {
+        BOOL wasCancelled;
+        @synchronized (state) {
+            if (nativeCompleted) return;
+            nativeCompleted = YES;
+            wasCancelled = cancelled;
+        }
+        // Authenticated/context-bound requests stay native even after redirects
+        // remove their headers. Do not retry anonymously or revive original auth.
+        if (wasCancelled || requiresNative || ![self shouldFallbackForNativeResult:written response:resp error:err]) {
             completion(written, resp, err);
             return;
         }
         RDLogWrite(@"dl", @"原生下载命中指纹拦截签名（status=%ld err=%ld），尝试 curl 回退",
                    resp ? (long)resp.statusCode : 0, err ? (long)err.code : 0);
-        hopper = [RDCurlHopper new];
-        hopper.curlPath = self.curlPath;
-        hopper.runner = self.curlRunner;
-        hopper.logComponent = @"dl";
-        hopper.resolver = self.resolver;
+        RDCurlHopper *current = [RDCurlHopper new];
+        current.curlPath = self.curlPath;
+        current.runner = self.curlRunner;
+        current.logComponent = @"dl";
+        current.resolver = self.resolver;
+        @synchronized (state) {
+            hopper = current;
+            if (cancelled) [current cancel];
+        }
         // curl 也没能改善时保留的原生结果：与原生完成语义同队列（主队列）投递。
         void (^nativeResult)(void) = ^{ dispatch_async(dispatch_get_main_queue(), ^{ completion(written, resp, err); }); };
 
@@ -103,7 +128,7 @@ static const NSTimeInterval kRDCurlFallbackSegmentDeadline = 3600.0;
                               writeToURL.lastPathComponent.stringByDeletingPathExtension ?: @"part",
                               NSUUID.UUID.UUIDString];
         NSString *bodyPath = [writeToURL.URLByDeletingLastPathComponent.path stringByAppendingPathComponent:bodyName];
-        hopper.bodyFilePath = bodyPath;
+        current.bodyFilePath = bodyPath;
 
         NSMutableURLRequest *sanitized = [request mutableCopy];
         [HTTPPrivacyPolicy sanitizeMediaRequest:sanitized];
@@ -112,7 +137,7 @@ static const NSTimeInterval kRDCurlFallbackSegmentDeadline = 3600.0;
             dispatch_async(dispatch_get_main_queue(), ^{
                 // 取消可能发生在本创建块尚未执行时（同一 runloop tick 内先取消）：
                 // 此时 stopPoller 曾扑空，绝不能再建 repeats:YES 的计时器。
-                if (cancelled) return;
+                @synchronized (state) { if (cancelled || curlFinished) return; }
                 __block unsigned long long last = 0;
                 NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
                     unsigned long long size = [[NSFileManager defaultManager] attributesOfItemAtPath:bodyPath error:nil].fileSize;
@@ -121,19 +146,23 @@ static const NSTimeInterval kRDCurlFallbackSegmentDeadline = 3600.0;
                         last = size;
                     }
                 }];
-                [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
-                poller = timer;
+                @synchronized (state) {
+                    if (cancelled || curlFinished) { [timer invalidate]; return; }
+                    poller = timer;
+                    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+                }
             });
         }
 
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            [hopper walkURL:sanitized.URL
+            [current walkURL:sanitized.URL
                      method:sanitized.HTTPMethod ?: @"GET"
                     headers:sanitized.allHTTPHeaderFields ?: @{}
                      budget:0   // 分段下载不限字节预算（段大小由 Range 头决定）
                    deadline:CFAbsoluteTimeGetCurrent() + kRDCurlFallbackSegmentDeadline
                  bodyToFile:YES
                  completion:^(RDCurlHopResult *result) {
+                @synchronized (state) { curlFinished = YES; }
                 dispatch_async(dispatch_get_main_queue(), ^{ stopPoller(); });
                 if (!result || result.error.code == RDCurlHopUnresolved) {
                     nativeResult();   // curl 没能改善：原样保留原生结果（含原生已写盘文件）
@@ -171,8 +200,8 @@ static const NSTimeInterval kRDCurlFallbackSegmentDeadline = 3600.0;
         : [(id)_native rd_startRequest:request writeToURL:writeToURL progress:progress completion:nativeBlock];
     void (^previousCancel)(void) = task.onCancel;
     task.onCancel = ^{
+        previousCancel(); // Set cancellation before native can complete synchronously.
         [nativeTask rd_cancel];
-        previousCancel();
     };
     return task;
 }

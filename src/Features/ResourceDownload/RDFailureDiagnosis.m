@@ -14,53 +14,49 @@ static BOOL RDContainsAny(NSString *haystack, NSArray<NSString *> *needles) {
 }
 
 RDFailureDiagnosis RDDiagnoseFailure(NSString *reason, NSInteger statusCode) {
-    NSString *text = reason ?: @"";
-
-    // ① 磁盘：本地可立即解决，优先级最高（其它重试都会继续失败）。
+    static NSRegularExpression *urls, *signIn, *httpStatus;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // URLs are data, not evidence: /author, /404 and ?status=401 must not
+        // turn an unrelated failure into a login or expiry diagnosis.
+        urls = [NSRegularExpression regularExpressionWithPattern:@"https?://[^\\s<>\\\"'）】。，；]+" options:NSRegularExpressionCaseInsensitive error:nil];
+        signIn = [NSRegularExpression regularExpressionWithPattern:@"(?<![a-z0-9_])(?:unauthorized|login|sign\\s+in|members-only|private\\s+video|(?:authentication|auth)\\s+(?:required|failed))(?![a-z0-9_])" options:NSRegularExpressionCaseInsensitive error:nil];
+        httpStatus = [NSRegularExpression regularExpressionWithPattern:@"(?:^\\s*|(?:HTTP(?:/[0-9.]+)?|status(?:\\s+code)?|状态码|网站返回|返回码)\\s*[:：=]?\\s*)(401|403|404|410|429|503|509)(?![0-9a-z_])" options:NSRegularExpressionCaseInsensitive error:nil];
+    });
+    NSString *raw = reason ?: @"";
+    NSString *text = [urls stringByReplacingMatchesInString:raw options:0 range:NSMakeRange(0, raw.length) withTemplate:@" "];
     if (RDContainsAny(text, @[@"磁盘", @"空间不足", @"No space left", @"disk full", @"os error 28"])) {
         return (RDFailureDiagnosis){ @"disk_full", RDFailureActionFreeDiskSpace };
     }
-
-    // ② 登录/权限：比 403 指纹更具体，必须先判——否则用户被指去「刷新链接」，
-    //    刷十次也刷不出登录态。
-    if (RDContainsAny(text, @[@"需要登录", @"登录后", @"会员", @"私有", @"仅限", @"签名校验",
-                              @"401", @"Unauthorized", @"login", @"sign in", @"members-only",
-                              @"private video", @"auth"])) {
+    BOOL explicitSignIn = RDContainsAny(text, @[@"需要登录", @"登录后", @"会员专属", @"仅限会员", @"会员才能", @"私有视频", @"签名校验"]) ||
+        [signIn firstMatchInString:text options:0 range:NSMakeRange(0, text.length)] != nil;
+    NSInteger code = statusCode;
+    if (code <= 0) {
+        NSTextCheckingResult *match = [httpStatus firstMatchInString:text options:0 range:NSMakeRange(0, text.length)];
+        if (match) code = [[text substringWithRange:[match rangeAtIndex:1]] integerValue];
+    }
+    // Structured status wins conflicting numbers in an error description. An
+    // explicit permission explanation can still specialize an ambiguous 403.
+    if (code == 401 || (code == 403 && explicitSignIn)) {
         return (RDFailureDiagnosis){ @"needs_sign_in", RDFailureActionSignIn };
     }
-
-    // ③ 链接失效：404/410 与「链接已过期」类文案 → 重新探测拿新签名。
-    if (statusCode == 404 || statusCode == 410 ||
-        RDContainsAny(text, @[@"410", @"404", @"链接失效", @"链接已过期", @"已失效", @"找不到资源"])) {
+    if (code == 404 || code == 410) return (RDFailureDiagnosis){ @"link_expired", RDFailureActionRefreshLink };
+    if (code == 429 || code == 503 || code == 509) return (RDFailureDiagnosis){ @"rate_limited", RDFailureActionWaitAndRetry };
+    if (code == 403) return (RDFailureDiagnosis){ @"forbidden", RDFailureActionRefreshLink };
+    if (explicitSignIn) return (RDFailureDiagnosis){ @"needs_sign_in", RDFailureActionSignIn };
+    if (RDContainsAny(text, @[@"链接失效", @"链接已过期", @"已失效", @"找不到资源"])) {
         return (RDFailureDiagnosis){ @"link_expired", RDFailureActionRefreshLink };
     }
-
-    // ④ 反爬 / 限流：等一等比立刻重试有效，避免把封禁拖长。
-    if (statusCode == 429 || statusCode == 503 || statusCode == 509 ||
-        RDContainsAny(text, @[@"429", @"503", @"509", @"限流", @"频繁", @"too many", @"rate limit",
-                              @"校验失败", @"cloudflare", @"人机"])) {
+    if (RDContainsAny(text, @[@"限流", @"频繁", @"too many", @"rate limit", @"校验失败", @"cloudflare", @"人机"])) {
         return (RDFailureDiagnosis){ @"rate_limited", RDFailureActionWaitAndRetry };
     }
-
-    // ⑤ 403：既可能是指纹拦截，也可能是链接签名过期。两者都靠重新获取链接解决，
-    //    但文案要区分——所以单独一个原因键。
-    if (statusCode == 403 || RDContainsAny(text, @[@"403", @"Forbidden", @"拒绝访问"])) {
-        return (RDFailureDiagnosis){ @"forbidden", RDFailureActionRefreshLink };
-    }
-
-    // ⑥ 传输截断 / 网络瞬断：直接重试。
-    if (RDContainsAny(text, @[@"不完整", @"截断", @"超时", @"timed out", @"网络", @"连接",
-                              @"DNS", @"解析超时", @"无法连接", @"网络波动", @"传输"])) {
+    if (RDContainsAny(text, @[@"Forbidden", @"拒绝访问"])) return (RDFailureDiagnosis){ @"forbidden", RDFailureActionRefreshLink };
+    if (RDContainsAny(text, @[@"不完整", @"截断", @"超时", @"timed out", @"网络", @"连接", @"DNS", @"解析超时", @"无法连接", @"网络波动", @"传输"])) {
         return (RDFailureDiagnosis){ @"transient_network", RDFailureActionRetry };
     }
-
-    // ⑦ 内容不是媒体：链接被换成 HTML/错误页，重新探测比原地重试有意义。
-    if (RDContainsAny(text, @[@"不是视频", @"不是有效视频", @"网页/错误页", @"格式不支持",
-                              @"MIME", @"内容不是"])) {
+    if (RDContainsAny(text, @[@"不是视频", @"不是有效视频", @"网页/错误页", @"格式不支持", @"MIME", @"内容不是"])) {
         return (RDFailureDiagnosis){ @"not_media", RDFailureActionRefreshLink };
     }
-
-    // 未知：不编原因，也不编动作。
     return (RDFailureDiagnosis){ nil, RDFailureActionNone };
 }
 

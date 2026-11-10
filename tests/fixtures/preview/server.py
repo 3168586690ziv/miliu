@@ -77,7 +77,7 @@ class S(socketserver.ThreadingTCPServer):
 
 
 srv = S(("127.0.0.1", args.port), H)
-print("LISTEN %d" % args.port, flush=True)
+print("LISTEN %d" % srv.server_address[1], flush=True)
 
 
 def shutdown(signum, frame):

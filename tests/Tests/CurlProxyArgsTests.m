@@ -77,6 +77,8 @@ int main(void) { @autoreleasepool {
     //    用 runner 捕获 argv，与本进程同函数对真实系统设置计算出的期望逐项对照，
     //    不假设本机是否开代理（两种结果都合法，关键是生产路径与纯函数一致）。
     RDCurlHopper *hopper = [RDCurlHopper new];
+    // Keep the production argv assertion, but do not resolve external DNS.
+    hopper.resolver = ^NSArray<NSString *> *(NSString *host) { return @[@"93.184.216.34"]; };
     NSDictionary *sysSettings = CFBridgingRelease(CFNetworkCopySystemProxySettings());
     NSArray *expectedArgs = RDCurlProxyArgumentsForURL(https, sysSettings);
     __weak RDCurlHopper *weakHopper = hopper;

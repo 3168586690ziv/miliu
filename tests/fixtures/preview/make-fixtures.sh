@@ -26,10 +26,10 @@ BUILTIN="$(cd "$(dirname "$0")/../../.." && pwd)/resources/Resources/MediaTools/
 ff_can_encode() {
   local exe="$1"
   [ -n "$exe" ] && [ -x "$exe" ] || return 1
-  "$exe" -hide_banner -muxers   2>/dev/null | grep -q " hls "       || return 1
-  "$exe" -hide_banner -demuxers 2>/dev/null | grep -q " lavfi"      || return 1
-  "$exe" -hide_banner -encoders 2>/dev/null | grep -qE " (libx264|h264) " || return 1
-  "$exe" -hide_banner -encoders 2>/dev/null | grep -qE " aac "      || return 1
+  "$exe" -hide_banner -muxers   2>/dev/null | grep " hls " >/dev/null || return 1
+  "$exe" -hide_banner -demuxers 2>/dev/null | grep " lavfi" >/dev/null || return 1
+  "$exe" -hide_banner -encoders 2>/dev/null | grep -E " (libx264|h264) " >/dev/null || return 1
+  "$exe" -hide_banner -encoders 2>/dev/null | grep -E " aac " >/dev/null || return 1
   return 0
 }
 
@@ -71,8 +71,9 @@ MSG
   exit 3
 fi
 
-rm -rf "$DIR"
+# Caller supplies a fresh isolated directory. Never recursively delete a supplied path.
 mkdir -p "$DIR"
+DIR="$(cd "$DIR" && pwd)"
 cd "$DIR"
 
 # 双档带音轨 HLS（6 秒 testsrc + 440Hz 正弦音，2 秒一片）

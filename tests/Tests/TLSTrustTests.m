@@ -7,7 +7,8 @@
 //   · RDTLSTrustSANEntriesCoverHost                    （SAN 解析，可注入 entries）
 //   · RDTLSTrustRevocationPropsIndicateLeafOnly        （吊销判据纯逻辑，可注入 props + 索引）
 //   · RDTLSFailingCertificateIndexFromError            （出错证书索引解析）
-//   · RDTLSAllowRevokedCertificateEnabled / RDTLSHandleServerTrustChallenge（开关与契约）
+//   · RDTLSAllowRevokedCertificateForValue / RDTLSHandleServerTrustChallenge（隔离开关与契约）
+//   · RDTLSEvaluateServerTrustWithRevocationAllowed（本地真实 SecTrust，不读用户偏好）
 // 改动这些生产逻辑必须让本套件变红。
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
@@ -162,15 +163,57 @@ static void FailingIndexTests(void) {
 
 // ── ④ 开关语义 ──
 static void SwitchTests(void) {
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    [ud removeObjectForKey:RDTLSAllowRevokedCertificateKey];
-    Check(RDTLSAllowRevokedCertificateEnabled(),
-          @"开关：未设置时默认开启（该站不可用是主人实测报障，默认必须能用）");
-    [ud setBool:NO forKey:RDTLSAllowRevokedCertificateKey];
-    Check(!RDTLSAllowRevokedCertificateEnabled(), @"开关：显式关闭后进入严格模式");
-    [ud setBool:YES forKey:RDTLSAllowRevokedCertificateKey];
-    Check(RDTLSAllowRevokedCertificateEnabled(), @"开关：显式开启后恢复容错");
-    [ud removeObjectForKey:RDTLSAllowRevokedCertificateKey];
+    Check(!RDTLSAllowRevokedCertificateForValue(nil), @"开关：未设置默认严格（批准的更严格规格）");
+    Check(!RDTLSAllowRevokedCertificateForValue(@NO), @"开关：显式关闭后进入严格模式");
+    Check(RDTLSAllowRevokedCertificateForValue(@YES), @"开关：显式开启后保留窄容错");
+    for(id value in @[@"YES", @"true", @"1", @1])
+        Check(RDTLSAllowRevokedCertificateForValue(value), [NSString stringWithFormat:@"开关：明确真值 %@ 开启", value]);
+    for(id value in @[@"NO", @"false", @"0", @"", @"garbage", @" true", @2, @(-1), NSNull.null, @[], @{}])
+        Check(!RDTLSAllowRevokedCertificateForValue(value), [NSString stringWithFormat:@"开关：关闭或畸形值 %@ 默认严格", value]);
+}
+
+// A locally generated self-signed fixture is explicitly anchored only in each
+// test SecTrust object. No keychain, network, global trust or preference changes.
+static SecTrustRef LocalTrust(SecCertificateRef certificate, NSString *host, BOOL anchored, BOOL expired) {
+    SecPolicyRef policy=SecPolicyCreateSSL(true, (__bridge CFStringRef)host);
+    SecTrustRef trust=NULL;
+    OSStatus status=SecTrustCreateWithCertificates(certificate, policy, &trust);
+    CFRelease(policy);
+    if(status!=errSecSuccess||!trust)return NULL;
+    SecTrustSetNetworkFetchAllowed(trust, false);
+    NSArray *anchors=anchored?@[(__bridge id)certificate]:@[];
+    SecTrustSetAnchorCertificates(trust, (__bridge CFArrayRef)anchors);
+    SecTrustSetAnchorCertificatesOnly(trust, true);
+    NSDate *date=expired?[NSDate dateWithTimeIntervalSince1970:4102444800.0]:NSDate.date;
+    SecTrustSetVerifyDate(trust, (__bridge CFDateRef)date);
+    return trust;
+}
+
+static void LocalSecTrustTests(void) {
+    const char *path=getenv("RD_TLS_CERT_PATH");
+    NSData *der=path?[NSData dataWithContentsOfFile:@(path)]:nil;
+    SecCertificateRef certificate=der?SecCertificateCreateWithData(NULL, (__bridge CFDataRef)der):NULL;
+    Check(certificate!=NULL, @"本地证书：DER 夹具可读取");
+    if(!certificate)return;
+    for(NSNumber *allow in @[@NO,@YES]) {
+        SecTrustRef trusted=LocalTrust(certificate,@"good.tls.fixture",YES,NO);
+        Check(RDTLSEvaluateServerTrustWithRevocationAllowed(trusted,@"good.tls.fixture",allow.boolValue,NULL)==RDTLSTrustVerdictUseDefault,
+              [NSString stringWithFormat:@"真实 SecTrust：局部锚定且域名有效，allow=%@ 仍交系统默认",allow]);
+        if(trusted)CFRelease(trusted);
+        SecTrustRef untrusted=LocalTrust(certificate,@"good.tls.fixture",NO,NO);
+        Check(RDTLSEvaluateServerTrustWithRevocationAllowed(untrusted,@"good.tls.fixture",allow.boolValue,NULL)==RDTLSTrustVerdictReject,
+              [NSString stringWithFormat:@"真实 SecTrust：未信任自签，allow=%@ 仍拒绝",allow]);
+        if(untrusted)CFRelease(untrusted);
+        SecTrustRef wrongHost=LocalTrust(certificate,@"wrong.tls.fixture",YES,NO);
+        Check(RDTLSEvaluateServerTrustWithRevocationAllowed(wrongHost,@"wrong.tls.fixture",allow.boolValue,NULL)==RDTLSTrustVerdictReject,
+              [NSString stringWithFormat:@"真实 SecTrust：域名不符，allow=%@ 仍拒绝",allow]);
+        if(wrongHost)CFRelease(wrongHost);
+        SecTrustRef expired=LocalTrust(certificate,@"good.tls.fixture",YES,YES);
+        Check(RDTLSEvaluateServerTrustWithRevocationAllowed(expired,@"good.tls.fixture",allow.boolValue,NULL)==RDTLSTrustVerdictReject,
+              [NSString stringWithFormat:@"真实 SecTrust：本地校验时刻已过期，allow=%@ 仍拒绝",allow]);
+        if(expired)CFRelease(expired);
+    }
+    CFRelease(certificate);
 }
 
 // ── ⑤ 挑战处理契约 ──
@@ -187,12 +230,9 @@ int main(void) {
         RevocationJudgementTests();
         FailingIndexTests();
         SwitchTests();
+        LocalSecTrustTests();
         ChallengeContractTests();
-        if (getenv("RD_TLS_REAL_SITE")) {
-            NSLog(@"SKIP: 真实站点端到端由 tls-trust-real-site.sh 单独跑");
-        } else {
-            NSLog(@"SKIP: 真实站点端到端未启用（设 RD_TLS_REAL_SITE=1 开启）");
-        }
+        NSLog(@"NOTE: 本套件仅离线；真实网站不属于本次选定检查，不声称在线吊销端到端通过");
         NSLog(@"TLS-TRUST-%@ checks=%d failed=%d", gFailed == 0 ? @"PASSED" : @"FAILED", gPassed, gFailed);
         return gFailed == 0 ? 0 : 1;
     }

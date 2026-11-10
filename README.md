@@ -77,8 +77,8 @@ bash scripts/build.sh
 
 ## 运行验收与测试
 
-`tests/Tests/` 下是 **41 个**可独立运行的验收脚本（`run-suites.sh` 是跑器，不计入），全部用 `bash` 执行。
-下表按主题归类，不是全部单列——未在此表的套件名可直接 `ls tests/Tests/*.sh` 查看：
+[tests/Tests](<tests/Tests/>) 下现有 **53 个**可独立调用的 `.sh` 验收入口（包括组合回归与变异验证；[run-suites.sh](<tests/Tests/run-suites.sh>) 是跑器，不计入），全部用 `bash` 执行。入口数量不等于彼此不重叠的测试集合，也不表示每项都适合离线或无窗口执行。
+下表按主题归类，不是全部单列——未在此表的入口可直接 `ls tests/Tests/*.sh` 查看：
 
 | 脚本 | 覆盖内容 |
 | --- | --- |
@@ -101,17 +101,33 @@ bash scripts/build.sh
 | `audit.sh` / `bug16.sh` | 生产源码审计（ASan 下运行 AuditChecks）与 Bug16 聚焦回归 |
 | `external-scripts.sh` / `performance-smoke.sh` | 外部脚本调用与性能冒烟 |
 | `adaptive-transport.sh` / `curl-proxy.sh` | Cloudflare 指纹拦截的 curl 回退栈、系统代理参数组装 |
+| [curl-privacy.sh](<tests/Tests/curl-privacy.sh>) / [curl-privacy-mutations.sh](<tests/Tests/curl-privacy-mutations.sh>) | curl 认证边界（native-only 内存标记、敏感头含空值、接受时快照、同步取消/重入）与匿名逐跳 Referer 四档；纯假 native/DNS/curl，无窗口无外网；三项隔离生产源码变异 |
 | `tls-trust.sh` / `tls-trust-real-site.sh` | 证书吊销窄容错（纯逻辑 37 项 + 真实被吊销站点端到端） |
 | `proxy-fakeip.sh` | 系统代理 fake-ip（198.18/15）放行与危险网段仍拒 |
 | `aes-encryption.sh` | HLS AES-128 加密流（显式/隐式 IV、密钥轮换、METHOD=NONE 不误报） |
 | `media-discovery.sh` | 抓取面专项（og:video、JSON-LD、全文兜底、同族画质聚合） |
 | `segment-filter.sh` | HLS/DASH 分片收口（一个视频不得被拆成几十个碎片；整段 .ts 直链必须保留） |
-| `preview-playback.sh` | 在线预览（判定/钉选改写纯函数；端到端段需完整版 ffmpeg，缺则降级跳过） |
+| [preview-playback.sh](<tests/Tests/preview-playback.sh>) | 生产预览控制器守卫 + 无窗口、静音真实 AVPlayer 解码；端到端需带编码器完整版 ffmpeg，缺失记 ENVIRONMENT / exit 78，不冒充通过 |
+| [phase-one.sh](<tests/Tests/phase-one.sh>) / [failure-precision.sh](<tests/Tests/failure-precision.sh>) / [preview-lifecycle.sh](<tests/Tests/preview-lifecycle.sh>) | WAL 损坏尾部恢复、预览来源策略、精确诊断、异步取消/迟到回调；不创建真实播放器或窗口 |
+| [stage12-regression.sh](<tests/Tests/stage12-regression.sh>) / [stage12-mutations.sh](<tests/Tests/stage12-mutations.sh>) | 前两阶段串行集中回归 / 隔离生产源码副本变异验证（不会变异工作源码） |
+| [suite-runner.sh](<tests/Tests/suite-runner.sh>) | 跑器四态、严格模式、信号/冲突状态及完整日志的临时仓库回归 |
+| [build-signing-fallback.sh](<tests/Tests/build-signing-fallback.sh>) | 无签名身份时的 ad-hoc fallback：直接提取真实构建脚本片段，4 项检查；仅替换签名边界，不访问真实钥匙串 |
 | `metadata-recovery.sh` | 标题/封面防退化与恢复接线 |
 | `cookie-import.sh` / `cdp-cookie-import.sh` | 浏览器登录态导入（v10 解密纯函数 / CDP 自动化） |
 | `pagination-zero-regression.sh` | 翻页改造的零回归对照（旧实现原文 vs 新实现逐字比对，基线钉死在第 43 轮提交） |
 | `retry-after.sh` | 429/503 的 Retry-After 退避策略 |
-| `run-suites.sh` | 批量运行上述脚本（`bash tests/Tests/run-suites.sh <suite>...`） |
+| [run-suites.sh](<tests/Tests/run-suites.sh>) | 串行运行选定套件；`bash tests/Tests/run-suites.sh [--strict] <suite>...` |
+
+**结果契约：** 新套件输出 `TEST_RESULT stage=<name> status=PASS|FAIL|SKIP|ENVIRONMENT reason=...`；完整通过、失败、主动跳过、环境不足分别退出 `0 / 1 / 77 / 78`。旧脚本过渡识别明确的 `SKIP:` / `FAIL:` 行（可带标准 NSLog 时间戳），不把任意夹具文字当结果。状态矛盾、未知退出码、缺失脚本和实际失败一律记 FAIL。
+
+普通跑器模式可在环境不足后继续，但最终输出 `COMPLETED_WITH_SKIPS`，不会输出 `ALL SUITES PASSED`；`--strict` 对任何被请求但未完整通过的套件返回非零，不把环境不足混称产品断言失败。只选择实际获准运行的套件；不要因为严格模式而自动启动 UI/联网套件。完整日志按每次运行独立目录保留在 [suite-logs](<build/suite-logs/>)，同名顶层日志仅作最新别名。
+
+```bash
+# 无窗口、无外网的集中回归
+bash tests/Tests/run-suites.sh --strict suite-runner stage12-regression
+# 真实无窗口/静音解码；缺可编码 ffmpeg 时准确报告环境不足
+bash tests/Tests/run-suites.sh --strict preview-playback
+```
 
 **这些脚本必须串行执行，不能并行。** 其中 `repair.sh`、`ui-experience.sh`、`version.sh` 以及
 `build/settings-probe/probe.sh` 在开始时会各自重跑 `scripts/generate-version.sh`，
@@ -121,6 +137,8 @@ bash scripts/build.sh
 `build/` 下另有本项目自有的取证工具（`settings-probe/`、`ui-probe/`、`detail-probe/`），
 用法见 `build/TOOLS.md`。这些工具脚本用 `REPO="$(cd "$(dirname "$0")/../.." && pwd)"`
 反推仓库根，不依赖任何本机绝对路径。
+
+本轮所选回归、完整 ad-hoc 构建及未覆盖范围见[最终补充验收](<docs/AI-Reports/密流构建fallback修复与最终补充验收-20261110.md>)；上述 53 个入口并非本轮全部运行。
 
 ## 版本号规则
 

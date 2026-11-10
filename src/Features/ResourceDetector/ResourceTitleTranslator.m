@@ -1,9 +1,20 @@
 #import "ResourceTitleTranslator.h"
 #import <AppKit/AppKit.h>
 
+@interface RDTitleTranslationOperation : NSObject
+@property (nonatomic, copy) NSString *source;
+@property (nonatomic) NSUInteger generation;
+@property (nonatomic, strong) NSMutableArray *callbacks;
+@end
+@implementation RDTitleTranslationOperation
+@end
+
 @interface ResourceTitleTranslator ()
 @property (nonatomic, strong) NSURLSession *session;
 @property (nonatomic, copy) NSURLSessionConfiguration *sessionConfiguration;
+@property (nonatomic) BOOL allowsNetworkTranslation;
+@property (nonatomic) NSUInteger generation;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, RDTitleTranslationOperation *> *operations;
 @end
 
 @implementation ResourceTitleTranslator
@@ -13,6 +24,11 @@
 }
 
 - (instancetype)initWithSessionConfiguration:(NSURLSessionConfiguration *)configuration {
+    return [self initWithSessionConfiguration:configuration allowsNetworkTranslation:NO];
+}
+
+- (instancetype)initWithSessionConfiguration:(NSURLSessionConfiguration *)configuration
+                   allowsNetworkTranslation:(BOOL)allowed {
     self=[super init];
     if(self){
         NSURLSessionConfiguration *sessionConfiguration=configuration?[configuration copy]:
@@ -22,7 +38,8 @@
         sessionConfiguration.HTTPMaximumConnectionsPerHost=4;
         sessionConfiguration.timeoutIntervalForRequest=6.0;
         _sessionConfiguration=sessionConfiguration;
-        _session=[NSURLSession sessionWithConfiguration:_sessionConfiguration];
+        _allowsNetworkTranslation=allowed;
+        _operations=[NSMutableDictionary dictionary];
     }
     return self;
 }
@@ -263,13 +280,46 @@ static NSString *ZZOfflineChineseTranslation(NSString *source) {
     return [NSString stringWithFormat:@"%@%@",prefix,[words componentsJoinedByString:@" "]];
 }
 
+// The operation table, session and generations are main-thread owned. The
+// immutable per-instance permission makes normalized source sufficient as key.
+- (BOOL)isCurrentOperation:(RDTitleTranslationOperation *)operation {
+    return operation.generation==self.generation && self.operations[operation.source]==operation;
+}
+
+- (void)finishOperation:(RDTitleTranslationOperation *)operation result:(NSString *)result {
+    if(![self isCurrentOperation:operation])return;
+    [self.operations removeObjectForKey:operation.source];
+    NSArray *callbacks=[operation.callbacks copy];
+    [operation.callbacks removeAllObjects];
+    // Remove ownership before callbacks: completion may cancel or translate again.
+    for(void (^callback)(NSString *) in callbacks)callback(result?:@"");
+}
+
 - (void)translateTitle:(NSString *)title completion:(void (^)(NSString *))completion {
-    NSString *source=ZZNormalizedTranslation(title);
-    if(!source.length||![ResourceTitleTranslator titleNeedsChineseTranslation:source]){
-        dispatch_async(dispatch_get_main_queue(),^{if(completion)completion(@"");});
+    if(!NSThread.isMainThread){
+        NSString *snapshot=[title copy];
+        dispatch_async(dispatch_get_main_queue(),^{[self translateTitle:snapshot completion:completion];});
         return;
     }
-    [self translateSource:source attempt:0 completion:completion];
+    NSString *source=ZZNormalizedTranslation(title);
+    RDTitleTranslationOperation *operation=self.operations[source];
+    if(operation){if(completion)[operation.callbacks addObject:[completion copy]];return;}
+    operation=[RDTitleTranslationOperation new];
+    operation.source=source;
+    operation.generation=self.generation;
+    operation.callbacks=[NSMutableArray array];
+    if(completion)[operation.callbacks addObject:[completion copy]];
+    self.operations[source]=operation;
+    if(!source.length||![ResourceTitleTranslator titleNeedsChineseTranslation:source]||!self.allowsNetworkTranslation){
+        NSString *local=[ResourceTitleTranslator titleNeedsChineseTranslation:source]?ZZOfflineChineseTranslation(source):@"";
+        NSString *result=ZZTranslationLooksUseful(source,local)?local:@"";
+        dispatch_async(dispatch_get_main_queue(),^{[self finishOperation:operation result:result];});
+        return;
+    }
+    __weak typeof(self) weak=self;
+    [self translateSource:source attempt:0 operation:operation completion:^(NSString *result){
+        [weak finishOperation:operation result:result];
+    }];
 }
 
 + (BOOL)titleNeedsChineseTranslation:(NSString *)title {
@@ -277,7 +327,9 @@ static NSString *ZZOfflineChineseTranslation(NSString *source) {
 }
 
 - (void)requestTranslationForSource:(NSString *)source
+                         operation:(RDTitleTranslationOperation *)operation
                          completion:(void (^)(NSString *translated))completion {
+    if(![self isCurrentOperation:operation]||!self.allowsNetworkTranslation)return;
     NSURLComponents *components=[NSURLComponents componentsWithString:@"https://api.mymemory.translated.net/get"];
     components.queryItems=@[[NSURLQueryItem queryItemWithName:@"q" value:source],
                             [NSURLQueryItem queryItemWithName:@"langpair" value:ZZLanguagePairForTitle(source)]];
@@ -300,7 +352,7 @@ static NSString *ZZOfflineChineseTranslation(NSString *source) {
         NSString *clean=ZZNormalizedTranslation(translated);
         dispatch_async(dispatch_get_main_queue(),^{
             __strong typeof(w) s=w;
-            if(!s){if(completion)completion(@"");return;}
+            if(!s||![s isCurrentOperation:operation])return;
             if(completion)completion(clean?:@"");
         });
     }] resume];
@@ -342,7 +394,9 @@ static NSString *ZZOfflineChineseTranslation(NSString *source) {
                     source:(NSString *)source
                      index:(NSUInteger)index
                 translated:(NSMutableArray<NSString *> *)translated
+                 operation:(RDTitleTranslationOperation *)operation
                 completion:(void (^)(NSString *result))completion {
+    if(![self isCurrentOperation:operation])return;
     if(index>=segments.count){
         NSString *prefix=ZZLeadingTagPrefix(source);
         NSString *body=[translated componentsJoinedByString:@" "];
@@ -358,26 +412,28 @@ static NSString *ZZOfflineChineseTranslation(NSString *source) {
     NSString *segment=segments[index];
     if(!segment.length||!ZZTitleNeedsChineseTranslation(segment)){
         [translated addObject:segment];
-        [self translateSegments:segments source:source index:index+1 translated:translated completion:completion];
+        [self translateSegments:segments source:source index:index+1 translated:translated operation:operation completion:completion];
         return;
     }
     __weak typeof(self) w=self;
-    [self requestTranslationForSource:segment completion:^(NSString *candidate){
+    [self requestTranslationForSource:segment operation:operation completion:^(NSString *candidate){
         __strong typeof(w) s=w;
         if(!s){completion(@"");return;}
         BOOL segmentChanged=ZZTranslationLooksUseful(segment,candidate);
         NSString *offline=segmentChanged?@"":ZZOfflineChineseTranslation(segment);
         BOOL offlineChanged=ZZTranslationLooksUseful(segment,offline);
         [translated addObject:segmentChanged?candidate:(offlineChanged?offline:segment)];
-        [s translateSegments:segments source:source index:index+1 translated:translated completion:completion];
+        [s translateSegments:segments source:source index:index+1 translated:translated operation:operation completion:completion];
     }];
 }
 
 - (void)translateSource:(NSString *)source
                  attempt:(NSUInteger)attempt
+               operation:(RDTitleTranslationOperation *)operation
               completion:(void (^)(NSString *))completion {
+    if(![self isCurrentOperation:operation])return;
     __weak typeof(self) w=self;
-    [self requestTranslationForSource:source completion:^(NSString *clean){
+    [self requestTranslationForSource:source operation:operation completion:^(NSString *clean){
         __strong typeof(w) s=w;
         if(!s){if(completion)completion(@"");return;}
         if(ZZTranslationLooksUseful(source,clean)){
@@ -387,7 +443,7 @@ static NSString *ZZOfflineChineseTranslation(NSString *source) {
         if(attempt==0&&clean.length&&![clean isEqualToString:source]){
             // Preserve the historical two-hop path: a Japanese→English
             // response is translated again, now with an explicit en|zh pair.
-            [s translateSource:clean attempt:1 completion:completion];
+            [s translateSource:clean attempt:1 operation:operation completion:completion];
             return;
         }
         // An unchanged whole-title response is common for short catalogue
@@ -396,7 +452,7 @@ static NSString *ZZOfflineChineseTranslation(NSString *source) {
         NSArray<NSString *> *segments=[s translationSegmentsForSource:source];
         if(segments.count>1&&(attempt>=1||ZZLatinWordCount(source)>=3||ZZContainsKana(source))){
             [s translateSegments:segments source:source index:0 translated:[NSMutableArray array]
-                        completion:completion];
+                         operation:operation completion:completion];
             return;
         }
         NSString *offline=ZZOfflineChineseTranslation(source);
@@ -405,7 +461,24 @@ static NSString *ZZOfflineChineseTranslation(NSString *source) {
 }
 
 - (void)cancelAll {
-    [self.session invalidateAndCancel];
+    if(!NSThread.isMainThread){
+        dispatch_async(dispatch_get_main_queue(),^{[self cancelAll];});
+        return;
+    }
+    self.generation++;
+    NSArray *pending=self.operations.allValues;
+    [self.operations removeAllObjects];
+    NSURLSession *oldSession=_session;
+    _session=nil;
+    // First invalidate all ownership; cancellation and callbacks may reenter.
+    [oldSession invalidateAndCancel];
+    for(RDTitleTranslationOperation *operation in pending){
+        NSArray *callbacks=[operation.callbacks copy];
+        [operation.callbacks removeAllObjects];
+        dispatch_async(dispatch_get_main_queue(),^{
+            for(void (^callback)(NSString *) in callbacks)callback(@"");
+        });
+    }
 }
 
 @end

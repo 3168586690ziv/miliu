@@ -4,6 +4,7 @@
 //
 
 #import "RDQueueWAL.h"
+#import <string.h>
 
 const double RDQueueWALProgressStepPercent = 5.0;
 
@@ -46,6 +47,68 @@ NSArray<NSDictionary *> *RDQueueWALDecodeLines(NSString *text, NSUInteger *disca
     }
     if (discarded) *discarded = bad;
     return out;
+}
+
+// Decode each physical line independently. A torn UTF-8 code point must not
+// turn the entire file (including all previous valid records) into an empty log.
+static NSArray<NSDictionary *> *RDWALDecodeData(NSData *data, NSUInteger *discarded) {
+    NSMutableArray<NSDictionary *> *records = [NSMutableArray array];
+    NSUInteger bad = 0, start = 0;
+    const unsigned char *bytes = data.bytes;
+    while (start < data.length) {
+        const unsigned char *newline = memchr(bytes + start, '\n', data.length - start);
+        NSUInteger end = newline ? (NSUInteger)(newline - bytes) : data.length;
+        NSString *line = [[NSString alloc] initWithBytes:bytes + start length:end - start encoding:NSUTF8StringEncoding];
+        if (line) {
+            NSUInteger lineBad = 0;
+            [records addObjectsFromArray:RDQueueWALDecodeLines(line, &lineBad)];
+            bad += lineBad;
+        } else {
+            bad++;
+        }
+        start = newline ? end + 1 : data.length;
+    }
+    if (discarded) *discarded = bad;
+    return records;
+}
+
+// Runs on the same serial I/O queue as append and compaction. Preserve a
+// complete final JSON record without LF by adding its delimiter; discard only
+// an invalid unterminated suffix. Never append a new record onto a torn one.
+static BOOL RDWALPrepareAppend(NSFileHandle *handle) {
+    unsigned long long end = [handle seekToEndOfFile];
+    if (!end) return YES;
+    unsigned long long cursor = end, tailStart = 0;
+    BOOL found = NO;
+    while (cursor && !found) {
+        NSUInteger length = (NSUInteger)MIN(cursor, 4096ULL);
+        unsigned long long offset = cursor - length;
+        [handle seekToFileOffset:offset];
+        NSData *chunk = [handle readDataOfLength:length];
+        if (chunk.length != length) return NO; // fail closed on a short/error read
+        const unsigned char *bytes = chunk.bytes;
+        for (NSUInteger i = chunk.length; i > 0; i--) {
+            if (bytes[i - 1] == '\n') {
+                tailStart = offset + i;
+                found = YES;
+                break;
+            }
+        }
+        cursor = offset;
+    }
+    if (tailStart == end) return YES;
+    [handle seekToFileOffset:tailStart];
+    NSData *tail = [handle readDataOfLength:(NSUInteger)(end - tailStart)];
+    if (tail.length != end - tailStart) return NO;
+    NSUInteger bad = 0;
+    NSArray *records = RDWALDecodeData(tail, &bad);
+    if (bad == 0 && records.count == 1) {
+        [handle seekToEndOfFile];
+        [handle writeData:[@"\n" dataUsingEncoding:NSUTF8StringEncoding]];
+    } else {
+        [handle truncateFileAtOffset:tailStart];
+    }
+    return YES;
 }
 
 static NSString *RDWALString(id value) {
@@ -140,13 +203,14 @@ BOOL RDQueueWALCompactionNeeded(NSUInteger lineCount, NSUInteger liveCount) {
     NSURL *url = self.fileURL;
     dispatch_async(self.ioQueue, ^{
         NSData *data = [[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
-        NSFileHandle *handle = [NSFileHandle fileHandleForWritingToURL:url error:nil];
-        if (!handle) {
+        NSFileHandle *handle = [NSFileHandle fileHandleForUpdatingURL:url error:nil];
+        if (!handle && ![[NSFileManager defaultManager] fileExistsAtPath:url.path]) {
             if (![[NSFileManager defaultManager] createFileAtPath:url.path contents:nil attributes:nil]) return;
-            handle = [NSFileHandle fileHandleForWritingToURL:url error:nil];
+            handle = [NSFileHandle fileHandleForUpdatingURL:url error:nil];
         }
         if (!handle) return;
         @try {
+            if (!RDWALPrepareAppend(handle)) return;
             [handle seekToEndOfFile];
             [handle writeData:data];
         } @catch (__unused NSException *e) {
@@ -190,21 +254,21 @@ BOOL RDQueueWALCompactionNeeded(NSUInteger lineCount, NSUInteger liveCount) {
     [self appendRecord:@{@"op": RDWALOpTerminal, @"id": identifier, @"state": @(state)}];
 }
 
-- (NSString *)readText {
-    NSString *text = [NSString stringWithContentsOfURL:self.fileURL encoding:NSUTF8StringEncoding error:nil];
-    return text ?: @"";
-}
-
 - (NSArray<NSDictionary *> *)recoveredItems {
-    NSUInteger discarded = 0;
-    return RDQueueWALReplay(RDQueueWALDecodeLines([self readText], &discarded));
+    __block NSArray<NSDictionary *> *items;
+    dispatch_sync(self.ioQueue, ^{
+        NSData *data = [NSData dataWithContentsOfURL:self.fileURL];
+        items = RDQueueWALReplay(RDWALDecodeData(data, NULL));
+    });
+    return items;
 }
 
 - (void)compactIfNeeded {
     dispatch_async(self.ioQueue, ^{
-        NSString *text = [NSString stringWithContentsOfURL:self.fileURL encoding:NSUTF8StringEncoding error:nil] ?: @"";
+        NSData *data = [NSData dataWithContentsOfURL:self.fileURL];
+        if (!data) return; // a read failure must never replace an existing log
         NSUInteger bad = 0;
-        NSArray<NSDictionary *> *records = RDQueueWALDecodeLines(text, &bad);
+        NSArray<NSDictionary *> *records = RDWALDecodeData(data, &bad);
         NSArray<NSDictionary *> *live = RDQueueWALReplay(records);
         if (!RDQueueWALCompactionNeeded(records.count, live.count) && bad == 0) return;
         NSMutableString *out = [NSMutableString string];

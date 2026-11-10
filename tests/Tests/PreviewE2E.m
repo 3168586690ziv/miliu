@@ -1,86 +1,128 @@
-// PreviewE2E.m — 预览播放端到端守卫（第 35 轮）
-// 与 RDPreviewController 的播放管线等价（同款 AVURLAsset options + 钉选环回语义），
-// 不依赖 GUI：预览窗口（RDPreviewWindow）为 AppKit 层，测试只验证网络与解码行为。
-// 断言：① 播放时间推进 ② 全部子请求带 Referer（server.log）③ 钉选后零请求其他档位
-//       ④ AES-128 加密流可播（解密成功）。
+// Real production controller, NSURLSession, loopback server and AVPlayer decoding.
+// Only window reception and the policy's fixed local fixture allowlist are replaced.
 #import <Foundation/Foundation.h>
 #import <AVFoundation/AVFoundation.h>
-
-static NSString *const kBase = @"http://127.0.0.1:%@";
-static int gPassed = 0, gFailed = 0;
+#import "RDPreviewController.h"
+#import "RDPreviewWindow.h"
+#import "DetectedMedia.h"
+#import "HTTPPrivacyPolicy.h"
+extern void RDPreviewTestUseLocalSessions(void);
+static int gPassed, gFailed;
+static AVPlayer *receivedPlayer;
+static NSString *playbackError;
+static NSString *fixturePort;
 static void Check(BOOL ok, NSString *msg) {
-    if (ok) { gPassed++; NSLog(@"PASS: %@", msg); }
-    else { gFailed++; NSLog(@"FAIL: %@", msg); }
+    if (ok) gPassed++; else gFailed++;
+    printf("%s: %s\n", ok ? "PASS" : "FAIL", msg.UTF8String);
 }
-
-// 与生产同款：AVURLAssetHTTPHeaderFieldsKey 注入来源页 Referer（Spike 实测作用于全部子请求）
-static NSString *Play(NSString *port, NSString *path, NSTimeInterval target) {
-    NSString *url = [NSString stringWithFormat:@"http://127.0.0.1:%@/%@", port, path];
-    AVURLAsset *a = [AVURLAsset URLAssetWithURL:[NSURL URLWithString:url]
-        options:@{@"AVURLAssetHTTPHeaderFieldsKey": @{@"Referer": @"http://127.0.0.1:8901/page.html"}}];
-    AVPlayerItem *item = [AVPlayerItem playerItemWithAsset:a];
-    AVPlayer *p = [AVPlayer playerWithPlayerItem:item];
-    [p play];
-    NSDate *dl = [NSDate dateWithTimeIntervalSinceNow:15];
-    while ([NSDate date].timeIntervalSince1970 < dl.timeIntervalSince1970) {
-        if (item.status == AVPlayerItemStatusFailed) return [NSString stringWithFormat:@"FAILED: %@", item.error.localizedDescription];
-        if (CMTimeGetSeconds(p.currentTime) >= target)
-            return [NSString stringWithFormat:@"OK %.2f", CMTimeGetSeconds(p.currentTime)];
-        usleep(100000);
+NSString *const RDPreviewWindowDidCloseNotification = @"RDPreviewWindowDidClose";
+@implementation RDPreviewWindow
++ (void)attachPlayer:(AVPlayer *)player title:(NSString *)title {
+    // The production controller calls this BEFORE play. Never create any window.
+    player.muted = YES;
+    receivedPlayer = player;
+}
++ (void)showError:(NSString *)message title:(NSString *)title { playbackError = message; }
++ (void)close {}
+@end
+@interface LocalDecision : NSObject
+@property(nonatomic) BOOL allowed;
+@property(nonatomic,copy) NSString *userMessage;
+@end
+@implementation LocalDecision
+@end
+@interface LocalFixturePolicy : NSObject
+- (id)evaluateTextURL:(NSString *)text;
+- (id)evaluateRedirect:(NSURL *)target fromURL:(NSURL *)current;
+@end
+@implementation LocalFixturePolicy
+- (id)evaluateTextURL:(NSString *)text {
+    NSURL *url = [NSURL URLWithString:text];
+    LocalDecision *d = [LocalDecision new];
+    d.allowed = [url.scheme isEqual:@"http"] && [url.host isEqual:@"127.0.0.1"] &&
+        [url.port.stringValue isEqual:fixturePort] && !url.user.length && !url.password.length;
+    d.userMessage = @"E2E permits only this run's fixed loopback fixture";
+    return d;
+}
+- (id)evaluateRedirect:(NSURL *)target fromURL:(NSURL *)current { return [self evaluateTextURL:target.absoluteString]; }
+@end
+static NSString *ReadLog(NSString *path) {
+    return [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil] ?: @"";
+}
+static int Count(NSString *text, NSString *needle) {
+    return (int)[text componentsSeparatedByString:needle].count - 1;
+}
+static void Pump(NSTimeInterval duration) {
+    NSDate *end = [NSDate dateWithTimeIntervalSinceNow:duration];
+    while (end.timeIntervalSinceNow > 0)
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:end];
+}
+static NSString *Play(NSString *path, BOOL pinned, NSString *logPath, NSString **delta) {
+    [RDPreviewController stopPreview]; receivedPlayer = nil; playbackError = nil;
+    Pump(0.2); // Drain old callbacks before this scenario's log boundary.
+    NSUInteger start = ReadLog(logPath).length;
+    NSString *base = [NSString stringWithFormat:@"http://127.0.0.1:%@/", fixturePort];
+    DetectedMedia *media = [DetectedMedia new];
+    media.title = path; media.format = [path hasSuffix:@"mp4"] ? @"mp4" : @"hls";
+    media.mediaURL = [base stringByAppendingString:path];
+    media.sourcePageURL = [base stringByAppendingString:@"page.html?private=FIXTURE_ONLY#fragment"];
+    if (pinned) {
+        media.parentMediaURL = [base stringByAppendingString:@"av-master.m3u8"];
+        media.declaredVariants = @[@{@"url":media.mediaURL}, @{@"url":[base stringByAppendingString:@"av480.m3u8"]}];
     }
-    return @"TIMEOUT";
-}
-
-static int CountInLog(NSString *logPath, NSString *needle) {
-    NSString *s = [NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:nil];
-    if (!s) return -1;
-    NSInteger n = 0;
-    NSRange r = NSMakeRange(0, s.length);
-    for (;;) {
-        NSRange f = [s rangeOfString:needle options:0 range:r];
-        if (f.location == NSNotFound) break;
-        n++;
-        r = NSMakeRange(NSMaxRange(f), s.length - NSMaxRange(f));
+    [RDPreviewController startPreviewForMedia:media policy:(id)[LocalFixturePolicy new]];
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:15];
+    NSString *result = @"TIMEOUT";
+    while (deadline.timeIntervalSinceNow > 0) {
+        if (playbackError.length) { result = [@"FAILED: " stringByAppendingString:playbackError]; break; }
+        if (receivedPlayer.currentItem.status == AVPlayerItemStatusFailed) {
+            result = [NSString stringWithFormat:@"FAILED: %@", receivedPlayer.currentItem.error]; break;
+        }
+        double time = receivedPlayer ? CMTimeGetSeconds(receivedPlayer.currentTime) : 0;
+        if (time >= 1.0) { result = [NSString stringWithFormat:@"OK %.2f", time]; break; }
+        Pump(0.05);
     }
-    return (int)n;
+    Check(receivedPlayer && receivedPlayer.muted, [path stringByAppendingString:@": real player muted before play"]);
+    if (pinned && receivedPlayer) {
+        NSURL *assetURL = [(AVURLAsset *)receivedPlayer.currentItem.asset URL];
+        Check([assetURL.host isEqual:@"127.0.0.1"] && ![assetURL.port.stringValue isEqual:fixturePort], @"pinned uses production random-port loopback, not fixture prewritten master");
+    }
+    [RDPreviewController stopPreview]; receivedPlayer = nil;
+    Pump(0.2);
+    NSString *whole = ReadLog(logPath);
+    *delta = whole.length >= start ? [whole substringFromIndex:start] : @"";
+    return result;
 }
-
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
-        NSString *port = argc > 1 ? @(argv[1]) : @"8911";
-        NSString *logPath = argc > 2 ? @(argv[2]) : nil;
-        __block int rc = 0;
-        // AVFoundation 加载依赖主 runloop（第 35 轮 Spike 实测教训）：
-        // 测试主体放后台队列编排，主线程 dispatch_main 保活。
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            NSLog(@"== 预览端到端（第 35 轮）==");
-
-            NSString *r1 = Play(port, @"direct.mp4", 1.0);
-            Check([r1 hasPrefix:@"OK"], [NSString stringWithFormat:@"直链 mp4 可播（%@）", r1]);
-
-            NSString *r2 = Play(port, @"av-master.m3u8", 1.0);
-            Check([r2 hasPrefix:@"OK"], [NSString stringWithFormat:@"明文双档 HLS master 可播（%@）", r2]);
-
-            NSString *r3 = Play(port, @"pinned-http.m3u8", 1.0);
-            Check([r3 hasPrefix:@"OK"], [NSString stringWithFormat:@"环回钉选 master 可播（%@）", r3]);
-
-            NSString *r4 = Play(port, @"av-enc.m3u8", 1.0);
-            Check([r4 hasPrefix:@"OK"], [NSString stringWithFormat:@"AES-128 加密 HLS 可播＝解密成功（%@）", r4]);
-
-            if (logPath) {
-                int refs = CountInLog(logPath, @"Referer=http://127.0.0.1:8901/page.html");
-                Check(refs > 0, [NSString stringWithFormat:@"服务器日志证实子请求带 Referer（%d 处）", refs]);
-                int seg480 = CountInLog(logPath, @"/avseg480");
-                int seg720 = CountInLog(logPath, @"/avseg720");
-                // pinned-http.m3u8 只引用 av720：钉选后其余档位零请求（本次运行段内）
-                Check(seg480 == 0, [NSString stringWithFormat:@"钉选后 480p 零请求（实际 %d）", seg480]);
-                Check(seg720 > 0, [NSString stringWithFormat:@"钉选后 720p 分片已拉取（%d 处）", seg720]);
+        if (argc != 3) return 2;
+        fixturePort = @(argv[1]); NSString *logPath = @(argv[2]);
+        [HTTPPrivacyPolicy setRefererModeOverride:@(HTTPRefererModeOrigin)];
+        RDPreviewTestUseLocalSessions();
+        NSArray *paths = @[@"direct.mp4", @"av-master.m3u8", @"av720.m3u8", @"av-enc.m3u8"];
+        NSArray *labels = @[@"direct mp4", @"adaptive two-variant HLS", @"production pinned HLS", @"AES-128 decrypted HLS"];
+        for (NSUInteger i = 0; i < paths.count; i++) {
+            NSString *delta = nil;
+            NSString *result = Play(paths[i], i == 2, logPath, &delta);
+            Check([result hasPrefix:@"OK"], [NSString stringWithFormat:@"%@ time advances (%@)", labels[i], result]);
+            NSString *origin = [NSString stringWithFormat:@"Referer=http://127.0.0.1:%@", fixturePort];
+            int requests = 0, valid = 0;
+            for (NSString *line in [delta componentsSeparatedByString:@"\n"]) {
+                if (![line containsString:@"HTTP: GET"]) continue;
+                requests++;
+                if ([line hasSuffix:origin]) valid++;
             }
-
-            NSLog(@"== 端到端结果：%d 过 / %d 挂 ==", gPassed, gFailed);
-            rc = gFailed ? 1 : 0;
-            dispatch_async(dispatch_get_main_queue(), ^{ exit(rc); });
-        });
-        dispatch_main();
+            Check(requests > 0 && valid == requests, [NSString stringWithFormat:@"%@: ALL %d requests have origin-only Referer (%d valid)", labels[i], requests, valid]);
+            Check(![delta containsString:@"private=FIXTURE_ONLY"], @"source path/query never leaks in Referer");
+            if (i == 2) {
+                Check(Count(delta, @"/avseg480") == 0, @"pinned scenario: 480p zero requests (isolated log delta)");
+                Check(Count(delta, @"/avseg720") > 0, @"pinned scenario: 720p segments fetched");
+                Check(Count(delta, @"/av480.m3u8") == 0, @"pinned scenario: other variant playlist zero requests");
+                Check(Count(delta, @"/av-master.m3u8") > 0, @"pinned scenario actually fetches production master");
+            }
+            if (i == 3) Check(Count(delta, @"/enc.key") > 0, @"AES-128 scenario actually fetched key");
+        }
+        printf("REAL_CONTROLLER_AVPLAYER_E2E passed=%d failed=%d NO_WINDOWS=YES MUTED=YES\n", gPassed, gFailed);
+        return gFailed ? 1 : 0;
     }
 }

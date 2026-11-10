@@ -20,6 +20,20 @@
 #import "URLPolicy.h"
 
 static int gPassed = 0, gFailed = 0;
+static NSUInteger gNetworkAttempts = 0;
+@interface MetadataNoNetworkProtocol : NSURLProtocol
+@end
+@implementation MetadataNoNetworkProtocol
++ (BOOL)canInitWithRequest:(NSURLRequest *)request {
+    return [@[@"http", @"https"] containsObject:request.URL.scheme.lowercaseString];
+}
++ (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request { return request; }
+- (void)startLoading {
+    @synchronized (MetadataNoNetworkProtocol.class) { gNetworkAttempts++; }
+    [self.client URLProtocol:self didFailWithError:[NSError errorWithDomain:@"MetadataFixtureNoNetwork" code:1 userInfo:nil]];
+}
+- (void)stopLoading {}
+@end
 static void Check(BOOL ok, NSString *msg) {
     if (ok) { gPassed++; NSLog(@"PASS: %@", msg); }
     else { gFailed++; NSLog(@"FAIL: %@", msg); }
@@ -34,8 +48,9 @@ static DetectedMedia *Media(NSString *sourcePage, NSString *title, NSString *pos
     return m;
 }
 
-int main(void) {
+int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        [NSURLProtocol registerClass:MetadataNoNetworkProtocol.class];
         // 独立 suite：测试绝不触碰真实用户偏好
         NSString *suiteName = [NSString stringWithFormat:@"rd-metadata-recovery-tests-%d", getpid()];
         NSUserDefaults *isolated = [[NSUserDefaults alloc] initWithSuiteName:suiteName];
@@ -44,6 +59,17 @@ int main(void) {
 
         RDMetadataRecoveryCoordinator *c =
             [[RDMetadataRecoveryCoordinator alloc] initWithPolicy:nil reprobeHandler:nil preferences:prefs];
+
+        if (argc > 1 && strcmp(argv[1], "--translation-permission") == 0) {
+            const char *value = getenv("RD_TITLE_TRANSLATION_NETWORK");
+            BOOL expected = value && strcmp(value, "1") == 0;
+            ResourceTitleTranslator *translator = [c valueForKey:@"translator"];
+            Check([[translator valueForKey:@"allowsNetworkTranslation"] boolValue] == expected,
+                  @"协调器仅精确环境值1允许网络翻译（不创建请求）");
+            [c cancelAll];
+            [isolated removePersistentDomainForName:suiteName];
+            return gFailed == 0 ? 0 : 1;
+        }
 
         // ── ① 探测结果落地 → 按来源页记录（存储组件被真正调用）──
         DetectedMedia *m = Media(@"https://site.example/work/407460", @"Some English Title", @"https://cdn.example/407460h.jpg");
@@ -82,6 +108,26 @@ int main(void) {
         [c resolvedTitleFor:@"" completion:^(NSString *t){ out = t; }];
         Check(out != nil && out.length == 0, @"空标题返回空串且不崩");
 
+        out = @"<未回调>";
+        __block NSUInteger localCallbacks = 0;
+        [c resolvedTitleFor:@"Xylophone Quasar" completion:^(NSString *t){
+            localCallbacks++;
+            out = t;
+            Check(NSThread.isMainThread, @"本地未命中协调器回调位于主线程");
+        }];
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:0.2];
+        while (deadline.timeIntervalSinceNow > 0)
+            [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:deadline];
+        Check(localCallbacks == 1 && [out isEqualToString:@"Xylophone Quasar"],
+              @"本地未命中保持原题且只完成一次");
+        Check(c.translatedTitleCount == 0, @"原题回退不伪增翻译计数");
+        [c resolvedTitleFor:@"girl story" completion:^(NSString *t){ out = t; }];
+        deadline = [NSDate dateWithTimeIntervalSinceNow:0.2];
+        while (deadline.timeIntervalSinceNow > 0)
+            [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:deadline];
+        Check([out isEqualToString:@"女孩故事"] && c.translatedTitleCount == 1,
+              @"协调器使用本地译文并正确计数");
+
         // ── ④ 持久化往返（重启后仍能回补）──
         [c persist];
         RDMetadataRecoveryCoordinator *c2 =
@@ -95,7 +141,10 @@ int main(void) {
 
         // ── ⑤ 封面恢复确实被发起（恢复引擎组件被真正调用）──
         NSUInteger attemptsBefore = c.coverRecoveryAttemptCount;
-        [c recoverCoverForMedia:m completion:^(NSImage *img){ (void)img; }];
+        // Count the real recovery entry without a poster fetch. The original
+        // m has a remote poster for storage tests, so it is not a no-network fixture.
+        DetectedMedia *coverFixture = Media(@"https://site.example/no-poster", @"Local Fixture", nil);
+        [c recoverCoverForMedia:coverFixture completion:^(NSImage *img){ (void)img; }];
         Check(c.coverRecoveryAttemptCount == attemptsBefore + 1, @"封面恢复尝试被计数（引擎确实被调用）");
         [c recoverCoverForMedia:nil completion:^(NSImage *img){ (void)img; }];
         Check(c.coverRecoveryAttemptCount == attemptsBefore + 1, @"nil 媒体不发起恢复");
@@ -129,6 +178,9 @@ int main(void) {
         [c2 cancelAll];
         Check(YES, @"cancelAll 不崩");
 
+        @synchronized (MetadataNoNetworkProtocol.class) {
+            Check(gNetworkAttempts == 0, @"全套元数据夹具未尝试任何HTTP网络请求");
+        }
         // 清理独立 suite
         [isolated removePersistentDomainForName:suiteName];
 

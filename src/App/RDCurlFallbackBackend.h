@@ -11,6 +11,9 @@
 //    · error 存在且无 response（连接层失败/被晾）且 error 属 NSURLSession 传输域；
 //    · 写盘成功但 statusCode == 403（CF「Sorry, you have been blocked」拦截页体）。
 //  curl 也没能改善时，原样保留原生结果（含原生已写盘的文件，绝不删错）。
+//  Cookie / Authorization / Proxy-Authorization（含空值）或内存 native-only
+//  上下文标记的请求只走原生；请求和要求在接受时快照，失败不降级匿名 curl。
+//  标记接口见 Shared/RDNativeOnlyRequest.h，不通过 HTTP 头外发。
 //
 //  放在 App 层：只有正式构建编译本文件；DownloadManager 经运行时查类包装，
 //  测试套件单独链接时自动退化为纯原生后端。

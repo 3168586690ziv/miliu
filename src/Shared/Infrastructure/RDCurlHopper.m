@@ -3,6 +3,8 @@
 //
 
 #import "RDCurlHopper.h"
+#import "HTTPPrivacyPolicy.h"
+#import "RDNativeOnlyRequest.h"
 #import "DNSResolver.h"
 #import "RDLog.h"
 #import "URLPolicy.h"
@@ -127,13 +129,19 @@ static NSError *RDCurlHopMakeError(RDCurlHopError code) {
      bodyToFile:(BOOL)bodyToFile
      completion:(void (^)(RDCurlHopResult *))completion {
     NSAssert(method.length, @"method required");
-    [self hopWithURL:url method:method headers:headers ?: @{} budget:budget
-            deadline:deadline hop:0 previousURL:nil bodyToFile:bodyToFile completion:completion];
+    // Authenticated curl is unsupported: reject before DNS, artifact creation or
+    // runner/argv construction. Empty and case-varied auth fields still count.
+    if (RDHeadersContainAuthentication(headers ?: @{})) {
+        completion([self unresolvedResult]);
+        return;
+    }
+    [self hopWithURL:url method:method headers:[headers copy] ?: @{} budget:budget
+            deadline:deadline hop:0 previousRequest:nil bodyToFile:bodyToFile completion:completion];
 }
 
 // 逐跳执行；每个出口路径都必须调用 completion。
 - (void)hopWithURL:(NSURL *)url method:(NSString *)method headers:(NSDictionary *)headers budget:(NSUInteger)budget
-          deadline:(CFAbsoluteTime)deadline hop:(NSUInteger)hop previousURL:(nullable NSURL *)previousURL
+          deadline:(CFAbsoluteTime)deadline hop:(NSUInteger)hop previousRequest:(nullable NSURLRequest *)previous
         bodyToFile:(BOOL)bodyToFile completion:(void (^)(RDCurlHopResult *))completion {
     [_lock lock];
     BOOL cancelled = _cancelled;
@@ -145,12 +153,19 @@ static NSError *RDCurlHopMakeError(RDCurlHopError code) {
 
     // 每一跳（含首跳）都重查策略：封死"原生阶段 DNS busy / 目标未校验也借道 curl"的旁路。
     NSError *policyError = nil;
-    if (![self validateHopURL:url redirectFrom:previousURL error:&policyError]) {
+    if (![self validateHopURL:url redirectFrom:previous.URL error:&policyError]) {
         RDCurlHopResult *result = [RDCurlHopResult new];
         result.error = policyError;
         completion(result);
         return;
     }
+
+    NSMutableURLRequest *effective = [NSMutableURLRequest requestWithURL:url];
+    effective.HTTPMethod = method;
+    effective.allHTTPHeaderFields = headers;
+    if (previous) [HTTPPrivacyPolicy sanitizeRedirectRequest:effective fromRequest:previous];
+    else [HTTPPrivacyPolicy sanitizeMediaRequest:effective];
+    headers = effective.allHTTPHeaderFields ?: @{};
 
     NSString *stamp = NSUUID.UUID.UUIDString;
     NSString *headerFile = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"rd-curl-%@.headers", stamp]];
@@ -243,8 +258,10 @@ static NSError *RDCurlHopMakeError(RDCurlHopError code) {
             return;
         }
         RDLogWrite(self.logComponent, @"curl 跳 host=%@ status=%ld → 校验下一跳", url.host ?: @"-", (long)status);
-        [self hopWithURL:target method:method headers:headers budget:budget deadline:deadline
-                      hop:hop + 1 previousURL:url bodyToFile:bodyToFile completion:completion];
+        // Only carry this hop's effective headers. A cross-origin FullPath
+        // strip is irreversible even if a later Location returns to the source.
+        [self hopWithURL:target method:method headers:effective.allHTTPHeaderFields ?: @{} budget:budget deadline:deadline
+                      hop:hop + 1 previousRequest:effective bodyToFile:bodyToFile completion:completion];
         return;
     }
 
